@@ -1,0 +1,123 @@
+"""Coordinator: runs the vendored cloud backend and pushes frames into HA.
+
+The backend streams telemetry on its own daemon thread and invokes our
+callbacks from there. Home Assistant is single-threaded asyncio, so every
+callback is marshaled onto the event loop with `call_soon_threadsafe`. Readings
+arrive at ~1-2 frames/sec with ~90 readings per frame, so we buffer them and
+coalesce into a single `async_set_updated_data` per loop iteration.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from collections.abc import Callable
+from pathlib import Path
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from .const import DOMAIN
+from .span_client.backend import CloudBackend
+from .span_client.models import PanelSchema, PropertySpec, Reading
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
+    """Owns the streaming backend and the latest reading per property key."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        *,
+        token_path: Path,
+        device_uuid: str,
+        user_id: str | None,
+        serial: str | None,
+    ) -> None:
+        # No update_interval: this is push, not poll.
+        super().__init__(
+            hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry
+        )
+        self.entry = entry
+        self.schema: PanelSchema | None = None
+
+        self._backend = CloudBackend(
+            token_path,
+            device_uuid,
+            user_id=user_id,
+            serial=serial,
+        )
+        self._buffer: dict[str, Reading] = {}
+        self._buffer_lock = threading.Lock()
+        self._flush_scheduled = False
+        self._known_keys: set[str] = set()
+        self._entity_adder: Callable[[list[PropertySpec]], None] | None = None
+
+    # --- lifecycle ---------------------------------------------------------
+
+    async def async_start(self) -> None:
+        """Start the backend thread. Non-blocking; frames arrive shortly after."""
+        self.data = {}
+        self._backend.start(self._on_schema, self._on_reading)
+
+    async def async_shutdown(self) -> None:
+        await super().async_shutdown()
+        await self.hass.async_add_executor_job(self._backend.stop)
+
+    # --- entity registration ----------------------------------------------
+
+    @callback
+    def register_entity_adder(
+        self, adder: Callable[[list[PropertySpec]], None]
+    ) -> None:
+        """Let the sensor platform create entities as the schema arrives."""
+        self._entity_adder = adder
+        if self.schema is not None:
+            self._emit_new_specs(self.schema)
+
+    # --- backend callbacks (run on the backend's thread) -------------------
+
+    def _on_schema(self, schema: PanelSchema) -> None:
+        self.hass.loop.call_soon_threadsafe(self._apply_schema, schema)
+
+    def _on_reading(self, reading: Reading) -> None:
+        with self._buffer_lock:
+            self._buffer[reading.key] = reading
+            if not self._flush_scheduled:
+                self._flush_scheduled = True
+                self.hass.loop.call_soon_threadsafe(self._flush)
+
+    # --- loop-thread appliers ---------------------------------------------
+
+    @callback
+    def _apply_schema(self, schema: PanelSchema) -> None:
+        self.schema = schema
+        self._emit_new_specs(schema)
+
+    @callback
+    def _emit_new_specs(self, schema: PanelSchema) -> None:
+        if self._entity_adder is None:
+            return
+        new = [
+            spec
+            for key, spec in schema.properties.items()
+            if key not in self._known_keys
+        ]
+        if not new:
+            return
+        self._known_keys.update(spec.key for spec in new)
+        self._entity_adder(new)
+
+    @callback
+    def _flush(self) -> None:
+        with self._buffer_lock:
+            batch = self._buffer
+            self._buffer = {}
+            self._flush_scheduled = False
+        data = dict(self.data or {})
+        data.update(batch)
+        self.async_set_updated_data(data)

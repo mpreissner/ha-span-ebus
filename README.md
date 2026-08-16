@@ -1,51 +1,44 @@
-# span-bridge
+# ha-span-ebus
 
-Bridges a **SPAN Panel MAIN 40 (Gen3)** into Home Assistant by subscribing to the
-panel's own local MQTT broker (the SPAN "Electrification Bus", Homie 5) and
-republishing it to your Home Assistant broker using MQTT Discovery.
+Live per-circuit data from a **SPAN Panel MAIN 40 (Gen3)** in Home Assistant.
 
-> **History:** this started as `ha-spancloud`, on the assumption that a MAIN 40
-> has no local API and would need cloud scraping. That turned out to be wrong —
-> see [docs/FINDINGS.md](docs/FINDINGS.md) — and the project was renamed to match
-> what it actually does. Everything here is local: no cloud, no Android emulator.
+Two delivery paths share one normalized data model, so entities are identical
+whichever is used:
 
-## Why a bridge rather than pointing HA at the panel directly
+1. **HACS custom integration** (`custom_components/span_ebus`) — runs inside HA
+   and streams live telemetry from SPAN's cloud (Cognito → gRPC → Ably SSE).
+   This is the path that works **today**, while the panel's local API is not yet
+   enabled. Live-validated end to end (see [docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md)).
+2. **`span-bridge` daemon** (`src/span_bridge`) — subscribes to the panel's own
+   local MQTT broker (the SPAN "Electrification Bus", Homie 5) and republishes to
+   your HA broker via MQTT Discovery. Ready for when SPAN enables the MAIN 40
+   local API (~H2 2026); the broker is healthy but its credential-issuing REST
+   tier is still dormant (see [docs/FINDINGS.md](docs/FINDINGS.md)).
 
-Home Assistant's MQTT integration binds to one broker and does not speak Homie 5.
-This daemon connects to the panel broker over TLS, translates the Homie topic
-tree into HA Discovery configs, and republishes onto your existing broker. Your
-entity IDs, history, and dashboards then live on infrastructure you control, and
-the panel becomes a swappable data source.
+## Install (HACS integration — recommended)
 
-## Status
+1. In HACS, add this repository as a **custom repository** (category:
+   Integration), or install it if listed.
+2. **Restart Home Assistant.**
+3. **Settings → Devices & Services → Add Integration → “SPAN Panel (eBus)”.**
+4. Sign in with your SPAN account email and password.
 
-**Blocked on one physical step.** All REST endpoints on the panel currently
-return `502`; the API backend is not running. It is very likely gated behind
-proof-of-proximity.
+Your password is used **once**, locally, to compute the Cognito SRP proof and
+obtain access tokens; it is never stored. Only the resulting tokens are kept
+(auto-refreshing), and a re-auth prompt appears if they ever fully expire.
 
-**Do this:** press the SPAN panel door switch **3 times**, then within 15 minutes:
+You get one device per panel with a sensor for each circuit's power (plus
+current / voltage / site flows where reported), updated at ~1–2 Hz.
 
-```bash
-./tools/probe_panel.sh 10.100.6.21
-```
+---
 
-If `/api/v2/certificate/ca` returns `200` instead of `502`, the hypothesis holds
-and the rest of the pipeline can be wired up:
+## The `span-bridge` daemon (local MQTT path)
 
-```bash
-span-bridge auth --host 10.100.6.21     # fetch CA + register, cache credentials
-span-bridge discover                     # dump the panel's $description schema
-span-bridge run                          # start the bridge
-```
+The rest of this README covers the daemon, which targets the panel's local
+broker directly. It is the future local path; the cloud integration above is
+what to use now.
 
-If it still returns `502` after the door-switch sequence, the alternative is to
-read `hopPassphrase` out of the SPAN Home mobile app and pass it directly:
-
-```bash
-span-bridge auth --host 10.100.6.21 --passphrase <hopPassphrase>
-```
-
-## Architecture
+### Architecture
 
 ```
                   ┌────────────────────────────────────┐
@@ -68,9 +61,9 @@ Backends are pluggable behind the `Backend` protocol in
 
 | Backend | Status | Use |
 |---|---|---|
-| `ebus` | primary | Official local MQTT. Target this. |
+| `ebus` | primary (local) | Official local MQTT. Target once the panel API is enabled. |
 | `grpc_legacy` | stub | Gen3 gRPC on :50065. Dead on firmware ≥ 7.2.0 / r202627. |
-| `cloud` | stub | Last resort. Not implemented, and hopefully never needs to be. |
+| `cloud` | live | Cognito → gRPC → Ably SSE. Powers the HACS integration today. |
 
 ## Install
 

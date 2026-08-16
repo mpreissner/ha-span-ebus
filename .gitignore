@@ -14,3 +14,9 @@ build/
 *.crt
 *.pem
 span-ca-certs/
+
+# Runtime token caches (local + HA config dir).
+.span_ebus/
+.span-cloud.json
+span_at.txt
+span_id.txt
