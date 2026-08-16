@@ -174,16 +174,57 @@ def cmd_discover(args) -> int:
     return 0
 
 
-def cmd_run(args) -> int:
-    """Start the bridge."""
-    settings = Settings.from_env()
-    _setup_logging(settings.log_level)
+def cmd_cloud_login(args) -> int:
+    """Authenticate against SPAN's cloud (Cognito) and cache the tokens.
+
+    The password is read interactively and used only to compute the SRP proof;
+    it is never stored, logged, or transmitted. Only the resulting tokens (a
+    long-lived refresh token plus a short-lived access token) are written to the
+    token store, 0600.
+    """
+    import getpass
+
+    from . import cloud_auth
+
+    username = args.username or input("SPAN account email: ").strip()
+    password = getpass.getpass("SPAN password: ")
+
+    try:
+        tokens = cloud_auth.authenticate(username, password)
+    except cloud_auth.CloudAuthError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        del password  # drop the plaintext as soon as the proof is computed
+
+    cloud_auth.save_tokens(args.token_store, tokens)
+    print(f"Logged in as {username}")
+    print(f"  tokens stored at {args.token_store}")
+    print("\nNext:  set SPAN_BACKEND=cloud (and SPAN_CLOUD_DEVICE_UUID) and run 'span-bridge run'")
+    return 0
+
+
+def _build_backend(settings):
+    """Instantiate the configured backend (local ebus or SPAN cloud)."""
+    if settings.backend == "cloud":
+        cloud = settings.cloud
+        if not cloud.device_uuid:
+            raise SystemExit(
+                "SPAN_CLOUD_DEVICE_UUID is required for the cloud backend "
+                "(the client id the Ably channel is bound to)"
+            )
+        backend = load_backend(
+            "cloud",
+            token_store=cloud.token_store,
+            device_uuid=cloud.device_uuid,
+            user_id=cloud.user_id,
+            serial=cloud.serial,
+        )
+        return backend, cloud.serial or "span-cloud"
 
     creds = auth_mod.load_credentials(settings.panel.auth_file, settings.panel.serial)
     if not creds:
-        print("error: no cached credentials; run 'span-bridge auth' first", file=sys.stderr)
-        return 1
-
+        raise SystemExit("no cached credentials; run 'span-bridge auth' first")
     panel = PanelConfig(
         host=settings.panel.host,
         serial=creds.serial,
@@ -191,8 +232,22 @@ def cmd_run(args) -> int:
         ca_cert_dir=settings.panel.ca_cert_dir,
     )
     backend = load_backend("ebus", credentials=creds, ca_cert_path=panel.ca_cert_path)
+    return backend, creds.serial
 
-    Bridge(settings, backend, creds.serial).run()
+
+def cmd_run(args) -> int:
+    """Start the bridge."""
+    settings = Settings.from_env()
+    _setup_logging(settings.log_level)
+
+    try:
+        backend, serial = _build_backend(settings)
+    except SystemExit as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    log.info("starting bridge with %s backend", backend.name)
+    Bridge(settings, backend, serial).run()
     return 0
 
 
@@ -230,6 +285,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=20.0)
     p.add_argument("--json", action="store_true", help="emit JSON instead of a tree")
     p.set_defaults(func=cmd_discover)
+
+    p = sub.add_parser("cloud-login", help="authenticate against SPAN's cloud and cache tokens")
+    p.add_argument("--username", help="SPAN account email (prompted if omitted)")
+    p.add_argument(
+        "--token-store",
+        type=Path,
+        default=Path.home() / ".span-cloud.json",
+        help="where to cache the cloud tokens (default ~/.span-cloud.json)",
+    )
+    p.set_defaults(func=cmd_cloud_login)
 
     p = sub.add_parser("run", help="start the bridge (configured via environment)")
     p.set_defaults(func=cmd_run)

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import stat
 import time
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from pathlib import Path
 
 import requests
 
+from . import tls
 from .config import PanelConfig
 
 log = logging.getLogger(__name__)
@@ -80,17 +82,77 @@ class Credentials:
             raise AuthError(f"register response missing field {exc}") from exc
 
 
+def fetch_ca_from_broker(panel: PanelConfig, serial: str) -> Path:
+    """Recover the panel CA from the broker's TLS handshake, without REST.
+
+    The broker on :8883 presents its whole chain — leaf plus the per-device CA
+    that signed it — so the CA can be read straight off the wire. This matters
+    because the REST tier and the broker fail independently: on a panel whose
+    REST tier is down (502 on every `/api/*` route) the broker can still be
+    perfectly healthy, and then this is the only way to obtain the CA.
+
+    Candidates are accepted only if a full *verified* handshake then succeeds
+    using them, which proves the certificate actually signed what the broker
+    presented. That is a stronger check than matching the subject name, and it
+    is what makes reading the chain over an unverified connection safe: a
+    forged CA injected by a man in the middle could carry any name it liked,
+    but it could not also make the real broker's certificate verify against it.
+    """
+    host, port = panel.host, panel.mqtt_port
+    log.info("recovering CA from the broker TLS handshake at %s:%d", host, port)
+
+    try:
+        chain = tls.peer_chain_pem(host, port, timeout=REGISTER_TIMEOUT)
+    except (OSError, ssl.SSLError) as exc:
+        raise AuthError(f"could not reach the panel broker at {host}:{port}: {exc}") from exc
+
+    if not chain:
+        raise AuthError(f"broker at {host}:{port} presented no certificate chain")
+
+    panel.ca_cert_dir.mkdir(parents=True, exist_ok=True)
+    path = panel.ca_cert_dir / f"{serial}.crt"
+
+    # The issuer is normally last, so search from the end.
+    for pem in reversed(chain):
+        candidate = path.with_suffix(".candidate")
+        candidate.write_text(pem)
+        if tls.verifies_peer(candidate, host, port, timeout=REGISTER_TIMEOUT):
+            candidate.replace(path)
+            log.info("recovered CA certificate to %s", path)
+            return path
+        candidate.unlink(missing_ok=True)
+
+    raise AuthError(
+        f"broker at {host}:{port} presented {len(chain)} certificate(s), none of "
+        "which verify it — the panel may have re-issued its CA mid-connection"
+    )
+
+
 def fetch_ca_certificate(panel: PanelConfig, serial: str) -> Path:
-    """Download and cache the panel's CA certificate. Returns its path."""
+    """Obtain and cache the panel's CA certificate. Returns its path.
+
+    REST is tried first because it is the documented route, with a fallback to
+    the broker handshake when the REST tier is down. A 5xx here is not a
+    transient error worth retrying — it means nginx has no live upstream — so
+    the fallback runs immediately rather than after a delay.
+    """
     url = f"{panel.rest_base}/api/v2/certificate/ca"
     log.info("fetching CA certificate from %s", url)
 
-    resp = requests.get(url, timeout=REGISTER_TIMEOUT)
-    if resp.status_code == 502:
-        raise AuthError(
-            "panel returned 502 — the REST API backend is not running. "
-            "Press the panel door switch 3 times and retry within 15 minutes."
+    try:
+        resp = requests.get(url, timeout=REGISTER_TIMEOUT)
+    except requests.RequestException as exc:
+        log.warning("panel REST unreachable (%s); trying the broker handshake", exc)
+        return fetch_ca_from_broker(panel, serial)
+
+    if resp.status_code >= 500:
+        log.warning(
+            "panel REST returned %d — the API tier is down; "
+            "recovering the CA from the broker instead",
+            resp.status_code,
         )
+        return fetch_ca_from_broker(panel, serial)
+
     resp.raise_for_status()
 
     if "BEGIN CERTIFICATE" not in resp.text:

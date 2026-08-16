@@ -1,0 +1,3684 @@
+# SPAN cloud protobuf schema — recovered from the Android app (Hermes v96,
+# protobuf-es v1) via tools/extract_proto.py. 771 messages. See docs/CLOUD-PROTO.md.
+# Format:  <fully.qualified.MessageType>
+#            <field#>: <name> = <scalar-type | message | enum | map>  (oneof=<group>)
+# Scalar types are protobuf-es ScalarType codes mapped to names; SPAN field names
+# carry units (e.g. real_power_milliwatts). message/enum field TARGET types are not
+# in the static metadata (lazy closures) — resolve structurally against real frames.
+# This file contains schema only (no credentials, no captured data).
+
+io.span.panel.services.localapi.ConnectToWifiRequest
+  1: configuration = message
+
+io.span.panel.services.localapi.GetWifiStateResponse
+  1: interface = message
+  2: active_ap = message
+
+io.span.panel.services.localapi.ScanAccessPointResponse
+  1: access_points = message
+
+io.span.services.common.AssemblyMetadata
+  1: metered_component = message
+
+io.span.services.common.BasicMeasurement
+  1: import_kilowatt_hours = double
+  2: export_kilowatt_hours = double
+  3: grid_pct = double
+  4: battery_pct = double
+  5: solar_pct = double
+
+io.span.services.common.MaxInstanceRecord
+  1: trait_metadata = message
+  2: max_instance_id = uint32
+
+io.span.services.common.Measurement
+  1: start_time = message
+  2: end_time = message
+  3: basic = message  (oneof=measurement)
+  4: site = message  (oneof=measurement)
+  5: soe = message  (oneof=measurement)
+  6: count = uint32
+  7: resolution_level = enum
+  8: first_data_time = message
+  9: last_data_time = message
+
+io.span.services.common.MetricInstanceMetadata
+  1: trait_metadata = message
+  2: instance_id = message
+  3: metric_id = uint32
+
+io.span.services.common.PanelAuxPortMeteredComponent
+  1: panel_aux_ct_ports = enum
+  2: calibration_type = enum
+
+io.span.services.common.PartMetadata
+  1: purchaser_info = message
+  2: virtual_service_info = message
+  3: wifi_ap_password_barcode_incident = message
+
+io.span.services.common.PhysicalPart
+  1: part_uid = string
+  2: part_type = enum
+  3: part_kind = enum
+  4: hardware_info = message
+  5: factory_description = string
+  6: part_metadata = message
+  7: resource_id = message
+  8: children = message
+  9: assembly_metadata = message
+  10: link_start = message
+  11: link_start_reason = enum
+  12: link_stop = message
+  13: link_stop_reason = enum
+
+io.span.services.common.PurchaserInfo
+  1: purchaser_org_id = string
+
+io.span.services.common.Resource
+  1: resource_type = enum
+  2: resource_id = string
+  3: owner_id = string
+  4: operational_certificate = bytes
+  5: description_trait_info = message
+  6: site_id = string
+  7: resource_kind = enum
+  8: part_uid = string
+
+io.span.services.common.ResourceHistoryAggregation
+  1: resource_id = message
+  2: aggregations = message
+
+io.span.services.common.ResourceIdWithMetricIdentifier
+  1: resource_id = message
+  2: metrics_identifiers = message
+
+io.span.services.common.ResourceIdWithTraitMetadata
+  1: resource_id = message
+  2: trait_metadata = message
+
+io.span.services.common.ResourceMetrics
+  1: resource_id = message
+  2: trait_metrics = message
+
+io.span.services.common.ResourceTraits
+  1: resource_id = message
+  2: trait_instances = message
+  3: resource = message
+  4: max_instance_records = message
+
+io.span.services.common.SOEMeasurement
+  1: avg_battery_pct = double
+  2: max_battery_pct = double
+  3: min_battery_pct = double
+
+io.span.services.common.SiteMeasurement
+  1: grid_import_kilowatt_hours = double
+  2: grid_export_kilowatt_hours = double
+  3: home_import_kilowatt_hours = double
+  4: home_export_kilowatt_hours = double
+  5: battery_import_kilowatt_hours = double
+  6: battery_export_kilowatt_hours = double
+  7: solar_to_grid_kilowatt_hours = double
+  8: solar_to_home_kilowatt_hours = double
+  9: solar_to_battery_kilowatt_hours = double
+  10: battery_to_home_kilowatt_hours = double
+  11: grid_to_home_kilowatt_hours = double
+
+io.span.services.common.SiteMetadata
+  1: site_id = string
+  2: name = string
+  5: postal_address = message
+
+io.span.services.common.SiteWithUserMembership
+  1: site = message
+  2: is_member = bool
+  3: created_at = message
+  4: accepted_invite_at = message
+  5: site_claimed_at = message
+
+io.span.services.common.TimeWindow
+  1: start_time = message
+  2: end_time = message
+  3: resolution_level = enum
+  4: time_zone = string
+
+io.span.services.common.TraitHistoryAggregation
+  1: metric_identifier = message
+  2: measurements = message
+  3: summary = message
+
+io.span.services.common.TraitInstanceMetadata
+  1: instance_metadata = message
+  2: trait_metadata = message
+
+io.span.services.common.TraitInstanceStateRevision
+  1: trait_metadata = message
+  2: instance_id = message
+  3: state_revision = message
+
+io.span.services.common.TraitMetric
+  1: metric_metadata = message
+  2: metric = bytes
+
+io.span.services.common.TraitsToRebuild
+  1: trait_metadata = message
+  2: instances = message
+
+io.span.services.common.UserMetadata
+  1: user_id = string
+  2: email = string
+  3: full_name = string
+  4: is_homeowner = bool
+  5: is_installer = bool
+
+io.span.services.common.UserWithSiteMembership
+  1: user = message
+  2: is_member = bool
+  3: created_at = message
+  4: accepted_invite_at = message
+  5: site_claimed_at = message
+
+io.span.services.common.VirtualServiceInfo
+  1: site_id = string
+  2: resource_id = string
+  3: pool_id = string
+  4: component_key = string
+
+io.span.services.common.WifiApPasswordBarcodeIncidentInfo
+  1: password_corrected = bool
+  2: remediated_at = message
+
+io.span.services.common_dispatch.ApiConnectErrorFaultWrapper
+  1: api_connect_error_fault = message
+  2: api_name = string
+
+io.span.services.common_dispatch.ApiNotConnectedFaultWrapper
+  1: api_not_connected_fault = message
+  2: api_name = string
+
+io.span.services.common_dispatch.BreakerDetails
+  1: circuit_breaker = message
+
+io.span.services.common_dispatch.ControlInfo
+  1: component = enum
+
+io.span.services.common_dispatch.DestinationParameters
+  1: powerup_event_info = message
+  2: hardware_info = message
+  3: control_info = message
+  4: breaker_details = message
+  5: stats_home_usage = message
+
+io.span.services.common_dispatch.DriveEventUpdate
+  1: type = enum
+
+io.span.services.common_dispatch.FaultDispatch
+  1: type = enum
+  2: metadata = message
+  3: source = message
+  6: panel_unconfigured_ct_power = message  (oneof=payload)
+  7: api_not_connected_fault = message  (oneof=payload)
+  8: mains_module_power_supply_fault = message  (oneof=payload)
+  9: gateway_disconnect_fault = message  (oneof=payload)
+  10: invalid_feeder_measurements = message  (oneof=payload)
+  11: load_detected_unconfigured_breakers = message  (oneof=payload)
+  12: source_detected_unconfigured_breakers = message  (oneof=payload)
+  13: power_detected_unconfigured_ftl = message  (oneof=payload)
+  14: no_power_detected_ftl = message  (oneof=payload)
+  15: power_sign_mismatch_ftl = message  (oneof=payload)
+  16: module_not_connected = message  (oneof=payload)
+  17: pcm_not_grounded = message  (oneof=payload)
+  18: power_supply_fault = message  (oneof=payload)
+  19: pcm_not_connected = message  (oneof=payload)
+  20: drive_charging_fault = message  (oneof=payload)
+  21: api_connect_error_fault = message  (oneof=payload)
+  22: non_zero_power_balance = message  (oneof=payload)
+  23: gateway_heartbeat_not_detected = message  (oneof=payload)
+  24: panel_aux_ct_invalid = message  (oneof=payload)
+
+io.span.services.common_dispatch.FaultTypeOptions
+  1: category_group = enum
+
+io.span.services.common_dispatch.HardwareInfo
+  1: hardware = message
+
+io.span.services.common_dispatch.InsightDispatch
+  1: type = enum
+  2: fridge_anomaly_high_use = message  (oneof=payload)
+  3: fridge_anomaly_low_use = message  (oneof=payload)
+  4: oven_anomaly = message  (oneof=payload)
+  5: ev_charging_on_peak = message  (oneof=payload)
+  7: dryer_on_peak = message  (oneof=payload)
+  8: exported_solar = message  (oneof=payload)
+  9: phantom_load = message  (oneof=payload)
+  10: vacation_mode = message  (oneof=payload)
+
+io.span.services.common_dispatch.InsightTypeOptions
+  1: category_group = enum
+  2: parent_type = enum
+
+io.span.services.common_dispatch.LinkPath
+  1: site_id = string
+  2: destination_key = enum
+  3: destination_parameters = message
+  4: title = string
+
+io.span.services.common_dispatch.ManualBreakerEvent
+  1: circuit_breaker = message
+  2: paused_circuit_breaker = string  (oneof=event)
+  3: unpaused_circuit_breaker = string  (oneof=event)
+
+io.span.services.common_dispatch.PowerLoadManagementUpdate
+  1: event_start_ms = uint64
+  2: paused_circuit_breaker = string  (oneof=event)
+  3: unpaused_circuit_breaker = string  (oneof=event)
+  4: throttled_appliance = string  (oneof=event)
+  5: unthrottled_appliance = string  (oneof=event)
+  6: is_full_recovered = bool  (oneof=event)
+  7: backstop_paused_circuit_breaker = string  (oneof=event)
+  8: paused_appliance = string  (oneof=event)
+  9: unpaused_appliance = string  (oneof=event)
+
+io.span.services.common_dispatch.PowerOutageStart
+  2: total_time_remaining_minutes = uint32
+
+io.span.services.common_dispatch.PowerOutageUpdate
+  1: start = message  (oneof=event)
+  2: soe_based_loadshed = message  (oneof=event)
+  3: end = bool  (oneof=event)
+
+io.span.services.common_dispatch.PowerUpEventInfo
+  1: event_start_ms = uint64
+
+io.span.services.common_dispatch.SOEBasedLoadshedStart
+  1: soe_decipct = uint32
+
+io.span.services.common_dispatch.StatsHomeUsage
+  1: circuit_breaker = message
+  2: date_time_frame = enum
+
+io.span.services.common_dispatch.UpdateDispatch
+  1: type = enum
+  2: power_load_management_update = message  (oneof=payload)
+  3: virtual_service_limit_update = message  (oneof=payload)
+  4: power_outage_update = message  (oneof=payload)
+  5: drive_event_update = message  (oneof=payload)
+  6: manual_breaker_event = message  (oneof=payload)
+
+io.span.services.common_dispatch.UpdateTypeOptions
+  1: category_group = enum
+
+io.span.services.mobilefrontend.AblyTokenRequest
+  1: device_id = string
+
+io.span.services.mobilefrontend.AblyTokenResponse
+  1: token = string
+  2: channel_name = string
+
+io.span.services.mobilefrontend.CanHardwareBeClaimedRequest
+  1: serial_number = string
+  2: part_number = string
+
+io.span.services.mobilefrontend.CanHardwareBeClaimedResponse
+  1: can_be_claimed = bool
+  2: panel_part_number = string
+
+io.span.services.mobilefrontend.CheckPanelMenderDeploymentExistsRequest
+  1: site_resource_id = string
+  2: resource_id = string  (oneof=siteIdentifier)
+  3: gateway_hardware_info = message  (oneof=siteIdentifier)
+
+io.span.services.mobilefrontend.CheckPanelMenderDeploymentExistsResponse
+  1: exists = bool
+  2: site_resource_id = string
+
+io.span.services.mobilefrontend.ClaimHardwareAsSiteRequest
+  1: serial_number = string
+  2: part_number = string
+
+io.span.services.mobilefrontend.ClearUserVirtualSetupsRequest
+  1: user_id = string
+
+io.span.services.mobilefrontend.CreateOtpRequest
+  1: serial_number = string
+  2: email = string
+
+io.span.services.mobilefrontend.CreatePanelMenderDeploymentRequest
+  1: site_resource_id = string
+  2: resource_id = string  (oneof=siteIdentifier)
+  3: gateway_hardware_info = message  (oneof=siteIdentifier)
+
+io.span.services.mobilefrontend.CreatePanelMenderDeploymentResponse
+  1: site_resource_id = string
+
+io.span.services.mobilefrontend.CreateVirtualSiteRequest
+  1: site_resource_id_suffix = string
+  2: owner_id = string
+  3: virtual_setup = enum
+
+io.span.services.mobilefrontend.CreateVirtualSiteResponse
+  1: site_resource_id = string
+  2: resource_traits = message
+  3: parts = message
+
+io.span.services.mobilefrontend.DeletePanelPhotoRequest
+  1: panel_resource_id = string
+
+io.span.services.mobilefrontend.DeleteVirtualSiteRequest
+  1: site_resource_id = string
+
+io.span.services.mobilefrontend.DisconnectedEvent
+  1: client_initiated_disconnect = bool
+  2: disconnect_reason = enum
+  3: mqtt_disconnect_reason = enum
+
+io.span.services.mobilefrontend.DismissDispatchRequest
+  1: site_id = string
+  2: dispatch_id = string
+
+io.span.services.mobilefrontend.DismissOnboardingInsightRequest
+  1: site_id = string
+  2: onboarding_insight = enum
+
+io.span.services.mobilefrontend.DispatchDescription
+  1: type = string
+  2: category_group = string
+  3: title = string
+  4: description = string
+  5: opt_out_allowed = bool
+  6: default_opt_out = bool
+
+io.span.services.mobilefrontend.DispatchFilter
+  1: include_insights = bool
+  2: include_updates = bool
+  3: include_faults = bool
+  4: include_dismissed = bool
+
+io.span.services.mobilefrontend.DispatchOrder
+  1: time_desc = bool  (oneof=order)
+  2: priority_desc = bool  (oneof=order)
+
+io.span.services.mobilefrontend.DispatchTypeDescriptions
+  1: insights = message
+  2: updates = message
+
+io.span.services.mobilefrontend.ExtendLeaseDurationRequest
+  1: site_id = string
+  2: extend_by_seconds = uint32
+  3: reason = string
+
+io.span.services.mobilefrontend.GenerateTokenAndSyncZonesRequest
+  1: panel_id = string
+  2: auth_code = string
+
+io.span.services.mobilefrontend.GenerateTokenRequest
+  1: panel_id = string
+  2: auth_code = string
+
+io.span.services.mobilefrontend.GetBatchHistoryAggregationRequest
+  1: requests = message
+
+io.span.services.mobilefrontend.GetBatchHistoryAggregationResponse
+  1: responses = message
+
+io.span.services.mobilefrontend.GetDispatchTypeDescriptionsAndPreferencesResponse
+  1: descriptions = message
+  2: preference = message
+
+io.span.services.mobilefrontend.GetDispatchTypeDescriptionsResponse
+  1: descriptions = message
+
+io.span.services.mobilefrontend.GetHistoryAggregationRequest
+  1: time_window = message
+  2: resources = message
+
+io.span.services.mobilefrontend.GetHistoryAggregationResponse
+  1: aggregations = message
+
+io.span.services.mobilefrontend.GetHomeownerBootstrapInfoResponse
+  1: onboarding_video_url = string
+
+io.span.services.mobilefrontend.GetLugCalibrationDataRequest
+  1: hardware_info = message
+
+io.span.services.mobilefrontend.GetLugCalibrationDataResponse
+  1: calibration_data = message
+
+io.span.services.mobilefrontend.GetMenderFwVersionRequest
+  1: resource_id = string  (oneof=siteIdentifier)
+  2: gateway_hardware_info = message  (oneof=siteIdentifier)
+
+io.span.services.mobilefrontend.GetMenderFwVersionResponse
+  1: firmware_version = string
+
+io.span.services.mobilefrontend.GetPanelPhotoUploadUrlRequest
+  1: panel_resource_id = string
+
+io.span.services.mobilefrontend.GetPanelPhotoUploadUrlResponse
+  1: pre_signed_url = string
+
+io.span.services.mobilefrontend.GetPanelPhotoViewUrlRequest
+  1: panel_resource_id = string
+
+io.span.services.mobilefrontend.GetPanelPhotoViewUrlResponse
+  1: pre_signed_url = string
+
+io.span.services.mobilefrontend.GetPowerUpHistoryRequest
+  1: resource_id = string
+  2: trait_instance_id = message
+  3: start_time_msec = uint64
+  4: end_time_msec = uint64
+
+io.span.services.mobilefrontend.GetPowerUpHistoryResponse
+  1: resource_id = string
+  2: trait_instance_ids = message
+  3: events = map
+  4: current_ongoing_event = message
+  5: event_recaps = map
+
+io.span.services.mobilefrontend.GetPowerUpHistoryResponse.ActivePowerUpEvent
+  1: start = message
+  2: updates = map
+
+io.span.services.mobilefrontend.GetResideoAuthorizationUrlResponse
+  1: oauth_authorization_callback = message
+
+io.span.services.mobilefrontend.GetResourceRequest
+  1: resource_id = string
+
+io.span.services.mobilefrontend.GetResourceResponse
+  1: resource = message
+
+io.span.services.mobilefrontend.GetResourcesForHardwareRequest
+  1: serial_number = string
+  2: part_number = string
+
+io.span.services.mobilefrontend.GetResourcesForHardwareResponse
+  1: resources = message
+  2: panel_part = message
+
+io.span.services.mobilefrontend.GetSitesForUserResponse
+  1: sites_with_membership = message
+
+io.span.services.mobilefrontend.GetTimezoneByGeolocationRequest
+  1: lat_lng = message
+
+io.span.services.mobilefrontend.GetTimezoneByGeolocationResponse
+  1: timezone = string
+
+io.span.services.mobilefrontend.GetUserNotificationPreferenceResponse
+  1: preference = message
+
+io.span.services.mobilefrontend.GetUserResourcesResponse
+  1: resources = message
+
+io.span.services.mobilefrontend.GetUsersForSiteRequest
+  1: site_id = string
+
+io.span.services.mobilefrontend.GetUsersForSiteResponse
+  1: users_with_membership = message
+
+io.span.services.mobilefrontend.InsightDispatch
+  1: type = string
+
+io.span.services.mobilefrontend.InviteUserForSiteRequest
+  1: user_email = string
+  2: site_id = string
+
+io.span.services.mobilefrontend.LeaseVirtualSetupRequest
+  1: virtual_setup_type = enum
+  2: lease_duration_seconds = uint32
+  4: add_current_user_to_site = bool
+  5: lessor_id = string
+
+io.span.services.mobilefrontend.LeaseVirtualSetupResponse
+  1: site_resource_id = string
+  2: parts = message
+
+io.span.services.mobilefrontend.LiberateVirtualSetupRequest
+  1: site_id = string
+
+io.span.services.mobilefrontend.LinkResideoUserRequest
+  1: resideo_authorization_code = string
+  2: panel_id = string
+
+io.span.services.mobilefrontend.LinkResideoUserResponse
+  2: devices = message
+
+io.span.services.mobilefrontend.ListDismissedOnboardingInsightsRequest
+  1: site_id = string
+
+io.span.services.mobilefrontend.ListDismissedOnboardingInsightsResponse
+  1: onboarding_insights = enum
+
+io.span.services.mobilefrontend.ListDispatchesRequest
+  1: site_id = string
+  2: limit = int32
+  3: filter = message
+  4: order = message
+  5: next_page_token = string
+  6: include_dismissed_onboarding_insights = bool
+
+io.span.services.mobilefrontend.ListDispatchesResponse
+  1: dispatches = message
+  2: next_page_token = string
+  3: onboarding_insights = enum
+
+io.span.services.mobilefrontend.ListLatestStatesRequest
+  1: resources = message
+
+io.span.services.mobilefrontend.ListLatestStatesResponse
+  1: resource_with_traits = message
+
+io.span.services.mobilefrontend.ListLatestTraitDataRequest
+  1: resources = message
+
+io.span.services.mobilefrontend.ListLatestTraitDataResponse
+  1: resource_with_traits = message
+  2: resource_metrics = message
+
+io.span.services.mobilefrontend.ListResideoDevicesResponse
+  1: devices = message
+
+io.span.services.mobilefrontend.MultiResourceSubscribeRequest
+  1: subscriber_resource_id = message
+  2: resource_ids = message
+
+io.span.services.mobilefrontend.MultiResourceUnsubscribeRequest
+  1: subscriber_resource_id = message
+  2: resource_ids = message
+
+io.span.services.mobilefrontend.MultiSubscribeRequest
+  1: resource_id = message
+  3: trait_instance_metadata = message
+
+io.span.services.mobilefrontend.MultiUnsubscribeRequest
+  1: resource_id = message
+  3: trait_instance_metadata = message
+
+io.span.services.mobilefrontend.OauthAuthorizationCallback
+  1: url = string
+  2: state = string
+
+io.span.services.mobilefrontend.PairMSARequest
+  1: panelboard_hardware_info = message
+  2: msa_hardware_info = message
+
+io.span.services.mobilefrontend.PairMSAResponse
+  1: calibration_data = message
+
+io.span.services.mobilefrontend.PowerUpBranchControlled
+  1: branch_id = string
+  2: controlled_type = enum
+
+io.span.services.mobilefrontend.PowerUpBranchRestored
+  1: branch_id = string
+  2: controlled_start_time_ms = message
+
+io.span.services.mobilefrontend.PowerUpEventEnd
+  1: event_start_ms = message
+  2: restored_branches = message
+
+io.span.services.mobilefrontend.PowerUpEventModify
+  1: controlled_branches = message
+  2: restored_branches = message
+  3: event_start_ms = message
+
+io.span.services.mobilefrontend.PowerUpEventRecap
+  1: start_time_msec = message
+  2: end_time_msec = message
+  3: start = message
+  4: updates = map
+  5: end = message
+  6: statistics = message
+
+io.span.services.mobilefrontend.PowerUpEventRecap.Statistics
+  1: num_branches_managed = uint64
+  2: branches_managed = string
+  3: duration_msec = uint64
+
+io.span.services.mobilefrontend.PowerUpEventStart
+  1: controlled_branches = message
+  2: start_time_msec = message
+
+io.span.services.mobilefrontend.ProvisionResourceRequest
+  1: nonce = bytes
+  2: signed_nonce = bytes
+  3: attestation_cert = bytes
+  4: operational_csr = bytes
+
+io.span.services.mobilefrontend.ProvisionResourceResponse
+  1: operational_certificate = bytes
+
+io.span.services.mobilefrontend.RebuildVirtualSetupRequest
+  1: site_id = string
+
+io.span.services.mobilefrontend.RegisterResourceRequest
+  1: resource = message
+
+io.span.services.mobilefrontend.RegisterResourceResponse
+  1: resource = message
+
+io.span.services.mobilefrontend.ResetOnboardingInsightsRequest
+  1: site_id = string
+
+io.span.services.mobilefrontend.ResetUserNotificationPreferenceResponse
+  1: preference = message
+
+io.span.services.mobilefrontend.ResideoDevice
+  1: location_id = string
+  2: location_name = string
+  3: device_id = string
+  4: device_name = string
+  5: device_type = enum
+  6: device_class = string
+  7: current_settings = message
+  8: previous_settings = message
+  9: operation_status = message
+
+io.span.services.mobilefrontend.ResideoDeviceSettings
+  1: thermostat = message  (oneof=settings)
+
+io.span.services.mobilefrontend.ResideoOperationStatus
+  1: mode = string
+  2: fan_request = bool
+  3: circulation_fan_request = bool
+
+io.span.services.mobilefrontend.ResideoThermostatSettings
+  1: mode = string
+  4: heat_setpoint = double
+  5: cool_setpoint = double
+  6: setpoint_status = string
+
+io.span.services.mobilefrontend.RunMetusCommissioningFlowRequest
+  1: resource_id = string
+  2: tab_number = uint32
+  3: flow = enum
+
+io.span.services.mobilefrontend.SearchResourcesForSerialRequest
+  1: serial_number = string
+  2: product_ids = enum
+
+io.span.services.mobilefrontend.SearchResourcesForSerialResponse
+  1: found_hardware = message
+
+io.span.services.mobilefrontend.SearchResourcesForSerialResponse.FoundHardware
+  1: type = enum
+  2: resources = message
+  3: panel_part = message
+
+io.span.services.mobilefrontend.SendBreakerMapRequest
+  1: panel_resource_id = string
+  2: recipients_type = enum
+
+io.span.services.mobilefrontend.SendMessagesRequest
+  1: msgs = message
+
+io.span.services.mobilefrontend.SendMetricStatsEmailRequest
+  1: site_id = string
+  2: time_window = message
+
+io.span.services.mobilefrontend.SendNetworkMetricsRequest
+  1: resource_id = string
+  2: remote_network_interface = enum
+  3: signal_strength = enum
+
+io.span.services.mobilefrontend.SetActiveStateOnScheduleTraitRequest
+  1: schedule_trait = message
+  2: is_active = bool
+
+io.span.services.mobilefrontend.SetBackupInterfaceTypeRequest
+  1: resource_id = string
+  2: ip_interface = enum
+
+io.span.services.mobilefrontend.SetFaultStateRequest
+  1: resource_id = string
+  3: state = enum
+  5: panel_fault_type = enum  (oneof=fault)
+  6: backup_fault_type = enum  (oneof=fault)
+  7: drive_fault_type = enum  (oneof=fault)
+  8: site_fault_type = enum  (oneof=fault)
+
+io.span.services.mobilefrontend.SetFaultStateResponse
+  1: state_updated = bool
+
+io.span.services.mobilefrontend.SetGridAndIslandingStateRequest
+  1: resource_id = string
+  2: grid_islanding_mode = enum
+  3: trigger_soe_based_loadshed = bool
+
+io.span.services.mobilefrontend.SetMetusGroupStateRequest
+  1: metus_group_trait = message
+  2: group_state = enum
+
+io.span.services.mobilefrontend.SetMetusUnitApiConnectionStateRequest
+  1: metus_unit_trait = message
+  2: unit_api_state = enum
+
+io.span.services.mobilefrontend.SetMetusUnitPairedBreakerStatusRequest
+  1: metus_unit_trait = message
+  2: breaker_state = enum
+  3: breaker_number = uint32
+
+io.span.services.mobilefrontend.SetSiteConnectivityStateRequest
+  1: connectivity_trait = message
+  2: connected = bool  (oneof=eventType)
+  3: disconnected = message  (oneof=eventType)
+
+io.span.services.mobilefrontend.SetSiteInstallationOrganizationRequest
+  1: site_id = string
+  2: organization_id = string
+
+io.span.services.mobilefrontend.SiteHasUsersOrNotRequest
+  1: site_id = string
+
+io.span.services.mobilefrontend.SiteHasUsersOrNotResponse
+  1: has_users = bool
+
+io.span.services.mobilefrontend.SiteMetadata
+  1: site_id = string
+  2: name = string
+  5: postal_address = message
+  6: branding_id = enum
+
+io.span.services.mobilefrontend.SiteResourcesAndParts
+  1: resources = message
+  2: physical_parts = message
+
+io.span.services.mobilefrontend.SiteWithUserMembership
+  1: site = message
+  2: is_member = bool
+  3: site_resources_and_parts = message
+
+io.span.services.mobilefrontend.SubscribeAndGetTraitsRequest
+  1: subscriber_resource_id = message
+  2: resources = message
+
+io.span.services.mobilefrontend.SubscribeAndGetTraitsResponse
+  1: resource_with_traits = message
+  2: resource_metrics = message
+
+io.span.services.mobilefrontend.SyncZonesRequest
+  1: panel_id = string
+
+io.span.services.mobilefrontend.ThrottleResideoLocationRequest
+  1: location_id = string
+  2: enable = bool  (oneof=updateOneof)
+  3: setpoint = message  (oneof=updateOneof)
+
+io.span.services.mobilefrontend.ThrottleResideoLocationRequest.Setpoint
+  1: mode = string
+  2: cool_setpoint = int32
+  3: heat_setpoint = int32
+  4: setpoint_status = string
+
+io.span.services.mobilefrontend.TriggerBackupSOEMetricsRequest
+  1: resource_id = string
+
+io.span.services.mobilefrontend.TriggerDriveDeviceModeChangeRequest
+  1: resource_id = string
+  2: event_type = enum
+
+io.span.services.mobilefrontend.TriggerInsightDispatchRequest
+  1: site_id = string
+  2: insight_type = enum
+
+io.span.services.mobilefrontend.TriggerMeteringEnergyMetricRequest
+  1: resource_id = string
+  2: timestamp = message
+
+io.span.services.mobilefrontend.TriggerMeteringPowerMetricRequest
+  1: resource_id = string
+  2: grid_power_flow = enum
+  3: solar_power_flow = enum
+  4: battery_power_flow = enum
+  5: scale_factor = float
+  6: metric_data_type = enum
+  8: duration_seconds = uint32
+
+io.span.services.mobilefrontend.TriggerNetworkStateChangeEventRequest
+  1: resource_id = string
+  2: remote_network_interface = enum
+  3: event_type = enum
+
+io.span.services.mobilefrontend.TriggerPowerUpEventRequest
+  1: powerup_trait = message
+  2: event_type = enum
+
+io.span.services.mobilefrontend.TriggerSoftwareUpdateFlowRequest
+  1: resource_id = string
+  2: flow_type = enum
+
+io.span.services.mobilefrontend.UpdateUserNotificationPreferenceRequest
+  1: preference = message
+
+io.span.services.mobilefrontend.UpdateUserNotificationPreferenceResponse
+  1: preference = message
+
+io.span.services.mobilefrontend.UserAcceptInviteToSiteRequest
+  1: site_id = string
+
+io.span.services.mobilefrontend.UserDeclineInviteToSiteRequest
+  1: site_id = string
+
+io.span.services.mobilefrontend.UserNotificationPreference
+  3: insights_opt_out_types = string
+  4: updates_opt_out_types = string
+  5: insights_opt_in_types = string
+  6: updates_opt_in_types = string
+
+io.span.services.mobilefrontend.UserWithSiteMembership
+  1: user = message
+  2: is_member = bool
+
+io.span.services.mobilefrontend.ValidateOtpRequest
+  1: serial_number = string
+  2: one_time_password = string
+
+io.span.services.mobilefrontend.ValidateOtpResponse
+  1: valid = bool
+
+io.span.services.sim_span_manager.LeaseNewSimSpanHomeResponse
+  1: access_token = string
+  3: site_resources = message
+
+io.span.services.sim_span_manager.LiberateSimSpanHomeRequest
+  1: site_id = string
+
+io.span.traits.api_connectivity.ApiConnectivityTrait
+  1: not_configured = message  (oneof=connectivityState)
+  2: connecting = message  (oneof=connectivityState)
+  3: not_connected = message  (oneof=connectivityState)
+  4: running = message  (oneof=connectivityState)
+  6: connected_with_error = message  (oneof=connectivityState)
+  5: last_state_change_timestamp_ms = message
+  11: active_faults = message
+
+io.span.traits.api_connectivity.ApiConnectivityTrait.ApiConnectivityFault
+  1: metadata = message
+  2: is_fault_superseded = bool
+  6: api_not_connected_fault = message  (oneof=fault)
+  7: api_connect_error_fault = message  (oneof=fault)
+
+io.span.traits.api_connectivity.ApiConnectivityTrait.ApiConnectivityFaultEvent
+  1: fault = message
+
+io.span.traits.api_connectivity.ApiConnectivityTrait.PollingHealthMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: metric_window_secs = uint32
+  3: max_latency_ms = uint32
+  4: avg_latency_ms = uint32
+  5: expected_poll_count = uint32
+  6: failed_poll_count = uint32
+
+io.span.traits.api_connectivity.ApiConnectivityTrait.StateTransitionEvent
+  1: not_configured = message  (oneof=newState)
+  2: connecting = message  (oneof=newState)
+  3: not_connected = message  (oneof=newState)
+  4: running = message  (oneof=newState)
+  5: connected_with_error = message  (oneof=newState)
+
+io.span.traits.backup.BackupCapacity
+  1: storage_capacity = message
+  11: nominal_backup_power_continuous_watts = uint32
+  12: nominal_backup_power_peak_10s_voltamps = uint32
+
+io.span.traits.backup.BackupSystemTrait.BackupSystemCommandRequests
+  1: update_backup_system_request = message  (oneof=request)
+  2: set_enphase_communication_token_request = message  (oneof=request)
+
+io.span.traits.backup.BackupSystemTrait.GridStateUpdatedEvent
+  1: updated = enum
+
+io.span.traits.backup.BackupSystemTrait.TokenExpirationStateEvent
+  1: token_expiry_time = message
+  2: is_expired = bool
+
+io.span.traits.backup.ConsumptionEstimate
+  1: forecast_period_length_hours = uint32
+  2: forecast_total_consumption_wh = uint32
+  3: forecast_generation_ms = message
+
+io.span.traits.backup.ConsumptionEstimateAccuracy
+  1: actual_total_consumption_wh = uint32
+  2: consumption_forecast_error_decipct = int32
+  3: forecast_generation_ms = message
+
+io.span.traits.backup.CreateBackupSystemRequest
+  1: system_information = message
+  2: label_information = message
+  3: backup_capacity = message
+  4: solar_capacity_configuration = message
+
+io.span.traits.backup.EnphaseSystem
+  1: model = enum
+
+io.span.traits.backup.FranklinWHSystem
+  1: model = enum
+
+io.span.traits.backup.LabelInformation
+  1: label_source = enum
+  6: tesla_gateway_two_qr = message  (oneof=processedLabel)
+  7: tesla_powerwall_plus_qr = message  (oneof=processedLabel)
+  8: tesla_powerwall_three_qr = message  (oneof=processedLabel)
+  9: franklin_wh_qr = message  (oneof=processedLabel)
+  10: enphase_qr = message  (oneof=processedLabel)
+  11: lucid_charging_station_qr = message  (oneof=processedLabel)
+
+io.span.traits.backup.LabelInformation.EnphaseQR
+  1: serial_number = string
+  2: raw_serial_qr = string
+
+io.span.traits.backup.LabelInformation.FranklinWhQR
+  1: serial_number = string
+  2: raw_serial_qr = string
+
+io.span.traits.backup.LabelInformation.LucidChargingStationQR
+  1: serial_number = string
+  2: part_number = string
+  3: raw_datamatrix = string
+
+io.span.traits.backup.LabelInformation.TeslaPowerwallPlusQR
+  1: tesla_ssid = string
+  2: tesla_device_identification_number = string
+  3: printed_password = string
+  4: raw_teg_qr = string
+
+io.span.traits.backup.LabelInformation.TeslaPowerwallThreeQRAndDatamatrix
+  1: tesla_powerwall_three_datamatrix = message
+  2: tesla_powerwall_three_wifi_qr = message
+
+io.span.traits.backup.LabelInformation.TeslaPowerwallThreeQRAndDatamatrix.TeslaPowerwallThreeDatamatrix
+  1: tesla_serial_number = string
+  2: tesla_part_number = string
+  3: raw_datamatrix = string
+
+io.span.traits.backup.LabelInformation.TeslaPowerwallThreeQRAndDatamatrix.TeslaPowerwallThreeWifiQR
+  1: printed_password = string
+  2: raw_wifi_qr = string
+
+io.span.traits.backup.LabelInformation.TeslaPowerwallTwoQR
+  1: tesla_serial_number = string
+  2: tesla_part_number = string
+  3: printed_password = string
+  4: raw_teg_qr = string
+
+io.span.traits.backup.LucidSystem
+  1: model = enum
+
+io.span.traits.backup.SOEBasedLoadshed
+  2: soe_based_priority_loads_disconnected = bool
+  3: last_soe_based_priority_loads_shed_ms = message
+  4: last_soe_based_priority_loads_release_ms = message
+
+io.span.traits.backup.SOEBasedLoadshedTrait.SOEBasedLoadshedEventStart
+  1: state_of_energy = message
+
+io.span.traits.backup.SOEBasedLoadshedTrait.ServiceUsageMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: state_of_energy = message
+  3: soe_based_priority_loads_info = message
+
+io.span.traits.backup.SOEShedThresholds
+  1: soe_based_priority_shed_advertised_decipct = uint32
+  2: soe_based_priority_shed_disconnect_decipct = uint32
+  3: soe_based_priority_shed_reconnect_decipct = uint32
+
+io.span.traits.backup.SetEnphaseCommunicationTokenRequest
+  1: backup_communication_token = string
+
+io.span.traits.backup.SolarInverterTrait
+  1: manufacturer = string
+  6: capacity_configuration = message
+
+io.span.traits.backup.SolarInverterTrait.SolarInverterCommandRequests
+  1: update_solar_inverter = message  (oneof=request)
+
+io.span.traits.backup.StateOfEnergy
+  2: available_on_grid_usable_energy_wh = uint32
+  3: available_on_grid_usable_energy_decipct = uint32
+
+io.span.traits.backup.StateOfEnergyTrait
+  1: storage_capacity = message
+  2: supports_soe_based_priority_shedding = bool
+  3: soe_based_priority_shed_advertised_decipct = uint32
+  4: soe_based_priority_shed_disconnect_decipct = uint32
+  5: soe_based_priority_shed_reconnect_decipct = uint32
+  6: soe_publish_rate = enum
+  7: soe_shed_thresholds = message
+
+io.span.traits.backup.StateOfEnergyTrait.ForecastPerformanceEvaluationMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: full_soe_estimate_accuracy = message
+  3: consumption_estimate_accuracy = message
+  4: current_soe_estimate_accuracy = message
+
+io.span.traits.backup.StateOfEnergyTrait.StateOfEnergyMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: quality = enum
+  3: source = enum
+  4: source_time_before_metric_millisec = uint32
+  10: soe = message
+
+io.span.traits.backup.StateOfEnergyTrait.TimeRemainingEstimateMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: current_soe_estimate = message
+  3: full_soe_estimate = message
+  4: consumption_estimate = message
+
+io.span.traits.backup.StorageCapacity
+  1: total_on_grid_usable_storage_capacity_wh = uint32
+  2: battery_off_grid_soe_discharge_threshold_decipct = uint32
+
+io.span.traits.backup.SystemInformation
+  1: tesla = message  (oneof=system)
+  2: franklin_wh = message  (oneof=system)
+  3: enphase = message  (oneof=system)
+  4: lucid = message  (oneof=system)
+
+io.span.traits.backup.TeslaSystem
+  1: model = enum
+
+io.span.traits.backup.TimeRemainingEstimate
+  1: available_on_grid_usable_energy_decipct = uint32
+  2: total_time_remaining_minutes = uint32
+  3: soe_shed_priority_time_remaining_minutes = uint32
+  4: forecast_generation_ms = message
+
+io.span.traits.backup.TimeRemainingEstimateAccuracy
+  1: actual_total_time_remaining_minutes = uint32
+  2: total_time_remaining_forecast_error_decipct = int32
+  3: forecast_generation_ms = message
+
+io.span.traits.backup.UpdateBackupSystemRequest
+  1: backup_capacity = message
+  2: solar_capacity_configuration = message
+
+io.span.traits.backup.UpdateSolarInverter
+  1: capacity_configuration = message
+
+io.span.traits.backup.connectivity.BackupApiConnectivity
+  1: tesla = message  (oneof=system)
+  2: franklin = message  (oneof=system)
+  3: enphase = message  (oneof=system)
+  4: lucid = message  (oneof=system)
+
+io.span.traits.backup.connectivity.EnphaseApiConnectivity
+  1: tcp_ip = message
+  2: last_connectivity_state_updated_ms = message
+  3: not_configured = message  (oneof=connectivityState)
+  4: connecting = message  (oneof=connectivityState)
+  5: running = message  (oneof=connectivityState)
+
+io.span.traits.backup.connectivity.EnphaseAuthError
+  1: unknown = message  (oneof=error)
+  2: missing_token = message  (oneof=error)
+  3: wrong_token_user_type = message  (oneof=error)
+  4: wrong_token_serial_mismatch = message  (oneof=error)
+  5: expired_token = message  (oneof=error)
+
+io.span.traits.backup.connectivity.EnphaseAuthenticationState
+  1: in_progress = message  (oneof=state)
+  2: ok = message  (oneof=state)
+  3: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.EnphaseConnectingState
+  1: discovery = message  (oneof=state)
+  2: auth = message  (oneof=state)
+
+io.span.traits.backup.connectivity.EnphaseDiscoveryState
+  1: discovering_enphase = message  (oneof=state)
+  2: enphase_discovered = message  (oneof=state)
+  3: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.EnphaseDiscoveryState.DiscoveringEnphase
+  1: serial_number = string
+
+io.span.traits.backup.connectivity.EnphaseDiscoveryState.EnphaseDiscovered
+  1: ip_interface = enum
+
+io.span.traits.backup.connectivity.EnphaseDiscoveryState.EnphaseDiscoveryError
+  1: unknown = message  (oneof=error)
+  2: no_device_found = message  (oneof=error)
+  3: no_matching_device = message  (oneof=error)
+
+io.span.traits.backup.connectivity.EnphaseDiscoveryState.EnphaseDiscoveryError.EnphaseDiscoveryErrorNoMatchingDeviceFound
+  1: requested_enphase_serial_number = string
+  2: other_enphase_on_network = message
+
+io.span.traits.backup.connectivity.EnphaseDiscoveryState.EnphaseDiscoveryError.EnphaseDiscoveryErrorNoMatchingDeviceFound.EnphaseDeviceInfo
+  1: serial_number = string
+  2: interface = string
+  3: device_type = string
+
+io.span.traits.backup.connectivity.EnphasePollState
+  1: polling = message  (oneof=state)
+  2: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.EnphasePollState.EnphasePollError
+  1: unknown = message  (oneof=error)
+  2: polling_failed_to_start = message  (oneof=error)
+  3: polling_unauthorized_request = message  (oneof=error)
+  4: polling_forbidden_request = message  (oneof=error)
+  5: polling_request_timeout = message  (oneof=error)
+
+io.span.traits.backup.connectivity.EnphaseRunningState
+  1: poll = message  (oneof=state)
+
+io.span.traits.backup.connectivity.FranklinApiConnectivity
+  1: tcp_ip = message
+  2: modbus = message
+  3: last_connectivity_state_updated_ms = message
+  4: not_configured = message  (oneof=connectivityState)
+  5: connecting = message  (oneof=connectivityState)
+  6: running = message  (oneof=connectivityState)
+
+io.span.traits.backup.connectivity.FranklinConnectingState
+  1: discovery = message  (oneof=state)
+
+io.span.traits.backup.connectivity.FranklinRunningState
+  2: poll = message  (oneof=state)
+
+io.span.traits.backup.connectivity.FranklinRunningState.FranklinPollState
+  1: polling = message  (oneof=state)
+  2: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.FranklinRunningState.FranklinPollState.FranklinPollError
+  1: unknown = message  (oneof=error)
+  2: connect_timeout = message  (oneof=error)
+  3: read_register_failed = message  (oneof=error)
+
+io.span.traits.backup.connectivity.LucidApiConnectivity
+  1: last_connectivity_state_updated_ms = message
+  2: not_configured = message  (oneof=connectivityState)
+  3: connecting = message  (oneof=connectivityState)
+  4: running = message  (oneof=connectivityState)
+
+io.span.traits.backup.connectivity.LucidConnectingState
+  1: discovery = message  (oneof=state)
+
+io.span.traits.backup.connectivity.LucidDiscoveryState
+  1: discovering = message  (oneof=state)
+  2: discovered = message  (oneof=state)
+  3: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.LucidDiscoveryState.LucidDiscoveryError
+  1: failed_to_set_mid_mode = message  (oneof=error)
+  2: unexpected_error = message  (oneof=error)
+
+io.span.traits.backup.connectivity.LucidDiscoveryState.LucidDiscoveryError.LucidDiscoveryErrorFailedToSetMidMode
+  1: error = string
+
+io.span.traits.backup.connectivity.LucidDiscoveryState.LucidDiscoveryError.LucidDiscoveryUnexpectedError
+  1: error = string
+
+io.span.traits.backup.connectivity.LucidPollState
+  1: polling = message  (oneof=state)
+  2: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.LucidPollState.LucidPollError
+  1: failed_to_fetch_polled_data = message  (oneof=error)
+  2: unexpected_error = message  (oneof=error)
+
+io.span.traits.backup.connectivity.LucidPollState.LucidPollError.LucidPollErrorUnexpectedError
+  1: error = string
+
+io.span.traits.backup.connectivity.LucidRunningState
+  1: poll = message  (oneof=state)
+
+io.span.traits.backup.connectivity.ModbusDiscoveryState
+  1: scanning = message  (oneof=state)
+  2: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.ModbusDiscoveryState.ModbusDiscoveryError
+  1: no_open_device_found = message  (oneof=error)
+  2: no_matching_device_found = message  (oneof=error)
+
+io.span.traits.backup.connectivity.TeslaApiConnectivity
+  1: tcp_ip = message
+  2: last_connectivity_state_updated_ms = message
+  3: not_configured = message  (oneof=connectivityState)
+  4: connecting = message  (oneof=connectivityState)
+  5: running = message  (oneof=connectivityState)
+
+io.span.traits.backup.connectivity.TeslaAuthenticateState
+  1: login = message  (oneof=state)
+  2: ok = message  (oneof=state)
+  3: rate_limited = message  (oneof=state)
+  4: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.TeslaAuthenticateState.TeslaAuthError
+  1: unknown = message  (oneof=error)
+  2: auth_incorrect_password = message  (oneof=error)
+  3: auth_request_timeout = message  (oneof=error)
+
+io.span.traits.backup.connectivity.TeslaConnectingState
+  1: discovery = message  (oneof=state)
+  2: authenticate = message  (oneof=state)
+
+io.span.traits.backup.connectivity.TeslaDiscoveryState
+  1: reading_din = message  (oneof=state)
+  3: resolving_address = message  (oneof=state)
+  4: address_resolved = message  (oneof=state)
+  5: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.TeslaDiscoveryState.TeslaAddressResolved
+  1: ip_interfacee = enum
+
+io.span.traits.backup.connectivity.TeslaDiscoveryState.TeslaDiscoveryError
+  1: din_not_found = message  (oneof=error)
+  2: din_missing_serial = message  (oneof=error)
+  3: din_missing_product_number = message  (oneof=error)
+  4: din_missing_password = message  (oneof=error)
+  5: resolve_ip_failed = message  (oneof=error)
+
+io.span.traits.backup.connectivity.TeslaDiscoveryState.TeslaResolvingAddress
+  1: din = string
+
+io.span.traits.backup.connectivity.TeslaPollState
+  1: polling = message  (oneof=state)
+  2: error = message  (oneof=state)
+
+io.span.traits.backup.connectivity.TeslaPollState.TeslaPollError
+  1: unknown = message  (oneof=error)
+  2: polling_request_timeout = message  (oneof=error)
+
+io.span.traits.backup.connectivity.TeslaRunningState
+  1: poll = message  (oneof=state)
+
+io.span.traits.circuitry.Appliance
+  1: appliance_id = uint32
+  2: hardware_info = message
+  3: name = string
+  4: type = enum
+  5: icon = enum
+  6: appliance_monitoring_state = enum
+  16: fridge = message  (oneof=additionalInfo)
+  17: freezer = message  (oneof=additionalInfo)
+  18: washer = message  (oneof=additionalInfo)
+  19: dryer = message  (oneof=additionalInfo)
+  20: dishwasher = message  (oneof=additionalInfo)
+  21: water_heater = message  (oneof=additionalInfo)
+
+io.span.traits.circuitry.BranchControllerTrait.RelayHealthMetric
+  1: dt_msec = uint32
+  2: total_actuation_count = uint32
+  3: loaded_actuation_count = uint32
+
+io.span.traits.circuitry.CircuitBreakerTrait.CircuitBreakerCommandRequests
+  1: update_circuit_breaker_request = message  (oneof=request)
+  2: set_circuit_breaker_switch_state_request = message  (oneof=request)
+  3: homeowner_update_circuit_breaker_request = message  (oneof=request)
+
+io.span.traits.circuitry.CircuitBreakerTrait.CircuitBreakerCommandResponses
+  1: update_circuit_breaker_response = message  (oneof=response)
+
+io.span.traits.circuitry.CircuitTrait
+  1: type = enum
+  2: voltage_rating_volts = enum
+  3: ampere_rating_amps = uint32
+  4: name = string
+  5: home_locations = enum
+  6: appliance_types = enum
+  7: appliances = message
+
+io.span.traits.circuitry.CircuitTrait.CircuitCommandRequests
+  1: update_appliance_request = message  (oneof=request)
+  2: edit_circuit = message  (oneof=request)
+
+io.span.traits.circuitry.CircuitTrait.UpdateApplianceRequest
+  1: appliance = message
+
+io.span.traits.circuitry.CreateCircuitBreakerResponse
+  1: circuit_breaker = message
+  2: circuits = map
+
+io.span.traits.circuitry.CreateFullCircuitBreakerRequest
+  1: breaker_style = enum
+  2: breaker_role = enum
+  10: one_p_standard = message  (oneof=breakerType)
+  11: two_p_standard = message  (oneof=breakerType)
+  12: one_p_tandem = message  (oneof=breakerType)
+  13: two_p_tandem_quad = message  (oneof=breakerType)
+  14: two_p_quad = message  (oneof=breakerType)
+
+io.span.traits.circuitry.CreateOnePoleStandard
+  1: branch_controller = message
+  2: circuit = message
+
+io.span.traits.circuitry.CreateOnePoleTandem
+  1: branch_controller = message
+  2: top_circuit = message
+  3: bottom_circuit = message
+
+io.span.traits.circuitry.CreateOnePoleUnknown
+  1: branch_controller = message
+
+io.span.traits.circuitry.CreatePlaceholderCircuitBreakerRequest
+  1: breaker_style = enum
+  10: one_p_unknown = message  (oneof=breakerType)
+  11: two_p_unknown = message  (oneof=breakerType)
+
+io.span.traits.circuitry.CreateTwoPoleQuad
+  1: top_branch_controller = message
+  2: bottom_branch_controller = message
+  3: inside_circuit = message
+  4: outside_circuit = message
+
+io.span.traits.circuitry.CreateTwoPoleStandard
+  1: top_branch_controller = message
+  2: bottom_branch_controller = message
+  3: standard = message  (oneof=neutralType)
+  4: with_shared_handle = message  (oneof=neutralType)
+  5: without_shared_handle = message  (oneof=neutralType)
+
+io.span.traits.circuitry.CreateTwoPoleStandard.NeutralTypeStandard
+  1: circuit = message
+
+io.span.traits.circuitry.CreateTwoPoleStandard.NeutralTypeWithSharedHandle
+  1: top_circuit = message
+  2: bottom_circuit = message
+
+io.span.traits.circuitry.CreateTwoPoleStandard.NeutralTypeWithoutSharedHandle
+  1: circuit = message
+
+io.span.traits.circuitry.CreateTwoPoleTandemQuad
+  1: top_branch_controller = message
+  2: bottom_branch_controller = message
+  3: top_circuit = message
+  4: inside_circuit = message
+  5: bottom_circuit = message
+
+io.span.traits.circuitry.CreateTwoPoleUnknown
+  1: top_branch_controller = message
+  2: bottom_branch_controller = message
+
+io.span.traits.circuitry.DisconnectReason
+  1: control_function_source = enum  (oneof=reason)
+  2: manual_control_source = enum  (oneof=reason)
+  3: control_source = enum
+
+io.span.traits.circuitry.DisconnectSwitchRequest
+  1: disconnect_reason = message
+  2: context = message
+
+io.span.traits.circuitry.DisconnectSwitchResponse
+  1: disconnect_reasons = message
+  2: switch_state = enum
+  3: disconnect_status = enum
+  4: ticket_number = uint32
+
+io.span.traits.circuitry.DishWasherQuestionAnswers
+  1: is_portable = bool
+  2: number_of_doors = enum
+
+io.span.traits.circuitry.DryerQuestionAnswers
+  1: door_location = enum
+  2: is_washer_dryer_combo = bool
+  3: has_heat_pump = enum
+
+io.span.traits.circuitry.FreezerQuestionAnswers
+  1: door_location = enum
+  2: number_of_doors = enum
+
+io.span.traits.circuitry.FridgeQuestionAnswers
+  1: number_of_doors = enum
+  2: has_freezer = bool
+  3: is_mini_fridge = bool
+
+io.span.traits.circuitry.GetSwitchEventRequest
+  1: ticket_number = uint32
+
+io.span.traits.circuitry.GetSwitchEventResponse
+  1: disconnect_response = message  (oneof=eventResponse)
+  2: release_response = message  (oneof=eventResponse)
+  3: override_response = message  (oneof=eventResponse)
+
+io.span.traits.circuitry.HomeownerEditCircuit
+  1: name = string
+
+io.span.traits.circuitry.HomeownerUpdateCircuitBreakerRequest
+  10: one_p_standard = message  (oneof=updateBreakerType)
+  11: two_p_standard = message  (oneof=updateBreakerType)
+  12: one_p_tandem = message  (oneof=updateBreakerType)
+  13: two_p_tandem_quad = message  (oneof=updateBreakerType)
+  14: two_p_quad = message  (oneof=updateBreakerType)
+
+io.span.traits.circuitry.HomeownerUpdateOnePoleStandard
+  1: circuit = message
+
+io.span.traits.circuitry.HomeownerUpdateOnePoleTandem
+  1: top_circuit = message
+  2: bottom_circuit = message
+
+io.span.traits.circuitry.HomeownerUpdateTwoPoleQuad
+  1: inside_circuit = message
+  2: outside_circuit = message
+
+io.span.traits.circuitry.HomeownerUpdateTwoPoleStandard
+  3: standard = message  (oneof=neutralType)
+
+io.span.traits.circuitry.HomeownerUpdateTwoPoleStandard.NeutralTypeStandard
+  1: circuit = message
+
+io.span.traits.circuitry.HomeownerUpdateTwoPoleStandard.NeutralTypeWithSharedHandle
+  1: top_circuit = message
+  2: bottom_circuit = message
+
+io.span.traits.circuitry.HomeownerUpdateTwoPoleStandard.NeutralTypeWithoutSharedHandle
+  1: circuit = message
+
+io.span.traits.circuitry.HomeownerUpdateTwoPoleTandemQuad
+  1: top_circuit = message
+  2: inside_circuit = message
+  3: bottom_circuit = message
+
+io.span.traits.circuitry.InstallerCreateCircuit
+  1: type = enum
+  2: voltage_rating_volts = enum
+  3: ampere_rating_amps = uint32
+  4: name = string
+  5: home_locations = enum
+  6: appliance_types = enum
+
+io.span.traits.circuitry.InstallerEditCircuit
+  1: overwrite_circuit = message  (oneof=update)
+  2: edit_circuit = message  (oneof=update)
+
+io.span.traits.circuitry.InstallerSimpleEditCircuit
+  1: ampere_rating_amps = uint32
+  2: name = string
+
+io.span.traits.circuitry.OverrideDisconnectSwitchResponse
+  1: overriden_disconnect_reasons = message
+  2: switch_state = enum
+  3: override_disconnect_status = enum
+  4: ticket_number = uint32
+
+io.span.traits.circuitry.ReleaseDisconnectSwitchRequest
+  1: disconnect_reason = message
+
+io.span.traits.circuitry.ReleaseDisconnectSwitchResponse
+  1: disconnect_reasons = message
+  2: switch_state = enum
+  3: release_disconnect_status = enum
+  4: ticket_number = uint32
+
+io.span.traits.circuitry.RemoteLoadTrait.RemoteLoadCommandRequests
+  1: update_remote_load_request = message  (oneof=request)
+
+io.span.traits.circuitry.RemoteLoadTrait.UpdateRemoteLoadRequest
+  1: name = string
+  2: appliance_types = enum
+
+io.span.traits.circuitry.RemoveCircuitBreakerRequest
+  1: circuit_breaker = message
+
+io.span.traits.circuitry.RemoveCircuitBreakerResponse
+  1: circuit_breaker = message
+  2: circuits = message
+
+io.span.traits.circuitry.SetBackupConfigRequest
+  1: backup_config = message
+
+io.span.traits.circuitry.SetCircuitBreakerSwitchStateRequest
+  1: switch_relay = enum
+
+io.span.traits.circuitry.SetDefaultLoadManagementConfigRequest
+  1: min_reconnect_time_secs = uint32
+  2: min_disconnect_time_secs = uint32
+  3: default_disconnect_rank = uint32
+  4: disconnect_time_out_secs = uint32
+  5: shed_policy = enum
+  6: backup_config = message
+  7: power_load_manager = message
+
+io.span.traits.circuitry.SetPreferredDisconnectRankRequest
+  1: preferred_disconnect_rank = uint32
+
+io.span.traits.circuitry.SetShedPolicyRequest
+  1: shed_policy = enum
+
+io.span.traits.circuitry.SwitchLoadManagementConfig
+  1: shed_policy = enum
+  2: backup = message
+  3: plm = message
+  4: backstop = message
+  5: user = message
+  6: demand_response = message
+  18: min_reconnect_time_secs = uint32
+  19: min_disconnect_time_secs = uint32
+  20: preferred_disconnect_rank = uint32
+  22: default_disconnect_rank = uint32
+  21: disconnect_time_out_secs = uint32
+
+io.span.traits.circuitry.SwitchLoadManagementConfig.Backup
+  1: priority = enum
+
+io.span.traits.circuitry.SwitchLoadManagementConfig.PowerLoadManager
+  1: action_type = enum
+  2: min_current_threshold_milliamps = uint32
+
+io.span.traits.circuitry.SwitchLoadManagementTrait.DisconnectListChangeEvent
+  1: disconnect_reasons = message
+  2: context = message
+
+io.span.traits.circuitry.SwitchLoadManagementTrait.SwitchCloseEvent
+  2: switch_state = enum
+  3: last_reconnect_msec = message
+
+io.span.traits.circuitry.SwitchLoadManagementTrait.SwitchLoadManagementCommandRequests
+  1: disconnect_switch_request = message  (oneof=request)
+  2: release_disconnect_switch_request = message  (oneof=request)
+  3: override_disconnect_switch_request = message  (oneof=request)
+  4: set_preferred_disconnect_rank_request = message  (oneof=request)
+  5: set_backup_config_request = message  (oneof=request)
+  6: set_shed_policy_request = message  (oneof=request)
+  7: set_default_load_management_config_request = message  (oneof=request)
+  8: get_switch_event_request = message  (oneof=request)
+
+io.span.traits.circuitry.SwitchLoadManagementTrait.SwitchLoadManagementCommandResponses
+  1: disconnect_switch_response = message  (oneof=response)
+  2: release_disconnect_switch_response = message  (oneof=response)
+  3: override_disconnect_switch_response = message  (oneof=response)
+  4: get_switch_event_response = message  (oneof=response)
+
+io.span.traits.circuitry.SwitchLoadManagementTrait.SwitchOpenEvent
+  1: disconnect_reasons = message
+  2: switch_state = enum
+  3: last_disconnect_msec = message
+  4: context = message
+
+io.span.traits.circuitry.UpdateCircuitBreakerMetadataRequest
+  1: circuit_breaker = message
+  2: switch_load_management_config = message
+
+io.span.traits.circuitry.UpdateCircuitBreakerRequest
+  10: one_p_standard = message  (oneof=updateBreakerType)
+  11: two_p_standard = message  (oneof=updateBreakerType)
+  12: one_p_tandem = message  (oneof=updateBreakerType)
+  13: two_p_tandem_quad = message  (oneof=updateBreakerType)
+  14: two_p_quad = message  (oneof=updateBreakerType)
+
+io.span.traits.circuitry.UpdateCircuitBreakerResponse
+  1: current_circuits = map
+  2: removed_circuits = message
+
+io.span.traits.circuitry.UpdateOnePoleStandard
+  1: circuit = message
+
+io.span.traits.circuitry.UpdateOnePoleTandem
+  1: top_circuit = message
+  2: bottom_circuit = message
+
+io.span.traits.circuitry.UpdateTwoPoleQuad
+  1: inside_circuit = message
+  2: outside_circuit = message
+
+io.span.traits.circuitry.UpdateTwoPoleStandard
+  3: standard = message  (oneof=neutralType)
+
+io.span.traits.circuitry.UpdateTwoPoleStandard.NeutralTypeStandard
+  1: circuit = message
+
+io.span.traits.circuitry.UpdateTwoPoleStandard.NeutralTypeWithSharedHandle
+  1: top_circuit = message
+  2: bottom_circuit = message
+
+io.span.traits.circuitry.UpdateTwoPoleStandard.NeutralTypeWithoutSharedHandle
+  1: circuit = message
+
+io.span.traits.circuitry.UpdateTwoPoleTandemQuad
+  1: top_circuit = message
+  2: inside_circuit = message
+  3: bottom_circuit = message
+
+io.span.traits.circuitry.WasherQuestionAnswers
+  1: door_location = enum
+  2: is_washer_dryer_combo = bool
+
+io.span.traits.circuitry.WaterHeaterQuestionAnswers
+  1: has_heat_pump = enum
+  2: has_tank = enum
+  3: is_solar_powered = enum
+  4: is_fully_electric = enum
+
+io.span.traits.common.CommandRequest
+  1: request_metadata = message
+  2: payload = message
+
+io.span.traits.common.CommandResponse
+  1: request_metadata = message
+  2: standard_response = message  (oneof=response)
+  3: partial_response = message  (oneof=response)
+  4: command_response = message  (oneof=response)
+
+io.span.traits.common.ExternalTraitInfo
+  1: resource_id = message
+  2: trait_info = message
+
+io.span.traits.common.HardwareInfo
+  1: manufacturer = string
+  2: model = string
+  3: serial_number = string
+  4: model_year = int32
+  5: part_number = string
+  6: model_number = string
+
+io.span.traits.common.InstanceMetadata
+  1: resource_id = message
+  2: trait_instance_id = message
+
+io.span.traits.common.PartialResponsePayload
+  1: payload = bytes
+
+io.span.traits.common.RequestId
+  1: id = string
+
+io.span.traits.common.RequestMetadata
+  1: time_stamp = message
+  2: resource_id = message
+  3: request_id = message
+  4: client_timeout_duration_msec = uint32
+
+io.span.traits.common.ResourceId
+  1: id = string
+
+io.span.traits.common.ResourceTraitInfo
+  1: internal = message  (oneof=traitInfo)
+  2: external = message  (oneof=traitInfo)
+
+io.span.traits.common.RevisionRequest
+  1: request_metadata = message
+  2: revision = message
+
+io.span.traits.common.RevisionResponse
+  1: request_metadata = message
+  2: standard_response = message  (oneof=response)
+  3: state_revision = message  (oneof=response)
+
+io.span.traits.common.SetRequest
+  1: request_metadata = message
+  2: state_revision = message
+  3: update_type = enum
+
+io.span.traits.common.SetResponse
+  1: request_metadata = message
+  2: standard_response = message  (oneof=responseType)
+  3: state_revision = message  (oneof=responseType)
+
+io.span.traits.common.SimInfo
+  1: iccid = string
+  2: imsi = string
+
+io.span.traits.common.StandardResponse
+  1: response_ok = message  (oneof=resp)
+  2: response_readonly = message  (oneof=resp)
+  3: response_unauthorized = message  (oneof=resp)
+  4: response_not_found = message  (oneof=resp)
+  5: response_bad_request = message  (oneof=resp)
+  6: response_forbidden = message  (oneof=resp)
+  7: response_too_many_requests = message  (oneof=resp)
+  8: response_internal_error = message  (oneof=resp)
+  9: response_not_implemented = message  (oneof=resp)
+  10: response_unavailable = message  (oneof=resp)
+  11: response_timeout_error = message  (oneof=resp)
+  12: response_revision_too_old = message  (oneof=resp)
+
+io.span.traits.common.StandardResponse.ResponseRevisionTooOld
+  1: latest_revision = message
+
+io.span.traits.common.SubscribeRequest
+  1: request_metadata = message
+
+io.span.traits.common.SubscribeResponse
+  1: request_metadata = message
+  2: standard_response = message
+
+io.span.traits.common.TraitAuditingOptions
+  1: redact_field = bool
+
+io.span.traits.common.TraitCommandRequestPayload
+  1: payload = bytes
+
+io.span.traits.common.TraitCommandResponsePayload
+  1: payload = bytes
+
+io.span.traits.common.TraitCommandTimeoutOptions
+  1: request_timeout_msec = uint32
+
+io.span.traits.common.TraitEvent
+  1: event_id = uint32
+  2: millis_since_start = uint32
+  3: event_payload = bytes
+
+io.span.traits.common.TraitEventCloudOptions
+  1: save_for_subscriber_history = bool
+
+io.span.traits.common.TraitEventOptions
+  1: trait_id = uint32
+  2: vendor_id = enum
+  3: id = uint32
+  4: send_to_subscriber = bool
+
+io.span.traits.common.TraitEventsList
+  1: start_time = message
+  2: events = message
+
+io.span.traits.common.TraitEventsPayload
+  1: payload = bytes
+
+io.span.traits.common.TraitInfo
+  1: trait_metadata = message
+  2: trait_instance_id = message
+
+io.span.traits.common.TraitInfoOptions
+  1: trait_id = uint32
+  2: vendor_id = enum
+  3: any_trait = bool
+
+io.span.traits.common.TraitInstanceId
+  1: id = uint32
+
+io.span.traits.common.TraitMessage
+  1: trait_metadata = message
+  2: instance_metadata = message
+  10: revision_request = message  (oneof=msg)
+  11: revision_response = message  (oneof=msg)
+  12: set_request = message  (oneof=msg)
+  13: set_response = message  (oneof=msg)
+  14: command_request = message  (oneof=msg)
+  15: command_response = message  (oneof=msg)
+  16: trait_notify = message  (oneof=msg)
+  17: subscribe_request = message  (oneof=msg)
+  18: subscribe_response = message  (oneof=msg)
+  19: unsubscribe_request = message  (oneof=msg)
+  20: unsubscribe_response = message  (oneof=msg)
+
+io.span.traits.common.TraitMetadata
+  1: vendor_id = enum
+  2: product_id = enum
+  3: trait_id = uint32
+  4: version = uint32
+
+io.span.traits.common.TraitMetricOptions
+  1: trait_id = uint32
+  2: vendor_id = enum
+  3: id = uint32
+  4: send_to_subscriber = bool
+
+io.span.traits.common.TraitMetricsList
+  1: metrics_id = uint32
+  2: start_time = message
+  3: metrics = bytes
+
+io.span.traits.common.TraitNotify
+  1: state_revisions = message
+  2: events = message
+  3: metrics = message
+
+io.span.traits.common.TraitOptions
+  1: id = uint32
+  2: vendor_id = enum
+  3: version = uint32
+  4: is_singleton = bool
+
+io.span.traits.common.TraitRequestTimeoutOptions
+  1: request_timeout_msec = uint32
+
+io.span.traits.common.TraitRevision
+  1: major = uint32
+  2: minor = uint32
+  3: revision_timestamp = message
+
+io.span.traits.common.TraitStatePayload
+  1: payload = bytes
+
+io.span.traits.common.TraitStateRevision
+  1: revision = message
+  2: payload = message
+
+io.span.traits.common.TraitStateRevisionList
+  1: encoding_type = enum
+  2: state_revisions = message
+
+io.span.traits.common.UTCTime
+  1: time_msec = uint64
+
+io.span.traits.common.UnsubscribeRequest
+  1: request_metadata = message
+  2: trait_instance_id = message
+
+io.span.traits.common.UnsubscribeResponse
+  1: request_metadata = message
+  2: standard_response = message
+
+io.span.traits.common.connectivity.CommonResultTimeout
+  1: timeout_ms = uint32
+
+io.span.traits.common.connectivity.CommonResultUnknownError
+  1: error_message = string
+  2: http_status_code = uint32
+
+io.span.traits.common.drive.CommissioningState
+  1: state = enum
+
+io.span.traits.common.drive.DiscoveryState
+  1: state = enum
+
+io.span.traits.common.drive.LedState
+  1: color = enum
+
+io.span.traits.common.faults.DSWDebuggingFault
+  1: fault_flag = enum
+  2: module_type = enum
+  3: fault_category = enum
+  4: code = message
+  5: device_fault_data = message
+  6: trace_id = uint32
+  7: can_address = uint32
+
+io.span.traits.common.faults.DeviceFaultCode
+  1: comms = enum  (oneof=errorCode)
+  2: connected = enum  (oneof=errorCode)
+  3: internal = enum  (oneof=errorCode)
+  4: config = enum  (oneof=errorCode)
+  5: metering = enum  (oneof=errorCode)
+  6: relay_control = enum  (oneof=errorCode)
+
+io.span.traits.common.faults.DeviceFaultData
+  1: fault_tab_number = message  (oneof=msg)
+  2: fault_voltage = message  (oneof=msg)
+  3: fault_voltage_sense_line = enum  (oneof=msg)
+
+io.span.traits.common.faults.DriveChargingFault
+  1: device_mode = enum
+  2: faults = enum
+
+io.span.traits.common.faults.DriveCommunicationsFault
+  1: device_mode = enum
+  2: discovery_state = message
+
+io.span.traits.common.faults.FaultMetadata
+  1: fault_id = string
+  2: state = enum
+  3: fault_start_or_end_timestamp_ms = message
+
+io.span.traits.common.faults.FaultTabNumber
+  1: index = uint32
+
+io.span.traits.common.faults.FaultVoltage
+  1: millivolts = uint32
+
+io.span.traits.common.faults.FaultVoltageSense
+  1: line_number = enum
+
+io.span.traits.common.faults.LoadDetectedOnUnconfiguredBreakerFault
+  1: panel_tab_number = uint32
+
+io.span.traits.common.faults.ModuleNotConnectedFault
+  1: panel_position = uint32
+
+io.span.traits.common.faults.PanelAuxCTInvalidFault
+  1: ct_port = enum
+
+io.span.traits.common.faults.PanelInvalidFeederMeasurementsFault
+  1: is_control_point_enabled = bool
+
+io.span.traits.common.faults.PanelPowerOnUnconfiguredCTFault
+  1: panel_aux_ct_ports = enum
+
+io.span.traits.common.faults.SourceDetectedOnUnconfiguredBreakerFault
+  1: panel_tab_number = uint32
+
+io.span.traits.common.load_management.LoadManagementRequestContext
+  1: plm_context = enum  (oneof=context)
+  2: backstop_context = enum  (oneof=context)
+
+io.span.traits.common.metering.BuiltinOrRemoteMeterConfiguration
+  1: meter_channel = message
+  2: is_remotely_metered = bool  (oneof=config)
+  3: stpm_config = message  (oneof=config)
+
+io.span.traits.common.metering.CTMeterConfiguration
+  1: meter_channel = message
+  2: ct_config_333_mv_reference = message  (oneof=config)
+
+io.span.traits.common.metering.CTMeterConfiguration.CTConfig333mVReference
+  1: ct_max_amps = uint32
+  2: ct_flipped = bool
+  3: ct_amp_scaling = enum
+  11: remote_meter_voltage_reference = enum  (oneof=voltageReference)
+  12: factory_installed_voltage_reference = enum  (oneof=voltageReference)
+
+io.span.traits.common.metering.CalibrationData
+  1: chv = uint32
+  2: chc = uint32
+  3: phv = uint32
+  4: phc = uint32
+
+io.span.traits.common.metering.LugAssemblyCalibrationData
+  1: lug_1_calibration_data = message
+  2: lug_2_calibration_data = message
+  3: panel_aux_ct_ports = enum
+  4: calibration_type = enum
+
+io.span.traits.common.metering.PowerMeterConfiguration
+  1: meter_channel = message
+  2: stpm_config = message  (oneof=config)
+
+io.span.traits.common.metering.STPMConfiguration
+  1: lug_calibration_data = message  (oneof=config)
+
+io.span.traits.common.metering.SetModuleCalibrationData
+  1: calibration_data = message
+
+io.span.traits.common.network.ModbusProtocolInterface
+  1: modbus_id = uint32
+
+io.span.traits.common.network.SerialTransportInterface
+  1: discovery_iface = enum
+  2: baudrate = uint32
+
+io.span.traits.common.network.TcpIpTransportInterface
+  1: target_iface = enum
+  2: ip_address = string
+
+io.span.traits.common.schedule.DaysOfWeekWindow
+  1: days_of_week = enum
+  2: start_time = message
+  3: end_time = message
+
+io.span.traits.common.schedule.WeeklyWindow
+  1: recurring = message
+
+io.span.traits.common.solar.CapacityConfiguration
+  1: dc_array_size_watts = uint32
+
+io.span.traits.connectivity.ConnectionDetails
+  1: connection_start_time = message
+
+io.span.traits.connectivity.ConnectionSummary
+  1: connection_count = uint32
+  2: last_connection_details = message
+
+io.span.traits.connectivity.ConnectivityTrait
+  1: connectivity_type = enum
+  2: state = enum
+  3: last_connection_details = message
+  4: last_disconnection_details = message
+  6: active_faults = message
+
+io.span.traits.connectivity.ConnectivityTrait.AggregatedLifecycleEvent
+  1: events = message
+  2: window_start_time = message
+  3: window_end_time = message
+
+io.span.traits.connectivity.ConnectivityTrait.ConnectivityEstablishedEvent
+  1: connection_details = message
+
+io.span.traits.connectivity.ConnectivityTrait.ConnectivityFault
+  1: metadata = message
+  6: gateway_disconnect = message  (oneof=fault)
+
+io.span.traits.connectivity.ConnectivityTrait.ConnectivityFaultEvent
+  1: fault = message
+
+io.span.traits.connectivity.ConnectivityTrait.ConnectivityLostEvent
+  1: disconnection_details = message
+
+io.span.traits.connectivity.ConnectivityTrait.SummarizedLifecycleEvent
+  1: final_state = enum
+  2: window_start_time = message
+  3: window_end_time = message
+  5: connection_summary = message
+  6: disconnection_summary = message
+
+io.span.traits.connectivity.DisconnectionDetails
+  1: disconnection_time = message
+  2: disconnect_reason_category = enum
+  3: client_initiated_disconnect = enum
+  4: mqtt_disconnect_reason = enum
+
+io.span.traits.connectivity.DisconnectionSummary
+  1: disconnection_count = uint32
+  2: last_disconnection_details = message
+  4: disconnect_reasons = uint32
+  5: mqtt_disconnect_reasons = uint32
+
+io.span.traits.connectivity.LifecycleEvent
+  1: event_time = message
+  2: kafka_time = message
+  3: event_payload = bytes
+
+io.span.traits.der.DERBackupTrait
+  1: der_backup_state = enum
+  2: is_span_mid_used = bool
+
+io.span.traits.der.DERBackupTrait.DERBackupStateChangedEvent
+  1: new_device_state = enum
+  2: previous_device_state = enum
+
+io.span.traits.devicedescription.DeviceDescriptionTrait
+  1: vendor_id = enum
+  2: product_id = enum
+  3: product_revision = uint32
+  4: serial_number = string
+  5: product_firmware_version = string
+  6: capability_level = uint32
+  7: supported_traits = message
+  8: site_id = string
+  9: part_number = string
+
+io.span.traits.devicedescription.DeviceDescriptionTrait.FirmwareUpdateEvent
+  1: product_firmware_version = string
+
+io.span.traits.devicedescription.DeviceDescriptionTrait.TraitInstanceCreatedEvent
+  1: trait_info = message
+
+io.span.traits.devicedescription.DeviceDescriptionTrait.TraitInstanceRemovedEvent
+  1: trait_info = message
+
+io.span.traits.drive.CommissioningRequest
+  1: serial_number = string
+
+io.span.traits.drive.DriveApiConnectivity
+  1: connectivity_configuration = message
+
+io.span.traits.drive.DriveTrait
+  1: device_mode = enum
+  2: rotary_switch = enum
+  3: led_state = message
+  4: discovery_state = message
+  5: commissioning_state = message
+  11: connectivity = message
+  6: charge_mode = enum
+  7: lock_state = enum
+  8: last_disconnected_mode_ms = message
+  9: last_connected_mode_ms = message
+  10: active_faults = message
+
+io.span.traits.drive.DriveTrait.AdvertisedCurrentMetric
+  1: dt_millisec = uint32
+  2: advertised_current_milliamps = uint32
+  3: drawn_current_milliamps = uint32
+  4: set_current_milliamps = uint32
+
+io.span.traits.drive.DriveTrait.CommsStatusMetric
+  1: dt_millisec = uint32
+  2: msg_sent_count = uint32
+  3: msg_received_count = uint32
+  4: msg_bad_crc_count = uint32
+  5: msg_bad_framing_parse_count = uint32
+  6: usart_io_error_count = uint32
+  7: rx_buffer_util_pct = uint32
+
+io.span.traits.drive.DriveTrait.CpuUtilMetric
+  1: dt_millisec = uint32
+  2: idle_count = uint32
+  3: idle_pct = uint32
+
+io.span.traits.drive.DriveTrait.DeviceModeChangedEvent
+  1: device_mode = enum
+
+io.span.traits.drive.DriveTrait.DeviceStartupEvent
+  1: reset_cause = enum
+  2: uptime_at_last_fault_millisec = uint32
+  3: watchdog_thread = string
+  4: boot_count = uint32
+
+io.span.traits.drive.DriveTrait.DriveCommandRequests
+  1: set_target_current_request = message  (oneof=request)
+  2: commissioning_request = message  (oneof=request)
+  3: homeowner_config_request = message  (oneof=request)
+  4: lock_drive_request = message  (oneof=request)
+
+io.span.traits.drive.DriveTrait.DriveCommandResponses
+  1: set_target_current_response = message  (oneof=response)
+  2: commissioning_response = message  (oneof=response)
+  3: homeowner_config_response = message  (oneof=response)
+  4: lock_drive_response = message  (oneof=response)
+
+io.span.traits.drive.DriveTrait.DriveFault
+  1: metadata = message
+  6: charging_interrupted = message  (oneof=fault)
+  7: comms_lost = message  (oneof=fault)
+
+io.span.traits.drive.DriveTrait.DriveFaultEvent
+  1: fault = message
+
+io.span.traits.drive.DriveTrait.FaultCountMetric
+  1: dt_millisec = uint32
+  2: fault_counts = message
+
+io.span.traits.drive.DriveTrait.FaultCountMetric.FaultEntry
+  1: fault = enum
+  2: count = uint32
+
+io.span.traits.drive.DriveTrait.InternalFaultEvent
+  1: faults = enum
+
+io.span.traits.drive.DriveTrait.TemperatureMetric
+  1: dt_millisec = uint32
+  2: line1_celsius = uint32
+  3: line2_celsius = uint32
+  4: ambient_celsius = uint32
+  5: temp_throttle_milliamps = uint32
+
+io.span.traits.drive.DriveTrait.TemperatureThrottlingEvent
+  1: temp_throttle_amps = uint32
+
+io.span.traits.drive.DriveTrait.UptimeMetric
+  1: dt_millisec = uint32
+  2: uptime_millisec = uint32
+
+io.span.traits.drive.HomeownerConfigRequest
+  1: charge_mode = enum
+
+io.span.traits.drive.LockDriveRequest
+  1: state = enum
+
+io.span.traits.drive.LockDriveResponse
+  1: state = enum
+
+io.span.traits.drive.SetTargetCurrentRequest
+  1: target_current_amps = uint32
+
+io.span.traits.drive.SetTargetCurrentResponse
+  1: target_current_amps = uint32
+
+io.span.traits.load_management.ApplianceLoadManagementConfig
+  1: is_enabled = bool
+  11: min_unpaused_time_secs = uint32
+  12: min_paused_time_secs = uint32
+  13: max_throttled_time_secs = uint32
+  14: max_paused_time_secs = uint32
+
+io.span.traits.load_management.ApplianceLoadManagementTrait.ApplianceLoadManagementCommandRequests
+  1: control_appliance_request = message  (oneof=request)
+
+io.span.traits.load_management.ApplianceLoadManagementTrait.ApplianceLoadManagementCommandResponses
+  1: control_appliance_response = message  (oneof=response)
+
+io.span.traits.load_management.ApplianceLoadManagementTrait.ApplianceStateChangeEvent
+  1: control_requests = message
+  2: previous_appliance_state = enum
+  3: new_appliance_state = enum
+  4: previous_state_change_msec = message
+  5: new_state_change_msec = message
+  6: context = message
+
+io.span.traits.load_management.ApplianceLoadManagementTrait.ControlApplianceRequest
+  1: control_request = message
+  4: context = message
+
+io.span.traits.load_management.ApplianceLoadManagementTrait.ControlApplianceResponse
+  1: control_requests = message
+  2: appliance_state = enum
+
+io.span.traits.load_management.ApplianceLoadManagementTrait.ControlRequest
+  1: source = enum
+  2: control_type = enum
+  3: throttle_current_milliamps = uint32
+
+io.span.traits.load_management.ControlFunctionTrait
+  1: source = enum
+  2: is_active = bool
+  3: ongoing_event_start_ms = message
+
+io.span.traits.load_management.ControlFunctionTrait.ControlFunctionEventEnd
+  1: released_devices = message
+  2: event_start_ms = message
+  3: event_end_ms = message
+
+io.span.traits.load_management.ControlFunctionTrait.ControlFunctionEventModify
+  1: controlled_devices = message
+  2: released_devices = message
+  3: event_start_ms = message
+
+io.span.traits.load_management.ControlFunctionTrait.ControlFunctionEventStart
+  1: controlled_devices = message
+  2: event_start_ms = message
+
+io.span.traits.metering.MeterTrait
+  1: type = enum
+  2: meter_accuracy = enum
+  3: expected_source_meter_count = uint32
+  11: line_voltage_reference = enum
+
+io.span.traits.metering.MeterTrait.AggregateStatsMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: metadata = message
+  11: two_wire = message  (oneof=summaries)
+  12: three_wire = message  (oneof=summaries)
+  13: site_power = message  (oneof=summaries)
+  14: panel_power = message  (oneof=summaries)
+
+io.span.traits.metering.MeterTrait.EnergyMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: metadata = message
+  3: stream_id = string
+  4: interval_millisecs = uint32
+  11: basic = message  (oneof=accumulations)
+  12: site = message  (oneof=accumulations)
+  13: panel = message  (oneof=accumulations)
+
+io.span.traits.metering.MeterTrait.PowerMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: metadata = message
+  11: single = message  (oneof=measurements)
+  12: double = message  (oneof=measurements)
+  13: site = message  (oneof=measurements)
+  14: panel = message  (oneof=measurements)
+
+io.span.traits.metering.MeterTrait.SpatialAggregatedEnergyMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: site_energy_sample = message
+  3: resource_energy_samples = message
+  4: agg_window = enum
+
+io.span.traits.metering.MeterTrait.SpatialAggregatedPowerMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: site_power_sample = message
+  3: resource_power_samples = message
+  4: agg_window = enum
+  5: agg_rate = enum
+
+io.span.traits.metering.common.AggregatePowerStats
+  1: metrics_received_percent = uint32
+  2: real_power_milliwatts = message
+  3: apparent_power_millivoltamps = message
+  4: reactive_power_millivoltampsreactive = message
+  5: true_power_factor_milli = message
+  7: apparent_max_ts_since_start_time_millisecs = uint32
+
+io.span.traits.metering.common.AggregationMetadata
+  1: agg_window = enum
+  2: agg_rate = enum
+  3: metrics_received_percent = uint32
+  4: large_residual = bool
+  5: quality = enum
+
+io.span.traits.metering.common.BasicElectricalSample
+  1: current = message
+  2: voltage = message
+  3: power = message
+  4: energy_accumulators = message
+  5: frequency = message
+
+io.span.traits.metering.common.Current
+  1: current_rms_milliamps = uint32
+
+io.span.traits.metering.common.DirectionalEnergyAccumulators
+  1: real_energy_lifetime_decimilliwatthours = uint64
+  3: apparent_energy_lifetime_decimillivoltamphours = uint64
+
+io.span.traits.metering.common.DirectionalEnergyDeltas
+  1: real_energy_delta_decimilliwatthours = uint32
+  3: apparent_energy_delta_decimillivoltamphours = uint32
+  5: reactive_energy_delta_decimillivoltampsreactivehours = uint32
+
+io.span.traits.metering.common.DirectionalMeterEnergy
+  1: accumulators = message
+  2: deltas = message
+
+io.span.traits.metering.common.DoubleChannelAggregatePowerStats
+  1: line_a = message
+  2: line_b = message
+  3: combined = message
+  4: frequency = message
+
+io.span.traits.metering.common.DoubleChannelAggregatePowerStats.SimplifiedSingleChannelAggregatePowerStats
+  1: current_rms_milliamps = message
+  2: voltage_rms_millivolts = message
+
+io.span.traits.metering.common.DoubleChannelMeterPower
+  1: line_an = message
+  2: line_bn = message
+  3: combined = message
+
+io.span.traits.metering.common.DoubleChannelMeterPower.SimplifiedSingleChannelMeter
+  1: current = message
+  2: voltage = message
+
+io.span.traits.metering.common.EnergyAccumulators
+  1: real_energy_lifetime_export_decimilliwatthours = uint64
+  2: real_energy_lifetime_import_decimilliwatthours = uint64
+  3: apparent_energy_lifetime_export_decimillivoltamphours = uint64
+  4: apparent_energy_lifetime_import_decimillivoltamphours = uint64
+
+io.span.traits.metering.common.EnergyDeltas
+  1: real_energy_delta_export_decimilliwatthours = uint32
+  2: real_energy_delta_import_decimilliwatthours = uint32
+  3: apparent_energy_delta_export_decimillivoltamphours = uint32
+  4: apparent_energy_delta_import_decimillivoltamphours = uint32
+  5: reactive_energy_delta_export_decimillivoltampsreactivehours = uint32
+  6: reactive_energy_delta_import_decimillivoltampsreactivehours = uint32
+
+io.span.traits.metering.common.Frequency
+  1: line_frequency_millihertz = uint32
+
+io.span.traits.metering.common.InstanceEnergySample
+  1: trait_metadata = message
+  2: trait_instance_id = uint32
+  3: metadata = message
+  4: stream_id = string
+  5: interval_millisecs = uint32
+  9: metrics_received_percent = uint32
+  6: basic = message  (oneof=measurements)
+  7: panel = message  (oneof=measurements)
+  8: third_party_sample = message  (oneof=measurements)
+
+io.span.traits.metering.common.InstancePowerSample
+  1: trait_metadata = message
+  2: trait_instance_id = uint32
+  3: metadata = message
+  4: single = message  (oneof=measurements)
+  5: double = message  (oneof=measurements)
+  6: panel = message  (oneof=measurements)
+  7: third_party_sample = message  (oneof=measurements)
+
+io.span.traits.metering.common.InstancePowerStatsSample
+  1: trait_metadata = message
+  2: trait_instance_id = uint32
+  3: metadata = message
+  4: metrics_received_percent = uint32
+  11: two_wire = message  (oneof=summaries)
+  12: three_wire = message  (oneof=summaries)
+  14: panel_power = message  (oneof=summaries)
+  15: third_party_site = message  (oneof=summaries)
+
+io.span.traits.metering.common.LugPower
+  1: power = message
+  2: quality = enum
+  3: missing_source_meter_count = uint32
+  4: expected_source_meter_count = uint32
+
+io.span.traits.metering.common.MeasurementMetadata
+  1: quality = enum
+  2: sequence_number = uint32
+  3: spatial_large_residual = bool
+  4: missing_source_meter_count = uint32
+
+io.span.traits.metering.common.MeterEnergy
+  1: accumulators = message
+  2: deltas = message
+
+io.span.traits.metering.common.MicrogridInterconnectVoltageSample
+  1: line_l1n = message
+  2: line_l2n = message
+  3: load_l1n = message
+  4: load_l2n = message
+  5: disconnect_line_l1_load_l1 = message
+  6: disconnect_line_l2_load_l2 = message
+
+io.span.traits.metering.common.PanelAggregatePowerStats
+  1: feeder = message
+  2: feedthrough_lugs = message
+  3: panel_in = message
+  4: panel_out = message
+  5: residual = message
+  6: busbar_current = message
+  7: power_balance = message
+  8: residual_panel_in = message
+  9: residual_panel_out = message
+  10: upstream = message
+
+io.span.traits.metering.common.PanelEnergy
+  1: residual = message
+  2: balance = message
+  3: feeder = message
+  4: feedthrough_lugs = message
+
+io.span.traits.metering.common.PanelInstant
+  1: feeder = message
+  2: feedthrough = message
+  3: total_branch = message
+  4: balance = message
+  5: panel_in = message
+  6: panel_out = message
+  7: residual = message
+  8: busbar_current = message
+  9: power_balance = message
+  10: residual_panel_in = message
+  11: residual_panel_out = message
+
+io.span.traits.metering.common.Power
+  1: real_power_milliwatts = sint32
+  2: apparent_power_millivoltamps = uint32
+  3: reactive_power_millivoltampsreactive = sint32
+  4: true_power_factor_milli = sint32
+
+io.span.traits.metering.common.RemoteMeterVoltageSample
+  1: vab = message
+  2: vbc = message
+  3: vac = message
+  4: van = message
+  5: vbn = message
+  6: vcn = message
+
+io.span.traits.metering.common.ResourceEnergySamples
+  1: resource_id = message
+  2: instance_energy_samples = message
+
+io.span.traits.metering.common.ResourcePowerSamples
+  1: resource_id = message
+  2: instance_power_stats_samples = message
+
+io.span.traits.metering.common.SignedAggregateStats
+  1: min = sint32
+  2: max = sint32
+  3: avg = sint32
+
+io.span.traits.metering.common.SingleChannelAggregatePowerStats
+  1: current_rms_milliamps = message
+  2: voltage_rms_millivolts = message
+  3: real_power_milliwatts = message
+  4: apparent_power_millivoltamps = message
+  5: reactive_power_millivoltampsreactive = message
+  6: true_power_factor_milli = message
+  7: current_rms_max_ts_since_start_time_millisecs = uint32
+
+io.span.traits.metering.common.SingleChannelMeterPower
+  1: current = message
+  2: voltage = message
+  3: power = message
+  4: frequency = message
+
+io.span.traits.metering.common.SiteAggregatePowerStats
+  1: grid = message
+  2: home = message
+  3: solar = message
+  4: battery = message
+  5: generator = message
+  6: site_residual = message
+  11: grid_to_home = message
+  12: grid_to_battery = message
+  21: solar_to_home = message
+  22: solar_to_battery = message
+  23: solar_to_grid = message
+  31: battery_to_home = message
+  32: battery_to_grid = message
+  41: generator_to_home = message
+  42: generator_to_battery = message
+
+io.span.traits.metering.common.SiteEnergy
+  1: grid = message
+  2: home = message
+  3: solar = message
+  4: battery = message
+  5: generator = message
+  6: balance = message
+  7: residual = message
+  8: site_residual = message
+  11: grid_to_home = message
+  12: grid_to_battery = message
+  21: solar_to_home = message
+  22: solar_to_battery = message
+  23: solar_to_grid = message
+  31: battery_to_home = message
+  32: battery_to_grid = message
+  41: generator_to_home = message
+  42: generator_to_battery = message
+
+io.span.traits.metering.common.SiteEnergySample
+  1: site_measurement_metadata = message
+  2: stream_id = string
+  3: interval_millisecs = uint32
+  4: site_energy = message
+
+io.span.traits.metering.common.SiteInstantPower
+  1: grid = message
+  2: home = message
+  3: solar = message
+  4: battery = message
+  5: generator = message
+  6: balance = message
+  7: residual = message
+  8: power_balance = message
+  9: site_residual = message
+  11: grid_to_home = message
+  12: grid_to_battery = message
+  21: solar_to_home = message
+  22: solar_to_battery = message
+  23: solar_to_grid = message
+  31: battery_to_home = message
+  32: battery_to_grid = message
+  41: generator_to_home = message
+  42: generator_to_battery = message
+  51: voltage_l1 = message
+  52: voltage_l2 = message
+  53: frequency = message
+
+io.span.traits.metering.common.SitePowerSample
+  1: site_measurement_metadata = message
+  2: site_aggregate_power_stats = message
+
+io.span.traits.metering.common.SpatialMeterEnergy
+  1: energy = message
+  2: quality = enum
+  3: missing_source_meter_count = uint32
+  4: expected_source_meter_count = uint32
+
+io.span.traits.metering.common.SpatialPower
+  1: power = message
+  2: quality = enum
+  3: missing_source_meter_count = uint32
+  4: expected_source_meter_count = uint32
+
+io.span.traits.metering.common.StateOfEnergySample
+  2: available_on_grid_usable_energy_wh = uint32
+  3: available_on_grid_usable_energy_decipct = uint32
+
+io.span.traits.metering.common.ThirdPartySiteAggregatePowerStats
+  1: grid = message
+  2: site_load = message
+  3: solar = message
+  4: battery = message
+
+io.span.traits.metering.common.ThirdPartySiteSample
+  1: grid = message
+  2: site_load = message
+  3: solar = message
+  4: battery = message
+
+io.span.traits.metering.common.UnsignedAggregateStats
+  1: min = uint32
+  2: max = uint32
+  3: avg = uint32
+
+io.span.traits.metering.common.Voltage
+  3: voltage_rms_millivolts = uint32
+
+io.span.traits.metus.CloudConnectionInfo
+  1: serial_number = string
+  2: password = string
+
+io.span.traits.metus.MetusGroupTrait
+  1: initial_state = message  (oneof=status)
+  2: authentication_state = message  (oneof=status)
+  3: auto_discovery_state = message  (oneof=status)
+  4: ready_state = message  (oneof=status)
+
+io.span.traits.metus.MetusGroupTrait.AuthenticationState
+  1: result = enum
+
+io.span.traits.metus.MetusGroupTrait.AutoDiscoveryState
+  2: pending = message  (oneof=status)
+  3: auto_discovery_success = message  (oneof=status)
+  4: in_progress = message  (oneof=status)
+  6: unknown_error = message  (oneof=status)
+
+io.span.traits.metus.MetusGroupTrait.AutoDiscoverySuccess
+  1: number_metus_unit_discovered = uint32
+
+io.span.traits.metus.MetusGroupTrait.MergeMetusUnitsConnectionDataRequest
+  1: cloud_connection_info = message
+
+io.span.traits.metus.MetusGroupTrait.MetusGroupCommandRequest
+  1: update_authentication_state_request = message  (oneof=request)
+  2: trigger_auto_discovery_request = message  (oneof=request)
+  3: merge_metus_units_connection_data_request = message  (oneof=request)
+
+io.span.traits.metus.MetusGroupTrait.ReadyState
+  1: metus_unit_trait_instance_id = int32
+
+io.span.traits.metus.MetusGroupTrait.UpdateAuthenticationStateRequest
+  1: authentication_state_type = enum
+
+io.span.traits.metus.MetusUnitTrait
+  2: is_span_controllable = bool
+  3: cloud_connection_info = message
+  4: udp_broadcast_connection_info = message
+  10: api_connection_state = message
+  20: paired_breaker_status = message
+
+io.span.traits.metus.MetusUnitTrait.ApiConnectionState
+  11: initial_state = message  (oneof=status)
+  12: in_progress = message  (oneof=status)
+  13: successful_connection = message  (oneof=status)
+  14: device_authentication_error = message  (oneof=status)
+  15: no_response = message  (oneof=status)
+
+io.span.traits.metus.MetusUnitTrait.BreakerVerificationRequest
+  1: serial_number = string
+  2: breaker_number = uint32
+
+io.span.traits.metus.MetusUnitTrait.HighLevelApiConnectionState
+  16: initial_state = message  (oneof=status)
+  17: connecting = message  (oneof=status)
+  18: running = message  (oneof=status)
+  19: not_connected = message  (oneof=status)
+
+io.span.traits.metus.MetusUnitTrait.MetusAuthenticationErrorEvent
+  1: serial_number = string
+
+io.span.traits.metus.MetusUnitTrait.MetusCommandRequests
+  1: power_limit_request = message  (oneof=request)
+  2: breaker_confirm_request = message  (oneof=request)
+
+io.span.traits.metus.MetusUnitTrait.MetusMetrics
+  1: average_power_idu_milliwatts = int64
+  2: average_power_ehk_milliwatts = int64
+  3: inferred_current_compressor_speed_pct = int64
+
+io.span.traits.metus.MetusUnitTrait.PairedBreaker
+  1: breaker_state = enum
+  2: breaker_number = uint32
+
+io.span.traits.metus.MetusUnitTrait.PowerLimitRequest
+  1: idu_milliwatts = uint32
+  2: ehk_milliwatts = uint32
+  3: compressor_speed_limit = uint32
+  4: defrost = bool
+
+io.span.traits.metus.UdpBroadcastConnectionInfo
+  1: serial_number = string
+  2: local_ip = string
+
+io.span.traits.modules.BranchModuleTrait.BranchModuleFault
+  1: metadata = message
+  6: module_not_connected_fault = message  (oneof=fault)
+
+io.span.traits.modules.BranchModuleTrait.BranchModuleFaultEvent
+  1: fault = message
+
+io.span.traits.modules.CreateMeteredLugsModuleRequest
+  1: location = enum
+  2: max_rating_amp = uint32
+  3: hardware_info = message
+  4: panel_aux_ct_ports = enum
+  5: ct_config_333_mv_reference = message
+  7: module_type = enum
+
+io.span.traits.modules.CreateMeteredLugsModuleResponse
+  1: lug_module = message
+
+io.span.traits.modules.CreateRemoteCtRequest
+  1: aux_ct_ports = enum
+  2: hardware_info = message
+
+io.span.traits.modules.CreateRemoteCtResponse
+  1: remote_ct = message
+
+io.span.traits.modules.ExternalModuleConnection
+  1: module = message
+  2: connection_status = enum
+
+io.span.traits.modules.GetRemoteCtCalibrationRequest
+  1: aux_ct_ports = enum
+  2: calibration_type = enum
+
+io.span.traits.modules.GetRemoteCtCalibrationResponse
+  1: calibration_data = message
+
+io.span.traits.modules.InternalModuleConnection
+  1: module = message
+  2: connection_status = enum
+
+io.span.traits.modules.LugModuleTrait.LugModuleCommandRequests
+  1: update_mains_module_request = message  (oneof=request)
+
+io.span.traits.modules.LugModuleTrait.LugModuleFault
+  1: metadata = message
+  6: mains_module_power_supply_fault = message  (oneof=fault)
+  7: module_not_connected_fault = message  (oneof=fault)
+
+io.span.traits.modules.LugModuleTrait.LugModuleFaultEvent
+  1: fault = message
+
+io.span.traits.modules.RemoteCtTrait.RemoteCTCommandResponses
+  1: get_remote_ct_calibration_response = message  (oneof=response)
+
+io.span.traits.modules.RemoteCtTrait.RemoteCtCommandRequests
+  1: get_remote_ct_calibration_request = message  (oneof=request)
+  2: set_remote_ct_calibration_request = message  (oneof=request)
+
+io.span.traits.modules.RemoveMeteredLugsRequest
+  1: lug_module = message
+
+io.span.traits.modules.RemoveRemoteCtRequest
+  1: remote_ct = message
+
+io.span.traits.modules.UpdateMainsModuleRequest
+  1: set_breaker_rating = message  (oneof=breakerRating)
+  2: clear_breaker_rating = message  (oneof=breakerRating)
+
+io.span.traits.modules.UpdateMainsModuleRequest.SetBreakerRating
+  1: breaker_rating_amp = uint32
+
+io.span.traits.modules.UpdatePanelCTConfigurationRequest
+  1: update_metered_lugs_ct_configurations = message
+
+io.span.traits.modules.UpdatePanelCTConfigurationRequest.UpdateMeteredLugsCTConfiguration
+  1: lug_module = message
+  2: panel_aux_ct_ports = enum
+
+io.span.traits.network.AccessPoint
+  1: ssid = string
+  2: bssid = string
+  3: mode = enum
+  4: frequency_megahertz = uint32
+  5: security = enum
+
+io.span.traits.network.AccessPointCandidate
+  1: ap = message
+  2: signal_strength_pct = uint32
+
+io.span.traits.network.CellularTrait
+  1: interface = message
+  2: sim_imei = string
+  3: modem_id = string
+  4: modem_capability = enum
+  5: apn = string
+  6: network_carrier = enum
+  7: active_band = enum
+  8: available_bands = enum
+
+io.span.traits.network.CellularTrait.CellularCommandRequests
+  1: cellular_enablement_request = message  (oneof=request)
+
+io.span.traits.network.CellularTrait.CellularCommandResponses
+  1: cellular_enablement_response = message  (oneof=response)
+
+io.span.traits.network.CellularTrait.CellularDeviceStateChangeEvent
+  1: interface = message
+  2: apn = string
+  3: network_carrier = enum
+  4: active_band = enum
+  5: updated_device_status = message
+  6: updated_connection_status = message
+
+io.span.traits.network.CellularTrait.CellularEnablementChangeEvent
+  1: is_enabled = bool
+
+io.span.traits.network.CellularTrait.CellularEnablementRequest
+  1: is_enabled = bool
+
+io.span.traits.network.CellularTrait.CellularEnablementResponse
+  1: response_status = enum
+
+io.span.traits.network.CellularTrait.CellularMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: common = message
+  3: signal_strength_pct = uint32
+
+io.span.traits.network.ConnectionConfiguration
+  1: ssid = string  (oneof=id)
+  2: bssid = string  (oneof=id)
+  3: security = enum
+  4: password = string
+
+io.span.traits.network.EthernetTrait
+  1: interface = message
+
+io.span.traits.network.EthernetTrait.EthernetDeviceStateChangeEvent
+  1: updated_device_status = message
+  2: updated_connection_status = message
+
+io.span.traits.network.EthernetTrait.EthernetMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: common = message
+
+io.span.traits.network.WiFiTrait
+  1: interface = message
+  2: active_ap = message
+
+io.span.traits.network.WiFiTrait.ConnectToWifiFailureResponse
+  1: failure_reason = enum
+
+io.span.traits.network.WiFiTrait.ConnectToWifiRequest
+  1: configuration = message
+
+io.span.traits.network.WiFiTrait.DeleteAccessPointFailureResponse
+  1: failure_reason = enum
+
+io.span.traits.network.WiFiTrait.DeleteAccessPointRequest
+  1: ap = message
+
+io.span.traits.network.WiFiTrait.ScanAccessPointPartialResponse
+  1: access_points = message
+
+io.span.traits.network.WiFiTrait.ScanAccessPointResponse
+  1: access_points = message
+
+io.span.traits.network.WiFiTrait.WiFiCommandRequests
+  1: scan_ap_request = message  (oneof=request)
+  2: connect_ssid_request = message  (oneof=request)
+  3: delete_ap_request = message  (oneof=request)
+
+io.span.traits.network.WiFiTrait.WiFiCommandResponses
+  1: scan_ap_partial_response = message  (oneof=response)
+  2: scan_ap_response = message  (oneof=response)
+  3: connect_success_response = message  (oneof=response)
+  4: connect_partial_response = message  (oneof=response)
+  5: connect_failure_response = message  (oneof=response)
+  6: delete_failure_response = message  (oneof=response)
+
+io.span.traits.network.WiFiTrait.WifiDeviceStateChangeEvent
+  1: ap = message
+  2: connection = message
+  3: updated_device_status = message
+  4: updated_connection_status = message
+
+io.span.traits.network.WiFiTrait.WifiMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: common = message
+  3: signal_strength_pct = uint32
+
+io.span.traits.network.common.ConnectionStatus
+  1: debug_info = message
+
+io.span.traits.network.common.ConnectionStatus.DebugInfo
+  1: state = enum
+  2: state_reason = enum
+
+io.span.traits.network.common.DeviceStatus
+  1: state = enum
+  2: debug_info = message
+
+io.span.traits.network.common.DeviceStatus.DebugInfo
+  1: nm_state = enum
+  2: nm_state_reason = enum
+
+io.span.traits.network.common.DhcpOption
+  1: subnet_mask = string
+
+io.span.traits.network.common.IpConfig
+  1: ip_address = string
+  2: gateway = string
+  3: routes = message
+  4: connectivity_state = enum
+
+io.span.traits.network.common.IpConfigs
+  1: ipv4 = message
+  2: dhcp4 = message
+  3: ipv6 = message
+  4: dhcp6 = message
+
+io.span.traits.network.common.IpRouteData
+  1: destination = string
+  2: prefix = string
+  3: next_hop = string
+  4: metric = uint32
+  5: mtu = uint32
+
+io.span.traits.network.common.NetworkConnection
+  1: name = string
+  2: uuid = string
+  3: interface_name = string
+  4: ip_configs = message
+  5: status = message
+
+io.span.traits.network.common.NetworkInterface
+  1: name = string
+  2: hw_address = string
+  3: type = enum
+  4: mtu = uint64
+  5: status = message
+  6: active_connection = message
+  7: available_connections = message
+
+io.span.traits.network.common.NetworkInterfaceTransmissionMetric
+  1: tx_bytes = uint64
+  2: tx_packets = uint64
+  3: tx_packets_dropped = uint64
+  4: tx_packets_errors = uint64
+  5: rx_bytes = uint64
+  6: rx_packets = uint64
+  7: rx_packets_dropped = uint64
+  8: rx_packets_errors = uint64
+
+io.span.traits.panel.PanelTrait.DoorChangedEvent
+  1: state = enum
+
+io.span.traits.panel.PanelTrait.FanChangedEvent
+  1: status = message
+  2: trigger = enum
+
+io.span.traits.panel.PanelTrait.FanInfo
+  1: state = enum
+  2: speed_rpm = uint32
+  3: condition = enum
+
+io.span.traits.panel.PanelTrait.FanStatus
+  1: state = enum
+  2: fan1_info = message
+  3: fan2_info = message
+  4: cooling_status = enum
+
+io.span.traits.panel.PanelTrait.InstallContext
+  1: location = enum
+  2: temperature_profile = enum
+
+io.span.traits.panel.PanelTrait.LedChangedEvent
+  1: led_state = enum
+
+io.span.traits.panel.PanelTrait.PanelCommandRequests
+  1: blink_led_request = message  (oneof=request)
+  2: create_circuit_breaker_request = message  (oneof=request)
+  3: remove_circuit_breaker_request = message  (oneof=request)
+  4: update_panel_topology_request = message  (oneof=request)
+  5: update_circuit_breaker_metadata_batch_request = message  (oneof=request)
+  6: replace_circuit_breaker_request = message  (oneof=request)
+  7: create_metered_lugs_module_request = message  (oneof=request)
+  8: update_panel_ct_configuration_request = message  (oneof=request)
+  9: remove_metered_lugs_request = message  (oneof=request)
+  10: update_feed_config_request = message  (oneof=request)
+  11: set_commissioning_status_request = message  (oneof=request)
+  12: reset_panel_preferred_disconnect_rank_request = message  (oneof=request)
+  13: create_remote_ct_request = message  (oneof=request)
+  14: remove_remote_ct_request = message  (oneof=request)
+  15: update_site_feeder_rating_request = message  (oneof=request)
+  16: set_grid_state_request = message  (oneof=request)
+  17: set_mid_mode_request = message  (oneof=request)
+  18: panel_software_reset_request = message  (oneof=request)
+  19: panel_spine_software_reset_request = message  (oneof=request)
+
+io.span.traits.panel.PanelTrait.PanelCommandResponses
+  1: blink_led_response = message  (oneof=response)
+  2: create_circuit_breaker_response = message  (oneof=response)
+  3: remove_circuit_breaker_response = message  (oneof=response)
+  4: update_panel_topology_response = message  (oneof=response)
+  5: update_circuit_breaker_metadata_batch_response = message  (oneof=response)
+  6: replace_circuit_breaker_response = message  (oneof=response)
+  7: create_metered_lugs_module_response = message  (oneof=response)
+  13: create_remote_ct_response = message  (oneof=response)
+
+io.span.traits.panel.PanelTrait.PanelFault
+  1: metadata = message
+  6: unconfigured_load = message  (oneof=fault)
+  7: invalid_feeder_measurements = message  (oneof=fault)
+  8: load_detected_unconfigured_breakers = message  (oneof=fault)
+  9: source_detected_unconfigured_breakers = message  (oneof=fault)
+  10: power_detected_unconfigured_ftl = message  (oneof=fault)
+  11: no_power_detected_ftl = message  (oneof=fault)
+  12: power_sign_mismatch_ftl = message  (oneof=fault)
+  13: module_power_supply_fault = message  (oneof=fault)
+  14: pcm_not_grounded = message  (oneof=fault)
+  15: module_not_connected_fault = message  (oneof=fault)
+  16: non_zero_power_balance = message  (oneof=fault)
+  17: gateway_heartbeat_not_detected = message  (oneof=fault)
+  18: dsw_debugging_fault = message  (oneof=fault)
+  19: panel_aux_ct_invalid = message  (oneof=fault)
+  20: modbus_device_communication = message  (oneof=fault)
+  21: mid_metering_fault = message  (oneof=fault)
+  22: mid_voltage_fault = message  (oneof=fault)
+  23: modbus_device_equipment = message  (oneof=fault)
+
+io.span.traits.panel.PanelTrait.PanelFaultEvent
+  1: fault = message
+
+io.span.traits.panel.PanelTrait.PanelSize
+  1: max_number_of_slots = uint32
+  3: max_module_slots = uint32
+  2: source = enum
+
+io.span.traits.panel.PanelTrait.ReplaceCircuitBreakerRequest
+  1: remove_circuit_breaker = message
+  2: create_circuit_breaker = message
+
+io.span.traits.panel.PanelTrait.ReplaceCircuitBreakerResponse
+  1: removed_circuit_breaker = message
+  2: created_circuit_breaker = message
+
+io.span.traits.panel.PanelTrait.SetCommissioningStatusRequest
+  1: commissioning_status = enum
+
+io.span.traits.panel.PanelTrait.SetGridStateRequest
+  1: grid_state = enum
+
+io.span.traits.panel.PanelTrait.SetMIDModeRequest
+  1: mid_mode = enum
+
+io.span.traits.panel.PanelTrait.UpdateCircuitBreakerMetadataBatchRequest
+  1: update_circuit_breaker_metadata = message
+
+io.span.traits.panel.PanelTrait.UpdateCircuitBreakerMetadataBatchResponse
+  1: updated_circuit_breaker_metadata = message
+
+io.span.traits.panel.PanelTrait.UpdateFeedConfigRequest
+  1: general_feeder = message  (oneof=feeder)
+  2: circuit_breaker_feeder = message  (oneof=feeder)
+
+io.span.traits.panel.PanelTrait.UpdateFeedConfigRequest.GeneralFeeder
+  1: feeder = message
+
+io.span.traits.panel.PanelTrait.UpdatePanelCTConfigurationRequest
+  1: update_aux_ct_configurations = message
+
+io.span.traits.panel.PanelTrait.UpdatePanelCTConfigurationRequest.UpdateAuxCTConfiguration
+  1: aux_ct_occupant = message
+  2: panel_aux_ct_ports = enum
+
+io.span.traits.panel.PanelTrait.UpdatePanelTopologyRequest
+  1: create_circuit_breakers = message
+  2: remove_circuit_breakers = message
+
+io.span.traits.panel.PanelTrait.UpdatePanelTopologyResponse
+  1: created_circuit_breakers = message
+  2: removed_circuit_breakers = message
+
+io.span.traits.panel.PanelTrait.UpdateSiteFeederRatingRequest
+  2: conductor_rating_milliamps = uint32
+
+io.span.traits.panel.common.Feeder
+  1: location = enum
+  2: conductor_rating_milliamps = uint32
+
+io.span.traits.power_load_manager.ControlPointTrait.AccumulatorStage
+  1: upper_limit_current_pct = uint32
+  2: steady_state_factor_millikelvin = uint32
+  3: time_constant_millis = uint32
+
+io.span.traits.power_load_manager.ControlPointTrait.ControlPointCommandRequests
+  1: enable_and_configure_control_point_request = message  (oneof=request)
+  2: disable_control_point_request = message  (oneof=request)
+
+io.span.traits.power_load_manager.ControlPointTrait.ControlPointDisconnectConditionValues
+  1: raw_normalized_current_pct = uint32
+  2: filtered_normalized_current_pct = uint32
+  3: accumulator_temperature_millikelvin = uint32
+  4: delay_since_last_disconnect_millis = uint32
+
+io.span.traits.power_load_manager.ControlPointTrait.ControlPointHotEvent
+  1: disconnect_condition_id = uint32
+  2: disconnect_condition_values = message
+
+io.span.traits.power_load_manager.ControlPointTrait.ControlPointSetPointUpdated
+  1: set_point_amps = message
+
+io.span.traits.power_load_manager.ControlPointTrait.DisconnectCondition
+  1: current_threshold_pct = uint32
+  2: temperature_threshold_millikelvin = uint32
+  3: min_delay_between_disconnect_millis = uint32
+
+io.span.traits.power_load_manager.ControlPointTrait.ReleaseCondition
+  1: current_threshold_pct = uint32
+  2: temperature_threshold_millikelvin = uint32
+  3: min_delay_between_release_millis = uint32
+  4: min_delay_since_disconnect_millis = uint32
+
+io.span.traits.power_load_manager.ControlPointTrait.ServiceUsageMetric
+  1: elapsed_since_start_time_millisecs = uint32
+  2: control_point_current_milliamps = uint32
+  3: filtered_control_point_current_milliamps = uint32
+  4: drive_current_milliamps = uint32
+  5: filtered_drive_current_milliamps = uint32
+  6: dynamic_charge_target_milliamps = uint32
+  7: accumulator_value_millikelvin = uint32
+  8: last_downstream_disconnect_millis = message
+  9: last_downstream_release_millis = message
+
+io.span.traits.power_load_manager.EnableAndConfigureControlPointRequest
+  1: set_point_amps = message
+
+io.span.traits.powerup.BulkConfigureAndEnablePowerupControlPointRequest
+  1: configure_and_enable_control_point_requests = message
+
+io.span.traits.powerup.BulkDisablePowerupControlPointRequest
+  1: disable_powerup_control_point_requests = message
+
+io.span.traits.powerup.PowerUpOfferingTrait
+  1: control_points = message
+
+io.span.traits.powerup.PowerUpOfferingTrait.PowerUpCommandRequests
+  4: disable_control_point_request = message  (oneof=request)
+  5: configure_and_enable_control_point_request = message  (oneof=request)
+  6: mark_control_point_for_reconfiguration_request = message  (oneof=request)
+  7: associate_new_control_point = message  (oneof=request)
+  8: enable_control_points_for_drive_request = message  (oneof=request)
+  9: homeowner_disable_control_point_request = message  (oneof=request)
+  10: homeowner_enable_control_point_request = message  (oneof=request)
+  11: delete_powerup_control_point_request = message  (oneof=request)
+  12: bulk_disable_control_point_request = message  (oneof=request)
+  13: bulk_configure_and_enable_control_point_request = message  (oneof=request)
+
+io.span.traits.powerup.PowerUpTrait
+  2: is_enabled = bool
+  3: is_active = bool
+  4: max_allowed_current_amps = float
+  5: ongoing_event_start_ms = message
+  6: set_powerup_enablement_request_ms = message
+  7: request_homeowner_config = bool
+  8: is_commissioning_complete = bool
+  9: configurable_service_limits = map
+
+io.span.traits.powerup.PowerUpTrait.ConfigurableServiceLimit
+  1: source = enum
+  2: enablement_status = enum
+  3: is_active = bool
+  4: current_limit_milliamps = uint32
+
+io.span.traits.powerup.PowerUpTrait.ConfigurableServiceLimitCommandResponse
+  2: standard_response = message
+
+io.span.traits.powerup.PowerUpTrait.ControlledBranchInfo
+  1: branch_id = string
+  8: circuit_breaker = message
+  9: current_milliamps = uint32
+  10: allocated_current_milliamps = uint32
+  4: load_manager_action_active = bool
+  5: load_manager_branch_on = bool
+  6: load_manager_last_status_change_ms = message
+  7: load_manager_last_off_ms = message
+
+io.span.traits.powerup.PowerUpTrait.DisableConfigurableServiceLimitRequest
+  1: source = enum
+
+io.span.traits.powerup.PowerUpTrait.EnableAndSetConfigurableServiceLimitRequest
+  1: source = enum
+  2: current_limit_milliamps = uint32
+
+io.span.traits.powerup.PowerUpTrait.EnableConfigurableServiceLimitRequest
+  1: source = enum
+
+io.span.traits.powerup.PowerUpTrait.FeatureEnablementChangeEvent
+  1: is_enabled = bool
+
+io.span.traits.powerup.PowerUpTrait.LoadManagerInfo
+  4: accumulator_value_millikelvin = uint32
+  2: last_shed_ms = message
+  3: last_restore_ms = message
+
+io.span.traits.powerup.PowerUpTrait.PowerUpActiveModeChangeEvent
+  1: is_active = bool
+
+io.span.traits.powerup.PowerUpTrait.PowerUpBranchControlled
+  1: branch_id = string
+  4: circuit_breaker = message
+  2: controlled_type = enum
+  3: controlled_start_time_ms = message
+
+io.span.traits.powerup.PowerUpTrait.PowerUpBranchRestored
+  1: branch_id = string
+  3: circuit_breaker = message
+  2: controlled_start_time_ms = message
+
+io.span.traits.powerup.PowerUpTrait.PowerUpCommandRequests
+  1: set_enablement_request = message  (oneof=request)
+  2: finish_homeowner_config_request = message  (oneof=request)
+  3: complete_commissioning_request = message  (oneof=request)
+  4: enable_and_set_configurable_service_limit_request = message  (oneof=request)
+  5: set_configurable_service_limit_milliamps_request = message  (oneof=request)
+  6: enable_configurable_service_limit_request = message  (oneof=request)
+  7: disable_configurable_service_limit_request = message  (oneof=request)
+  8: reset_configurable_service_limit_request = message  (oneof=request)
+
+io.span.traits.powerup.PowerUpTrait.PowerUpCommandResponses
+  1: configurable_service_limit_command_response = message  (oneof=response)
+
+io.span.traits.powerup.PowerUpTrait.PowerUpEventEnd
+  1: event_start_ms = message
+  2: restored_branches = message
+
+io.span.traits.powerup.PowerUpTrait.PowerUpEventModify
+  1: controlled_branches = message
+  2: restored_branches = message
+  3: event_start_ms = message
+
+io.span.traits.powerup.PowerUpTrait.PowerUpEventStart
+  1: controlled_branches = message
+
+io.span.traits.powerup.PowerUpTrait.ResetConfigurableServiceLimitRequest
+  1: source = enum
+
+io.span.traits.powerup.PowerUpTrait.ServiceUsageMetric
+  1: millis_since_start_time = uint32
+  5: main_breaker_current_milliamps = uint32
+  3: controlled_branches = message
+  4: load_manager_info = message
+
+io.span.traits.powerup.PowerUpTrait.SetConfigurableServiceLimitMilliampsRequest
+  1: source = enum
+  2: current_limit_milliamps = uint32
+
+io.span.traits.powerup.PowerUpTrait.SetPowerUpEnablementRequest
+  1: is_enabled = bool
+
+io.span.traits.schedule.ScheduleTrait
+  1: schedule = message
+  2: is_enabled = bool
+  6: is_active = bool
+  7: next_start_time = message
+  8: next_end_time = message
+
+io.span.traits.schedule.ScheduleTrait.ScheduleCommandRequests
+  1: update_schedule = message  (oneof=request)
+
+io.span.traits.schedule.ScheduleTrait.UpdateScheduleRequest
+  1: schedule = message
+  2: is_enabled = bool
+
+io.span.traits.site.AddSiteProfileOverrideRequest
+  1: override_request = message
+
+io.span.traits.site.ChangeSiteProfileRequest
+  1: site_profile = enum
+
+io.span.traits.site.ClearSiteProfileOverrideRequest
+  1: override = enum
+
+io.span.traits.site.Override
+  1: override_type = enum
+  2: expires_at = message
+
+io.span.traits.site.SiteProfile
+  1: default_profile = enum
+  2: active_overrides = message
+  3: realtime_published_resolutions = enum
+  4: bulk_uploaded_resolutions = enum
+
+io.span.traits.site.SiteTrait.AcceptRemotePanelRequest
+  1: panel_uuid = string
+
+io.span.traits.site.SiteTrait.CommissioningStatusChangeEvent
+  1: old_status = enum
+  2: new_status = enum
+
+io.span.traits.site.SiteTrait.GridIslandingModeChangeEvent
+  1: grid_islanding_mode = enum
+
+io.span.traits.site.SiteTrait.OverrideGridIslandingModeRequest
+  1: grid_islanding_mode = enum
+
+io.span.traits.site.SiteTrait.RejectRemotePanelRequest
+  1: panel_uuid = string
+
+io.span.traits.site.SiteTrait.SetBackupConfigBatchRequest
+  1: requests = message
+
+io.span.traits.site.SiteTrait.SetPreferredDisconnectRankBatchRequest
+  1: requests = message
+
+io.span.traits.site.SiteTrait.SiteCommandRequests
+  1: initiate_discovery_request = message  (oneof=request)
+  2: look_for_authentication_action_request = message  (oneof=request)
+  3: accept_remote_panel_request = message  (oneof=request)
+  4: reject_remote_panel_request = message  (oneof=request)
+  5: complete_site_commissioning_request = message  (oneof=request)
+  6: set_preferred_disconnect_rank_batch_request = message  (oneof=request)
+  7: reset_preferred_disconnect_rank_request = message  (oneof=request)
+  8: override_grid_islanding_mode_request = message  (oneof=request)
+  9: set_backup_config_batch_request = message  (oneof=request)
+  10: change_site_profile_request = message  (oneof=request)
+  11: add_site_profile_override_request = message  (oneof=request)
+  12: clear_site_profile_override_request = message  (oneof=request)
+  13: site_software_reset_request = message  (oneof=request)
+  14: complete_initial_site_commissioning_request = message  (oneof=request)
+
+io.span.traits.site.SiteTrait.SiteCommandResponses
+  1: initiate_discovery_response = message  (oneof=response)
+  2: look_for_authentication_action_response = message  (oneof=response)
+  3: accept_remote_panel_response = message  (oneof=response)
+  4: reject_remote_panel_response = message  (oneof=response)
+
+io.span.traits.site.SiteTrait.SiteFault
+  1: metadata = message
+  6: missing_site_monitor = message  (oneof=fault)
+  7: missing_site_ct = message  (oneof=fault)
+  8: cellular_only_connection = message  (oneof=fault)
+
+io.span.traits.site.SiteTrait.SiteFaultEvent
+  1: fault = message
+
+io.span.traits.site.SiteTrait.SiteProfileDefaultChangedEvent
+  1: new_profile = enum
+  2: previous_profile = enum
+
+io.span.traits.site.SiteTrait.SiteProfileOverrideChangedEvent
+  1: new_overrides = message
+  2: previous_overrides = message
+
+io.span.traits.software_update.OrderedReleaseName
+  1: release_name = string
+
+io.span.traits.software_update.SemanticSoftwareVersion
+  1: major = uint32
+  2: minor = uint32
+  3: patch = uint32
+  4: pre_release = string
+  5: build_metadata = string
+
+io.span.traits.software_update.SoftwareUpdateFailureReason
+  1: reason = enum
+
+io.span.traits.software_update.SoftwareUpdateTrait
+  1: status = enum
+  2: current_version = message
+  3: target_version = message
+
+io.span.traits.software_update.SoftwareUpdateTrait.CheckSoftwareUpdateResponse
+  1: time_checked = message
+
+io.span.traits.software_update.SoftwareUpdateTrait.SoftwareUpdateAppliedEvent
+  1: trace_id = string
+  2: previous_version = message
+  3: current_version = message
+
+io.span.traits.software_update.SoftwareUpdateTrait.SoftwareUpdateApplyProgressMetric
+  1: progress_heuristic = uint32
+  2: elapsed_since_start_time_millisecs = uint32
+
+io.span.traits.software_update.SoftwareUpdateTrait.SoftwareUpdateFailedEvent
+  1: trace_id = string
+  2: current_version = message
+  3: target_version = message
+  4: reason = message
+
+io.span.traits.software_update.SoftwareUpdateTrait.SoftwareUpdateReceivingImageProgressMetric
+  1: progress_heuristic = uint32
+  2: elapsed_since_start_time_millisecs = uint32
+
+io.span.traits.software_update.SoftwareUpdateTrait.SoftwareUpdateStartedEvent
+  1: trace_id = string
+  2: current_version = message
+  3: target_version = message
+
+io.span.traits.software_update.SoftwareUpdateTrait.SoftwareUpdateVersionCommandRequests
+  1: check_update_request = message  (oneof=request)
+
+io.span.traits.software_update.SoftwareUpdateTrait.SoftwareUpdateVersionCommandResponses
+  1: check_update_response = message  (oneof=response)
+
+io.span.traits.software_update.SoftwareVersion
+  1: semantic_version = message  (oneof=version)
+  2: release_name = message  (oneof=version)
+
+io.span.traits.topology.AddElectricalConnectionPoint
+  2: link_new_connection_point = message  (oneof=connection)
+  3: link_simple_or_existing_connection_point = message  (oneof=connection)
+
+io.span.traits.topology.AddElectricalConnectionPoint.LinkNewConnectionPoint
+  1: new_feeder_circuit_connection = message  (oneof=newConnectionPoint)
+  2: new_feedthrough_lugs_connection = message  (oneof=newConnectionPoint)
+  3: new_main_lugs_connection = message  (oneof=newConnectionPoint)
+  4: populated_feeder_circuit_connection = message  (oneof=newConnectionPoint)
+
+io.span.traits.topology.AddElectricalConnectionPoint.LinkNewConnectionPoint.NewFeederCircuitConnection
+  1: created_circuit_breakers_index = uint32
+  2: circuit_physical_location = enum
+
+io.span.traits.topology.AddElectricalConnectionPoint.LinkNewConnectionPoint.NewFeedthroughLugsConnection
+  1: created_metered_lugs_modules_index = uint32
+
+io.span.traits.topology.AddElectricalConnectionPoint.LinkNewConnectionPoint.NewMainLugsConnection
+  1: created_metered_lugs_modules_index = uint32
+
+io.span.traits.topology.AddElectricalConnectionPoint.LinkNewConnectionPoint.PopulatedFeederCircuitConnection
+  1: populated_circuit_breakers_index = uint32
+  2: circuit_physical_location = enum
+
+io.span.traits.topology.AddItem
+  1: link_new_item = message  (oneof=item)
+  2: link_simple_or_existing_item = message  (oneof=item)
+
+io.span.traits.topology.AddItem.LinkNewBackupSystemNode
+  1: number_of_batteries = uint32
+
+io.span.traits.topology.AddItem.LinkNewItem
+  1: added_remote_load_index = uint32  (oneof=newItem)
+  2: added_solar_inverter = message  (oneof=newItem)
+  3: added_span_drive_resource = bool  (oneof=newItem)
+  4: added_backup_system_resource = message  (oneof=newItem)
+
+io.span.traits.topology.AddItem.LinkNewSolarInverterNode
+  1: added_solar_inverter_index = uint32
+  2: number_of_inverter = uint32
+
+io.span.traits.topology.BackedupConnection
+  1: overcurrent_protection_amps = uint32
+
+io.span.traits.topology.BackupSystemResource
+  1: serial_number = string
+  2: part_number = string
+  3: create_backup_system = message
+
+io.span.traits.topology.CreateElectricalConnectionPointTraits
+  1: create_circuit_breakers = message
+  2: create_metered_lugs_modules = message
+  3: populate_circuit_breakers = message
+
+io.span.traits.topology.CreateElectricalConnectionPointTraits.CreateCircuitBreaker
+  1: panel = message
+  2: create_circuit_breaker_request = message
+
+io.span.traits.topology.CreateElectricalConnectionPointTraits.CreateMeteredLugs
+  1: panel = message
+  2: create_metered_lugs_module = message
+
+io.span.traits.topology.CreateElectricalConnectionPointTraits.PopulateCircuitBreaker
+  1: circuit_breaker = message
+  2: update_circuit_breaker = message
+
+io.span.traits.topology.CreateItemResource
+  1: span_drive_resource = message  (oneof=resource)
+  2: backup_system_resource = message  (oneof=resource)
+
+io.span.traits.topology.CreateItemTraits
+  1: create_remote_loads = message
+  2: create_solar_inverters = message
+
+io.span.traits.topology.ElectricalConnectionPoint
+  1: generic_connection = message  (oneof=connection)
+  2: feeder_circuit_connection = message  (oneof=connection)
+  3: feed_through_lugs_connection = message  (oneof=connection)
+  4: main_lugs_connection = message  (oneof=connection)
+  5: backedup_connection = message  (oneof=connection)
+  6: unbackedup_connection = message  (oneof=connection)
+  7: undefined_connection_point = message  (oneof=connection)
+
+io.span.traits.topology.GenericConnection
+  1: overcurrent_protection_amps = uint32
+
+io.span.traits.topology.Item
+  1: utility_meter_node = message  (oneof=item)
+  2: span_panel_node = message  (oneof=item)
+  3: non_span_panel_group_node = message  (oneof=item)
+  5: solar_inverter_node = message  (oneof=item)
+  6: backup_system_node = message  (oneof=item)
+  7: span_drive_node = message  (oneof=item)
+  8: remote_load_node = message  (oneof=item)
+  9: unused_node = message  (oneof=item)
+
+io.span.traits.topology.ModifyElectricalConnectionPointWithRemoval
+  1: replace_with_undefined_connection_point = bool
+  2: remove_electrical_connection_point_traits = message
+
+io.span.traits.topology.ModifyItemInPlace
+  1: update_solar_inverter = message  (oneof=item)
+  2: update_backup_system = message  (oneof=item)
+
+io.span.traits.topology.ModifyItemInPlace.UpdateBackupSystemNode
+  1: number_of_batteries = uint32
+
+io.span.traits.topology.ModifyItemInPlace.UpdateSolarInverterNode
+  1: number_of_inverter = uint32
+
+io.span.traits.topology.ModifyItemWithRemoval
+  1: remove_item_trait = message  (oneof=item)
+  2: remove_item_resource = message  (oneof=item)
+
+io.span.traits.topology.ModifySimpleElectricalConnectionPoint
+  1: modified_electrical_connection_point = message
+
+io.span.traits.topology.NonSpanPanelGroupNode
+  1: panel_roles = enum
+
+io.span.traits.topology.SimpleElectricalConnectionPoint
+  1: generic_connection = message  (oneof=connection)
+  2: backedup_connection = message  (oneof=connection)
+  3: unbackedup_connection = message  (oneof=connection)
+  4: undefined_connection_point = message  (oneof=connection)
+
+io.span.traits.topology.SimpleItem
+  1: utility_meter_node = message  (oneof=item)
+  2: non_span_panel_group_node = message  (oneof=item)
+  3: unused_node = message  (oneof=item)
+
+io.span.traits.topology.SiteTopologyTrait
+  1: root = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest
+  1: create_new_traits = message
+  2: update_existing_traits = message
+  3: add_node_items = message
+  4: modify_node_items = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.AddChildNodeItem
+  2: parent_electrical_connection_point = message
+  3: upstream_electrical_connection_point = message
+  4: add_item = message
+  5: children = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.AddElectricalConnectionPointsToNode
+  1: node_id = uint32
+  2: replace_undefined_upstream_electrical_connection_point = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.AddNodeItem
+  1: parent_reference = message
+  3: upstream_electrical_connection_point = message
+  4: add_item = message
+  7: children = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.AddNodeItem.ParentReference
+  1: new_root = message  (oneof=parent)
+  2: new_child = message  (oneof=parent)
+  3: insert_between_nodes = message  (oneof=parent)
+  4: replace_unused = message  (oneof=parent)
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.AddNodeItem.ParentReference.InsertBetweenNodes
+  1: parent_node_id = uint32
+  2: parent_electrical_connection_point = message
+  3: child_node_id = uint32
+  4: child_electrical_connection_point = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.AddNodeItem.ParentReference.NewChild
+  1: parent_node_id = uint32
+  2: parent_electrical_connection_point = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.AddNodeItem.ParentReference.ReplaceUnused
+  1: replace_unused_node_id = uint32
+  2: parent_electrical_connection_point = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.CreateNewTraits
+  1: create_electrical_connection_point_traits = message
+  2: create_item_traits = message
+  3: create_item_resource = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.ModifyChildElectricalConnectionPointWithAddition
+  1: child_node_id = uint32
+  2: modify_downstream_electrical_connection_point = message
+
+io.span.traits.topology.SiteTopologyTrait.AddToOrModifyTopologyRequest.ModifyNodeItemWithAddition
+  1: node_id = uint32
+  2: update_existing_traits = message
+  3: replace_undefined_upstream_electrical_connection_point = message  (oneof=upstreamElectricalConnectionPoint)
+  4: modify_upstream_electrical_connection_point = message  (oneof=upstreamElectricalConnectionPoint)
+  6: modify_child_electrical_connection_points = message
+  5: replace_item = message  (oneof=item)
+  7: modify_item = message  (oneof=item)
+  8: replace_undefined_parent_electrical_connection_point = message  (oneof=parentElectricalConnectionPoint)
+
+io.span.traits.topology.SiteTopologyTrait.DownstreamConnection
+  1: electrical_connection_point = message
+  2: child = message
+
+io.span.traits.topology.SiteTopologyTrait.NodeItem
+  1: node_id = uint32
+  2: upstream_connection = message
+  3: item = message
+  4: downstream_connections = message
+
+io.span.traits.topology.SiteTopologyTrait.RemoveFromTopologyRequest
+  1: remove_leaf_node_items = message
+  2: modify_node_items_in_place = message
+  3: remove_interior_single_child_node_items = message
+
+io.span.traits.topology.SiteTopologyTrait.RemoveFromTopologyRequest.ModifyChildElectricalConnectionPointWithRemoval
+  1: child_node_id = uint32
+  2: modify_downstream_electrical_connection_point = message
+
+io.span.traits.topology.SiteTopologyTrait.RemoveFromTopologyRequest.ModifyNodeItemInPlaceWithRemoval
+  1: node_id = uint32
+  2: update_existing_traits = message
+  3: modify_upstream_electrical_connection_point = message
+  5: modify_child_electrical_connection_points = message
+  6: modify_parent_electrical_connection_point = message
+
+io.span.traits.topology.SiteTopologyTrait.RemoveFromTopologyRequest.RemoveInteriorSingleChildNodeItem
+  1: node_id = uint32
+  3: modify_parent_electrical_connection_point = message
+
+io.span.traits.topology.SiteTopologyTrait.RemoveFromTopologyRequest.RemoveLeafNodeItem
+  1: node_id = uint32
+  2: replace_with_unused = bool
+  3: modify_parent_electrical_connection_point = message
+  5: modify_item = message
+
+io.span.traits.topology.SiteTopologyTrait.SiteTopologyCommandRequests
+  1: add_to_or_modify_topology_request = message  (oneof=request)
+  2: remove_from_topology_request = message  (oneof=request)
+
+io.span.traits.topology.SiteTopologyTrait.UpdateExistingTraits
+  1: update_electrical_connection_point_traits = message
+  2: update_item_traits = message
+
+io.span.traits.topology.SiteTopologyTrait.UserPreferredRankResetEvent
+  1: reset_slm_traits = message
+
+io.span.traits.topology.SpanDriveResource
+  1: serial_number = string
+  2: part_number = string
+  3: created_circuit_breakers_index = uint32  (oneof=circuitBreakerIndex)
+  4: populated_circuit_breakers_index = uint32  (oneof=circuitBreakerIndex)
+
+io.span.traits.topology.UnbackedupConnection
+  1: overcurrent_protection_amps = uint32
+
+io.span.traits.topology.UpdateElectricalConnectionPointTraits
+  1: update_panel_ct_configurations = message
+  2: update_mains_modules = message
+  3: update_circuits = message
+
+io.span.traits.topology.UpdateElectricalConnectionPointTraits.UpdateCircuit
+  1: circuit = message
+  2: update_circuit = message
+
+io.span.traits.topology.UpdateElectricalConnectionPointTraits.UpdateMainsModule
+  1: lug_module = message
+  2: update_mains_module = message
+
+io.span.traits.topology.UpdateElectricalConnectionPointTraits.UpdatePanelCTConfigurations
+  1: panel = message
+  2: update_panel_ct_configuration = message
+
+io.span.traits.topology.UpdateItemTraits
+  1: update_remote_load_trait = message
+  2: update_solar_inverter_trait = message
+  3: update_backup_system_trait = message
+  4: update_span_drive_trait = message
+
+io.span.traits.topology.UpdateItemTraits.RecommissioningDrive
+  1: created_circuit_breakers_index = uint32  (oneof=circuitBreakerIndex)
+  2: populated_circuit_breakers_index = uint32  (oneof=circuitBreakerIndex)
+
+io.span.traits.topology.UpdateItemTraits.UpdateBackupSystemTrait
+  1: backup_system = message
+  2: backup_system_update = message
+
+io.span.traits.topology.UpdateItemTraits.UpdateRemoteLoadTrait
+  1: remote_load = message
+  2: remote_load_update_request = message
+
+io.span.traits.topology.UpdateItemTraits.UpdateSolarInverterTrait
+  1: solar_inverter = message
+  2: solar_inverter_update = message
+
+io.span.traits.topology.UpdateItemTraits.UpdateSpanDriveTrait
+  1: drive = message
+  2: recommissioning = message  (oneof=updateType)
+
+io.span.traits.topology.UtilityMeterNode
+  1: utility_service_rating_amps = uint32
+

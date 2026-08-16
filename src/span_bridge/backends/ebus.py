@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import ssl
 import time
 from pathlib import Path
 
@@ -19,6 +18,7 @@ import paho.mqtt.client as mqtt
 from ..auth import Credentials
 from ..homie import parse_description, parse_value_topic
 from ..models import Reading
+from ..tls import build_ssl_context
 from . import ReadingCallback, SchemaCallback
 
 log = logging.getLogger(__name__)
@@ -54,14 +54,7 @@ class EbusBackend:
         )
         client.username_pw_set(self._creds.ebus_username, self._creds.ebus_password)
 
-        # The panel signs its broker cert with its own per-device CA. Verify
-        # against that CA specifically -- not the system trust store.
-        context = ssl.create_default_context(cafile=str(self._ca_cert))
-        # The cert's CN is `span-<SERIAL>.local`, which will not match when we
-        # connect by IP. Verify the chain, but not the hostname.
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_REQUIRED
-        client.tls_set_context(context)
+        client.tls_set_context(build_ssl_context(self._ca_cert))
 
         client.on_connect = self._on_connect
         client.on_message = self._on_message

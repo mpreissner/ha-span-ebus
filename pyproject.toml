@@ -7,12 +7,14 @@ name = "span-bridge"
 version = "0.1.0"
 description = "Bridge a SPAN Panel MAIN 40 (Gen3) into Home Assistant over MQTT"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 
 dependencies = [
     "paho-mqtt>=2.1.0",
     "requests>=2.31.0",
+    # HTTP/2 for the cloud backend's gRPC unary calls and Ably SSE stream.
+    "httpx[http2]>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +31,7 @@ packages = ["src/span_bridge"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
