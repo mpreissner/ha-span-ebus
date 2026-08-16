@@ -1,0 +1,16 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Never commit panel credentials or certificates.
+.span-auth.json
+*.crt
+*.pem
+span-ca-certs/
