@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SPAN Panel (eBus)",
+        "description": "Sign in with your SPAN account. Your password is used once to obtain access tokens and is never stored.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate SPAN",
+        "description": "Your SPAN session expired. Sign in again to refresh access.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Could not reach the SPAN cloud. Please try again."
+    },
+    "abort": {
+      "already_configured": "This SPAN account is already configured.",
+      "reauth_successful": "Re-authentication was successful.",
+      "wrong_account": "The credentials are for a different SPAN account than the one being re-authenticated."
+    }
+  }
+}
