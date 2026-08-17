@@ -7,6 +7,7 @@ import json
 import logging
 import socket
 import sys
+import uuid
 
 import requests
 
@@ -200,7 +201,7 @@ def cmd_cloud_login(args) -> int:
     cloud_auth.save_tokens(args.token_store, tokens)
     print(f"Logged in as {username}")
     print(f"  tokens stored at {args.token_store}")
-    print("\nNext:  set SPAN_BACKEND=cloud (and SPAN_CLOUD_DEVICE_UUID) and run 'span-bridge run'")
+    print("\nNext:  set SPAN_BACKEND=cloud and run 'span-bridge run'")
     return 0
 
 
@@ -208,15 +209,17 @@ def _build_backend(settings):
     """Instantiate the configured backend (local ebus or SPAN cloud)."""
     if settings.backend == "cloud":
         cloud = settings.cloud
-        if not cloud.device_uuid:
-            raise SystemExit(
-                "SPAN_CLOUD_DEVICE_UUID is required for the cloud backend "
-                "(the client id the Ably channel is bound to)"
-            )
+        device_uuid = cloud.device_uuid
+        if not device_uuid:
+            # SPAN issues no such id — it is ours to choose, and the backend
+            # registers whatever we pick. A per-run one works; set
+            # SPAN_CLOUD_DEVICE_UUID to keep the channel stable across restarts.
+            device_uuid = str(uuid.uuid4()).upper()
+            log.info("no SPAN_CLOUD_DEVICE_UUID set; using %s for this run", device_uuid)
         backend = load_backend(
             "cloud",
             token_store=cloud.token_store,
-            device_uuid=cloud.device_uuid,
+            device_uuid=device_uuid,
             user_id=cloud.user_id,
             serial=cloud.serial,
         )

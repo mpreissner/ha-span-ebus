@@ -21,29 +21,29 @@ whichever is used:
    Integration), or install it if listed.
 2. **Restart Home Assistant.**
 3. **Settings → Devices & Services → Add Integration → “SPAN Panel (eBus)”.**
-4. Sign in with your SPAN account email and password, and supply your **device
-   UUID** (see below).
+4. Sign in with your SPAN account email and password. That's it — nothing to
+   look up or paste.
 
 Your password is used **once**, locally, to compute the Cognito SRP proof and
 obtain access tokens; it is never stored. Only the resulting tokens are kept
 (auto-refreshing), and a re-auth prompt appears if they ever fully expire.
 
-### The device UUID
+Setup takes up to a minute: it registers this install as a telemetry client and
+waits for a real frame before finishing, rather than completing and leaving you
+with zero entities. You then get one device per panel with a sensor for each
+circuit's power (plus current / voltage / site flows where reported), updated at
+~1–2 Hz.
 
-SPAN's realtime telemetry is published on an Ably channel named
-`c:<userId>:<deviceUUID>`, where `deviceUUID` is the **per-install client
-identifier your SPAN mobile app registered** — the same value the daemon reads
-from `SPAN_CLOUD_DEVICE_UUID`. It cannot be generated: an unrecognized UUID gets
-a valid token for a channel SPAN never publishes to, so the stream attaches and
-then stays silent, and **no entities are created**.
+### How it gets your live data
 
-Setup therefore waits for a real telemetry frame before finishing and reports
-*“SPAN sent no telemetry on the channel for this device UUID”* if none arrives.
-Recover the value from a capture of the app's `AblyToken` call — see
-[docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md) §3a.
-
-You get one device per panel with a sensor for each circuit's power (plus
-current / voltage / site flows where reported), updated at ~1–2 Hz.
+SPAN's realtime telemetry arrives on an Ably channel named
+`c:<userId>:<deviceUUID>`. The `deviceUUID` is a **client identifier we generate
+ourselves** — SPAN issues nothing here; the `AblyToken` RPC echoes back whatever
+we send. What actually starts the data flowing is the `SubscribeAndGetTraits`
+RPC, which registers our channel as a subscriber for the panel's hardware
+resources. The integration mints a UUID on first setup and reuses it for the life
+of the entry (the daemon takes `SPAN_CLOUD_DEVICE_UUID`, or generates a per-run
+one). See [docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md) §3.
 
 ---
 

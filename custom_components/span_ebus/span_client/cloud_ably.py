@@ -15,8 +15,10 @@ path is plain Ably REST/SSE (see docs/CLOUD-FLOW.md):
 We use SSE (`enveloped=true`, so each event `data` is a JSON Ably Message envelope)
 rather than the app's comet long-poll: it is a single long-lived HTTP/2 GET, trivial
 to consume with `httpx.stream`, and needs no client-side connection state machine.
-The stream is occupancy-triggered — merely subscribing makes SPAN's backend start
-publishing ~1-2 frames/sec; no separate "start" RPC is needed.
+
+Attaching is not enough to get data: SPAN publishes to a channel only once the
+`SubscribeAndGetTraits` RPC has named it as a subscriber (see backends.cloud).
+After that, frames arrive at ~1-2/sec.
 
 The SSE *parsing* here is pure and unit-tested; the network calls are thin
 wrappers around it.

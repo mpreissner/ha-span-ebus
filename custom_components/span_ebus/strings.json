@@ -3,34 +3,25 @@
     "step": {
       "user": {
         "title": "SPAN Panel (eBus)",
-        "description": "Sign in with your SPAN account. Your password is used once to obtain access tokens and is never stored.\n\nThe device UUID is the per-install client identifier your SPAN mobile app registered; SPAN's cloud publishes live telemetry only on the channel bound to it. Setup verifies that telemetry actually arrives before finishing.",
+        "description": "Sign in with your SPAN account. Your password is used once to obtain access tokens and is never stored.\n\nSetup registers this Home Assistant install as a telemetry client and waits for the first live frame before finishing, so it may take up to a minute.",
         "data": {
           "email": "Email",
-          "password": "Password",
-          "device_uuid": "Device UUID"
-        },
-        "data_description": {
-          "device_uuid": "The client device UUID captured from your SPAN mobile app, e.g. 123e4567-e89b-12d3-a456-426614174000."
+          "password": "Password"
         }
       },
       "reauth_confirm": {
         "title": "Re-authenticate SPAN",
-        "description": "Your SPAN session expired. Sign in again to refresh access. Keep the existing device UUID — the telemetry channel is bound to it.",
+        "description": "Your SPAN session expired. Sign in again to refresh access.",
         "data": {
           "email": "Email",
-          "password": "Password",
-          "device_uuid": "Device UUID"
-        },
-        "data_description": {
-          "device_uuid": "Leave as-is unless you are deliberately switching clients."
+          "password": "Password"
         }
       }
     },
     "error": {
       "invalid_auth": "Invalid email or password.",
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
-      "invalid_device_uuid": "That is not a valid UUID.",
-      "no_telemetry": "Signed in, but SPAN sent no telemetry on the channel for this device UUID. Check that it matches the UUID your SPAN mobile app uses."
+      "no_telemetry": "Signed in, but SPAN published no telemetry within the setup timeout. Check that your panel is online in the SPAN mobile app, then try again."
     },
     "abort": {
       "already_configured": "This SPAN account is already configured.",
