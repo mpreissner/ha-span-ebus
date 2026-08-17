@@ -20,9 +20,12 @@ tree is `io.span` metering traits):
     4  metrics_received_percent (quality)
     oneof summaries { 11 two_wire | 12 three_wire | 14 panel_power }
 
-The measurement leaf messages (`SingleChannelMeterPower` slots, directional site
-flows) all carry their scalar reading at wire field #3 of the innermost wrapper;
-the *quantity and unit* come from the slot position, not the leaf type:
+Every measurement leaf is an *aggregate stats* message — `1 min, 2 max, 3 avg`,
+of which only `avg` is ever populated — so each reading sits at wire field #3 of
+the innermost wrapper. Which of the two stats types it is decides how that
+varint is encoded: `UnsignedAggregateStats` (uint32) for current, voltage and
+frequency, `SignedAggregateStats` (**sint32, zig-zag**) for anything that is a
+power. The *quantity and unit* come from the slot position, not the leaf type:
 
     SingleChannelMeterPower: 1 current(mA) 2 voltage(mV) 3 power(mW) 4 freq(mHz)
     DoubleChannelMeterPower: 1 line_an 2 line_bn 3 combined (each a Single…)
@@ -36,6 +39,12 @@ What live frames add to the static recovery:
     (120 V branch) sample carries current and power but never voltage: the slot
     is absent from the wire, not zero, on every sample observed. Only the panel
     block reports voltage.
+  * Power really is zig-zag encoded, and reading it as a plain varint doubles
+    every positive reading. The proof is on the wire: the panel feeder reported
+    119.964 V / 9.133 A on line_an and 119.856 V / 10.189 A on line_bn — 2316 VA
+    of apparent power all told — against a "4066.568 W" combined reading, which
+    would be a power factor of 1.76. Zig-zag decoded it is 2033.284 W, i.e. PF
+    0.88, and every branch circuit lands under PF 1 the same way.
   * A *present but empty* slot means zero, not missing — proto3 omits the zero
     scalar yet still emits the message holding it. Treating the two alike makes
     a circuit that switches off freeze at its last non-zero reading, so
@@ -61,7 +70,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .cloud_pb import Message, parse
+from .cloud_pb import Message, parse, zigzag_decode
 
 # SiteInstantPower / SiteEnergy directional field numbering (docs/CLOUD-PROTO.md).
 SITE_FLOWS: dict[int, str] = {
@@ -83,6 +92,9 @@ SITE_FLOWS: dict[int, str] = {
     52: "voltage_l2",
     53: "frequency",
 }
+
+# The site flows that are not powers: 51/52 voltage (mV), 53 frequency (mHz).
+_UNSIGNED_SITE_FLOWS = frozenset({51, 52, 53})
 
 # oneof `summaries` tag -> kind, on InstancePowerStatsSample.
 _KIND_BY_TAG = {11: "two_wire", 12: "three_wire", 14: "panel"}
@@ -147,12 +159,19 @@ class Frame:
 # --- leaf helpers -------------------------------------------------------------
 
 
-def _leaf_value(msg: Message | None) -> int | None:
-    """Pull the scalar reading from a measurement wrapper.
+def _leaf_value(msg: Message | None, *, signed: bool = False) -> int | None:
+    """Pull the reading out of an aggregate-stats leaf.
 
-    Two shapes occur: a bare `{3: value}` (channel slots) and a
-    `{1: quality, 2: {3: value}}` (site directional flows). Both resolve to the
-    varint at field #3 of the innermost message.
+    Two nestings occur: a bare `{3: avg}` (the channel slots hold the stats
+    message directly) and a `{1: quality, 2: {3: avg}}` (the site directional
+    flows wrap it in an `AggregatePowerStats`). Both resolve to the varint at
+    field #3 — `avg` — of the innermost message.
+
+    `signed` selects the stats type. A power is a `SignedAggregateStats`, whose
+    `avg` is an sint32 and therefore **zig-zag** encoded; current, voltage and
+    frequency are `UnsignedAggregateStats` and are plain varints. Reading a
+    power as unsigned returns exactly twice the real value when it is positive,
+    and a large positive number when the flow is an export.
 
     An absent wrapper (`msg is None`) means the quantity is not measured. A
     wrapper that is present but carries no scalar means *zero*: proto3 drops the
@@ -162,13 +181,13 @@ def _leaf_value(msg: Message | None) -> int | None:
     """
     if msg is None:
         return None
-    direct = msg.get_int_opt(3)
-    if direct is not None:
-        return direct
-    inner = msg.get_msg(2)
-    if inner is not None:
-        return inner.get_int_opt(3) or 0
-    return 0
+    raw = msg.get_int_opt(3)
+    if raw is None:
+        inner = msg.get_msg(2)
+        if inner is None:
+            return 0
+        raw = inner.get_int_opt(3) or 0
+    return zigzag_decode(raw) if signed else raw
 
 
 def _decode_single_channel(msg: Message) -> Channel:
@@ -176,7 +195,7 @@ def _decode_single_channel(msg: Message) -> Channel:
     return Channel(
         current_ma=_leaf_value(msg.get_msg(1)),
         voltage_mv=_leaf_value(msg.get_msg(2)),
-        power_mw=_leaf_value(msg.get_msg(3)),
+        power_mw=_leaf_value(msg.get_msg(3), signed=True),
         freq_mhz=_leaf_value(msg.get_msg(4)),
     )
 
@@ -250,9 +269,11 @@ def _decode_site(site_metric: Message) -> dict[str, float]:
         return {}
     flows: dict[str, float] = {}
     for no, name in SITE_FLOWS.items():
-        val = _leaf_value(power.get_msg(no))
+        # 51/52 are millivolts, 53 is millihertz — unsigned. Every other flow is
+        # a power in milliwatts, and so a zig-zagged sint32: `grid` in particular
+        # goes negative whenever the site exports.
+        val = _leaf_value(power.get_msg(no), signed=no not in _UNSIGNED_SITE_FLOWS)
         if val is not None:
-            # 51/52 are millivolts, 53 is millihertz; the rest are milliwatts.
             flows[name] = val / 1000.0
     return flows
 
