@@ -1,5 +1,6 @@
 """Tests for the cloud backend's pure mapping functions."""
 
+import base64
 import json
 import threading
 import time
@@ -542,6 +543,17 @@ def test_parse_relay_command_reads_the_obvious_words_and_refuses_the_rest():
         assert cloud.parse_relay_command(junk) is None
 
 
+# The caller's SPAN user id, which a command names as its requester.
+USER_ID = "00112233445566778899aabbccddeeff"
+
+
+def _token(username: str | None = USER_ID) -> str:
+    """A JWT-shaped access token carrying (or omitting) the `username` claim."""
+    claims = {} if username is None else {"username": username}
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"header.{body}.signature"
+
+
 class _FakeGrpc:
     """Stands in for CloudGrpcClient, recording what got posted."""
 
@@ -561,15 +573,25 @@ class _FakeGrpc:
         return b""
 
 
-def _wire_grpc(monkeypatch, sent: list[bytes]) -> None:
-    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", lambda store: "tok")
+def _wire_grpc(
+    monkeypatch, sent: list[bytes], token: str | None = None
+) -> list[_FakeGrpc]:
+    """Point the backend at fake gRPC; returns the clients it opens, in order."""
+    clients: list[_FakeGrpc] = []
+
+    def open_client(tok, **kw):
+        clients.append(_FakeGrpc(sent, tok, **kw))
+        return clients[-1]
+
     monkeypatch.setattr(
-        cloud.cloud_grpc,
-        "CloudGrpcClient",
-        lambda token, **kw: _FakeGrpc(sent, token, **kw),
+        cloud.cloud_auth,
+        "access_token_from_store",
+        lambda store: _token() if token is None else token,
     )
+    monkeypatch.setattr(cloud.cloud_grpc, "CloudGrpcClient", open_client)
     # The post-command snapshot re-read waits on a thread; keep the test quick.
     monkeypatch.setattr(cloud, "POST_COMMAND_REFRESH_SECONDS", 0.01)
+    return clients
 
 
 def test_send_command_posts_a_switch_request_for_the_addressed_instance(
@@ -591,6 +613,8 @@ def test_send_command_posts_a_switch_request_for_the_addressed_instance(
     assert message.get_msg(1).get_uint(3) == 31
     assert message.get_msg(2).get_msg(2).get_uint(1) == 54
     assert message.get_msg(2).get_msg(1).get_str(1) == "a1b2c3d4e5f60718"
+    # …and signed as this user, the only requester the server accepts.
+    assert message.get_msg(14).get_msg(1).get_msg(2).get_str(1) == USER_ID
     payload = message.get_msg(14).get_msg(2).get_bytes(1)
     assert payload == cloud.cloud_commands.disconnect_payload()
 
@@ -624,6 +648,47 @@ def test_send_command_stays_silent_on_anything_it_cannot_address(monkeypatch, tm
     assert sent == []
     assert readings == []
     assert backend._circuits[54].relay_closed is True
+
+
+def test_the_requester_follows_the_token_not_the_configured_user(monkeypatch, tmp_path):
+    # The server resolves the caller from the same token we send, so the claim in
+    # it wins; a configured id that has drifted would only earn PERMISSION_DENIED.
+    sent: list[bytes] = []
+    _wire_grpc(monkeypatch, sent, token=_token("ffffffffffffffffffffffffffffffff"))
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", user_id="stale")
+    backend._circuits = _switchable_circuits()
+
+    backend.send_command("circuit-54/relay", "OPEN")
+
+    requester = pb.parse(sent[0]).get_msgs(1)[0].get_msg(14).get_msg(1)
+    assert requester.get_msg(2).get_str(1) == "ffffffffffffffffffffffffffffffff"
+
+
+def test_a_command_is_refused_when_nothing_names_the_requester(monkeypatch, tmp_path):
+    # Better to fail loudly than to post a write the server will reject anyway.
+    sent: list[bytes] = []
+    _wire_grpc(monkeypatch, sent, token=_token(None))
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid")
+    backend._circuits = _switchable_circuits()
+
+    with pytest.raises(RuntimeError, match="requester"):
+        backend.send_command("circuit-54/relay", "OPEN")
+    assert sent == []
+
+
+def test_a_configured_user_id_covers_a_token_without_the_claim(monkeypatch, tmp_path):
+    sent: list[bytes] = []
+    _wire_grpc(monkeypatch, sent, token=_token(None))
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", user_id=USER_ID)
+    backend._circuits = _switchable_circuits()
+
+    backend.send_command("circuit-54/relay", "OPEN")
+
+    requester = pb.parse(sent[0]).get_msgs(1)[0].get_msg(14).get_msg(1)
+    assert requester.get_msg(2).get_str(1) == USER_ID
 
 
 def test_relay_state_refreshes_on_a_timer_and_announces_changes(monkeypatch, tmp_path):

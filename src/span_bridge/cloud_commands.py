@@ -50,6 +50,10 @@ DEFAULT_TIMEOUT_MS = 30_000
 class SwitchTarget:
     """Everything needed to address one breaker's switch trait.
 
+    `resource_id` is the resource that *owns* the trait instance — the panel.
+    It is not who is asking: that is the caller's user id, which
+    `build_trait_message` takes separately as `requester_id`.
+
     `metadata` is the trait's `(vendor_id, product_id, trait_id, version)` as the
     snapshot declared it, echoed back verbatim rather than reconstructed — the
     snapshot omits `product_id` for this trait, and inventing one would be a
@@ -94,6 +98,7 @@ def build_trait_message(
     target: SwitchTarget,
     payload: bytes,
     *,
+    requester_id: str,
     request_id: str | None = None,
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
 ) -> bytes:
@@ -108,6 +113,21 @@ def build_trait_message(
                                  2 payload { 1 bytes } }
         }
 
+    The two `resource_id`s are **not** the same resource, which is the trap here:
+
+    - `InstanceMetadata`'s (#1) is the resource the trait instance lives on — the
+      panel's hardware id.
+    - `RequestMetadata`'s (#2) is the *requester*: who is asking. SPAN's user ids
+      are resource ids too, and the server checks that the named resource
+      contains the caller, so the only value that passes is the caller's own
+      **user id** (the access token's `username` claim, and the `<userId>` in the
+      Ably channel `c:<userId>:<deviceUUID>`).
+
+    Naming a panel or a site here is rejected with `PERMISSION_DENIED
+    [Validation Error]: Requester <id>, does not contain <userId>` — established
+    against the live service by sending each candidate at a nonexistent trait
+    instance, where only the user id was accepted.
+
     `request_id` is a UUID the response is keyed on; we generate one per call so
     a retry is distinguishable from a duplicate.
     """
@@ -120,16 +140,14 @@ def build_trait_message(
     if version is not None:
         metadata += field_varint(4, version)
 
-    # The resource id is repeated in two places under two different field
-    # numbers: #1 of InstanceMetadata, #2 of RequestMetadata (whose #1 is the
-    # timestamp the app never sets).
-    resource = field_string(1, target.resource_id)
-    instance = field_message(1, resource) + field_message(
+    instance = field_message(1, field_string(1, target.resource_id)) + field_message(
         2, field_varint(1, target.instance_id)
     )
 
+    # #1 of RequestMetadata is the timestamp the app never sets; the requester
+    # goes at #2.
     request_metadata = (
-        field_message(2, resource)
+        field_message(2, field_string(1, requester_id))
         + field_message(3, field_string(1, request_id or str(uuid.uuid4())))
         + field_varint(4, timeout_ms)
     )
@@ -153,6 +171,7 @@ def build_switch_request(
     target: SwitchTarget,
     closed: bool,
     *,
+    requester_id: str,
     request_id: str | None = None,
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
 ) -> bytes:
@@ -161,6 +180,7 @@ def build_switch_request(
         build_trait_message(
             target,
             switch_payload(closed),
+            requester_id=requester_id,
             request_id=request_id,
             timeout_ms=timeout_ms,
         )

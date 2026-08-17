@@ -386,3 +386,24 @@ def access_token_from_store(path: Path) -> str:
     tokens = refresh(tokens.refresh_token)
     save_tokens(path, tokens)
     return tokens.access_token
+
+
+def user_id_from_token(access_token: str) -> str | None:
+    """SPAN's user id: the access token's `username` claim.
+
+    This is a dash-stripped UUID and is *not* Cognito's `sub`. It is the same
+    `<userId>` that appears in the Ably channel name `c:<userId>:<deviceUUID>`,
+    and SPAN treats it as a resource id in its own right — trait commands name it
+    as the requester (`cloud_commands`).
+
+    The signature is not verified: we are reading back a claim about ourselves
+    from a token the server just gave us, and the server checks it again anyway.
+    """
+    try:
+        body = access_token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except (IndexError, ValueError) as exc:
+        log.debug("could not read claims from the access token: %s", exc)
+        return None
+    username = claims.get("username")
+    return username if isinstance(username, str) and username else None

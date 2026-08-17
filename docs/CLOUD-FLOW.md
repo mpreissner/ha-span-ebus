@@ -303,9 +303,14 @@ the *same* instance id as 1/15 and the telemetry:
 back-ref is checked against the id we looked the entry up under; a disagreement
 yields no relay control rather than a possibly-wrong target (27/27 agreed).
 
-The entry also supplies the command address: its resource's `hardware_id` (the
-panel, not the site), the instance id, and the trait metadata (vendor 1, trait 31,
-version 1 — the snapshot omits `product_id`, so it is echoed back as absent).
+The entry also supplies most of the command address: its resource's
+`hardware_id` (the panel — the resource that *owns* the trait), the instance id,
+and the trait metadata (vendor 1, trait 31, version 1 — the snapshot omits
+`product_id`, so it is echoed back as absent).
+
+The one piece the snapshot does **not** supply is the *requester* — a second
+`resource_id` in the same message, naming who is asking. That one is the
+caller's own **user id**, read from the access token (§4).
 
 ## 4. Circuit control — the one write path
 
@@ -314,8 +319,16 @@ that 1/31 instance; wire format and payload bytes are in
 [CLOUD-PROTO.md § The command surface](CLOUD-PROTO.md#the-command-surface--sendmessages),
 the whole design in [specs/circuit-control.md](specs/circuit-control.md).
 
-Two consequences for the flow:
+Three consequences for the flow:
 
+- **A write is signed with the user id, not with a panel or site id.** The
+  message carries a *requester* `resource_id` alongside the panel it targets,
+  and the server checks that the named resource contains the calling user — so
+  the only value that passes is the user itself. Anything else gets
+  `PERMISSION_DENIED [Validation Error]: Requester <id>, does not contain
+  <userId>`, where `<userId>` is the access token's `username` claim (the same
+  id in the Ably channel name). Panel, site, and their UUIDs were all tried
+  against the live service and refused.
 - **The reply is an ack, not an answer.** The app matches the real
   `SwitchLoadManagementCommandResponses` by `request_id` on the Ably *trait*
   channel, which we do not read. So a panel-side policy refusal
@@ -349,7 +362,8 @@ returns `buildings: null`; ignore it.
    schema is held back a couple of seconds waiting for it, since HA fixes entity
    names at creation.
 4. **Control**: `SendMessages` with a 1/31 `TraitMessage` to open/close a relay
-   (§4); state comes from re-reading the snapshot, not from the reply.
+   (§4) — targeting the panel, signed with the **user id** from the token;
+   state comes from re-reading the snapshot, not from the reply.
 5. **History**: `GetHistoryAggregation` for backfill / long-term stats.
 6. ~~**Blocker**: recover the telemetry `.proto`~~ — **resolved.** Schema recovered
    from the APK (see `docs/CLOUD-PROTO.md`) and live-confirmed; the cloud backend

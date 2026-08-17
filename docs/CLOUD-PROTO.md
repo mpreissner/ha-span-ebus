@@ -259,10 +259,30 @@ TraitMessage {
 }
 ```
 
-The resource id appears **twice under different field numbers** — `#1` of
-`InstanceMetadata` and `#2` of `RequestMetadata` — which is easy to get wrong
-because `#1` of `RequestMetadata` is the timestamp the app never sets.
-`request_id` is a UUID v4.
+A `resource_id` appears **twice under different field numbers, naming two
+different things** — the trap in this message:
+
+- `InstanceMetadata`'s (`#1`) is the resource that *owns* the trait instance:
+  the **panel**'s 16-hex hardware id.
+- `RequestMetadata`'s (`#2`) is the **requester**: who is asking. SPAN user ids
+  are resource ids too, and this one must be the caller's own **user id** — the
+  access token's `username` claim, i.e. the same `<userId>` as in the Ably
+  channel `c:<userId>:<deviceUUID>`.
+
+Anything else is rejected with:
+
+```
+PERMISSION_DENIED (7): [Validation Error]: Requester <id>, does not contain <userId>
+```
+
+Read it as *"the resource you named does not contain the calling user"*. The
+panel, the site, their resource UUIDs and the panel device UUID were each tried
+against the live service (aimed at a nonexistent trait instance, so nothing could
+switch) and all four were refused; only the user id was accepted. The `<userId>`
+in the message is resolved from the bearer token, never from the request body.
+
+`#1` of `RequestMetadata` is a timestamp the app never sets, which makes the
+off-by-one easy to fall into. `request_id` is a UUID v4.
 
 `payload` is the target trait's own `…CommandRequests` message, opaque to the
 envelope. For `SwitchLoadManagementTrait` (**1/31**, whose `trait_instance_id` is

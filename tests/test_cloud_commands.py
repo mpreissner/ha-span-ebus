@@ -27,6 +27,8 @@ TARGET = SwitchTarget(
     metadata=(1, None, TRAIT_SWITCH_LOAD_MANAGEMENT, 1),
 )
 REQUEST_ID = "00000000-0000-4000-8000-000000000000"
+# The caller's SPAN user id — not the panel, which merely owns the trait.
+REQUESTER = "00112233445566778899aabbccddeeff"
 
 
 def test_off_is_a_disconnect_request_with_a_user_control_source():
@@ -63,8 +65,25 @@ def test_the_off_payload_is_the_expected_six_bytes():
     assert disconnect_payload().hex() == "0a040a0218" + f"{CONTROL_SOURCE_USER_COMMAND:02x}"
 
 
+def test_the_requester_is_the_user_not_the_panel_that_owns_the_trait():
+    # The live failure this pins: naming the panel (or the site) as the requester
+    # earns `PERMISSION_DENIED [Validation Error]: Requester <id>, does not
+    # contain <userId>`. Only the caller's own user id passes, so the message
+    # carries two different resource ids and they must not be crossed.
+    msg = pb.parse(
+        build_trait_message(TARGET, disconnect_payload(), requester_id=REQUESTER)
+    )
+    assert msg.get_msg(2).get_msg(1).get_str(1) == TARGET.resource_id
+    assert msg.get_msg(14).get_msg(1).get_msg(2).get_str(1) == REQUESTER
+    assert REQUESTER != TARGET.resource_id
+
+
 def test_trait_message_addresses_the_instance_three_times_over():
-    msg = pb.parse(build_trait_message(TARGET, disconnect_payload(), request_id=REQUEST_ID))
+    msg = pb.parse(
+        build_trait_message(
+            TARGET, disconnect_payload(), requester_id=REQUESTER, request_id=REQUEST_ID
+        )
+    )
 
     metadata = msg.get_msg(1)
     assert metadata.get_uint(1) == 1  # vendor
@@ -76,11 +95,11 @@ def test_trait_message_addresses_the_instance_three_times_over():
     assert instance.get_msg(1).get_str(1) == TARGET.resource_id
     assert instance.get_msg(2).get_uint(1) == TARGET.instance_id
 
-    # The command block repeats the resource id and adds the request id the app
-    # would match its Ably response on.
+    # The command block names the requester and the request id the app would
+    # match its Ably response on.
     command = msg.get_msg(14)
     request_metadata = command.get_msg(1)
-    assert request_metadata.get_msg(2).get_str(1) == TARGET.resource_id
+    assert request_metadata.get_msg(2).get_str(1) == REQUESTER
     assert request_metadata.get_msg(3).get_str(1) == REQUEST_ID
     assert request_metadata.get_uint(4) == DEFAULT_TIMEOUT_MS
     # The app sends no timestamp, so neither do we.
@@ -94,13 +113,15 @@ def test_product_id_is_included_when_the_snapshot_declares_one():
     # #4=... so the field is real; echoing whatever we were given means a server
     # that starts requiring it needs no code change.
     target = SwitchTarget(resource_id="hw", instance_id=7, metadata=(1, 4, 31, 1))
-    metadata = pb.parse(build_trait_message(target, disconnect_payload())).get_msg(1)
+    metadata = pb.parse(
+        build_trait_message(target, disconnect_payload(), requester_id=REQUESTER)
+    ).get_msg(1)
     assert metadata.get_uint(2) == 4
 
 
 def test_request_ids_are_unique_per_call():
-    first = build_trait_message(TARGET, disconnect_payload())
-    second = build_trait_message(TARGET, disconnect_payload())
+    first = build_trait_message(TARGET, disconnect_payload(), requester_id=REQUESTER)
+    second = build_trait_message(TARGET, disconnect_payload(), requester_id=REQUESTER)
     assert first != second, "a retry must be distinguishable from a duplicate"
 
 
@@ -110,7 +131,11 @@ def test_send_messages_wraps_each_message_in_field_one():
 
 
 def test_build_switch_request_is_one_message_ready_to_post():
-    request = pb.parse(build_switch_request(TARGET, closed=False, request_id=REQUEST_ID))
+    request = pb.parse(
+        build_switch_request(
+            TARGET, closed=False, requester_id=REQUESTER, request_id=REQUEST_ID
+        )
+    )
     messages = request.get_msgs(1)
     assert len(messages) == 1
     payload = messages[0].get_msg(14).get_msg(2).get_bytes(1)
