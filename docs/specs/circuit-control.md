@@ -1,6 +1,9 @@
 # Spec — circuit control (relay on/off) over the SPAN cloud
 
-**Status:** implemented, pending a live write test on a benign circuit.
+**Status:** implemented; the write path is accepted by the live service, and a
+toggle of a real breaker is the remaining check. Commands were validated against
+production by addressing trait instance 999 — an id no panel has — so the
+envelope, the auth and the requester are all proven without moving a relay.
 **Scope:** turn a detected breaker on or off from Home Assistant, and report the
 relay's current state, using the same cloud path the mobile app uses.
 
