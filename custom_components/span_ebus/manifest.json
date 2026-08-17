@@ -1,7 +1,7 @@
 {
   "domain": "span_ebus",
   "name": "SPAN Panel (eBus)",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "documentation": "https://github.com/mpreissner/ha-span-ebus",
   "issue_tracker": "https://github.com/mpreissner/ha-span-ebus/issues",
   "codeowners": ["@mpreissner"],
