@@ -11,16 +11,14 @@ Electrification Bus (MQTT) with no change to your entities.
 
 1. Install via HACS, then restart Home Assistant.
 2. **Settings → Devices & Services → Add Integration → SPAN Panel (eBus)**.
-3. Sign in with your SPAN account email and password, and supply your **device
-   UUID** — the per-install identifier your SPAN mobile app registered.
+3. Sign in with your SPAN account email and password. Nothing else to enter.
 
 Your password is used **once** to obtain access tokens and is never stored. Only
 the resulting tokens are kept, and they refresh automatically.
 
-The device UUID matters: SPAN publishes telemetry only on the channel bound to
-it, so an unrecognized one connects successfully and then stays silent, giving
-you an integration with zero entities. Setup waits for a real telemetry frame
-and fails with a clear error rather than installing a silent entry.
+Setup can take up to a minute: it registers this install as a telemetry
+subscriber and waits for a real frame to arrive, so a problem shows up as a clear
+error instead of an installed entry with zero entities.
 
 ## What you get
 

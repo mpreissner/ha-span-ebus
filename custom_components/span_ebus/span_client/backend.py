@@ -8,12 +8,19 @@ changes — the hybrid strategy in docs/CLOUD-FLOW.md.
 Flow, on `start()` (see the sibling modules for the wire detail):
 
     cloud_auth.access_token_from_store  -> Bearer access token (auto-refreshed)
-    cloud_grpc.get_sites_for_user       -> site / serial / user topology
+    cloud_grpc.get_sites_for_user       -> site / serial / hardware-id topology
     cloud_grpc.ably_token(device_uuid)  -> a signed Ably TokenRequest + channel
     cloud_ably.request_token            -> a usable Ably realtime token
     cloud_ably.stream_frames            -> base64-protobuf telemetry frames
+    cloud_grpc.subscribe_and_get_traits -> registers the channel for publishing
     cloud_telemetry.decode_frame        -> circuits + site flows
     -> PanelSchema (synthesized on the first frame) + a stream of Readings
+
+The `device_uuid` is a client-chosen identifier, not something SPAN issues: the
+AblyToken RPC echoes whatever we send into the channel name and the token's
+capability. What actually makes telemetry flow is `SubscribeAndGetTraits`, which
+names our channel as the subscriber for a set of hardware resources and traits.
+Skip it and the channel attaches but stays permanently silent.
 
 The network loop runs on a daemon thread; `start()` returns immediately, matching
 `EbusBackend`. The pure mapping functions (`schema_from_frame`,
@@ -30,13 +37,12 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from typing import Callable
-
 from . import cloud_ably, cloud_auth, cloud_grpc
-from .cloud_pb import Message, field_string, parse
+from .cloud_pb import Message, field_message, field_string, field_varint, parse
 from .cloud_telemetry import Frame, decode_frame
 from .models import DataType, NodeKind, PanelSchema, PropertySpec, Reading
 
@@ -45,6 +51,23 @@ ReadingCallback = Callable[[Reading], None]
 SchemaCallback = Callable[[PanelSchema], None]
 
 log = logging.getLogger(__name__)
+
+# How long after attaching the SSE we fire SubscribeAndGetTraits. The iOS client
+# registers only once its stream is up, and we mirror that order rather than
+# assume the backend tolerates the reverse.
+SUBSCRIBE_DELAY_SECONDS = 2.0
+
+# The (vendor_id, trait_id) pairs to subscribe, exactly as the SPAN mobile client
+# asks for them (recovered from an iOS capture). The publisher sends only traits
+# a subscriber requested, so this set — not just the resource — decides what
+# arrives. Vendor 1 is SPAN's trait namespace, 5 the Weave-derived common one;
+# the trait ids are opaque and we carry them verbatim.
+SUBSCRIBE_TRAITS = (
+    (5, 1), (1, 36), (1, 17), (1, 15), (1, 16), (1, 2), (1, 33), (1, 47),
+    (1, 28), (1, 1), (1, 13), (1, 26), (1, 21), (1, 12), (1, 14), (1, 11),
+    (1, 31), (1, 32), (1, 35), (1, 18), (1, 38), (1, 41), (1, 19), (1, 39),
+    (1, 5), (1, 6), (1, 4), (1, 40), (1, 20), (5, 3), (1, 42),
+)
 
 # Per-circuit properties we surface, with (datatype, unit) and the Channel attr
 # they read. Units follow SPAN's native quantities after the decoder's ÷1000.
@@ -193,6 +216,58 @@ def _parse_sites_serial(raw: bytes) -> str | None:
     return None
 
 
+def parse_sites_hardware_ids(raw: bytes) -> list[str]:
+    """Pull the subscribable hardware ids from a GetSitesForUser response.
+
+    These are the short ids (site and gateway, e.g. `a1b2c3d4e5f60718`) that
+    `SubscribeAndGetTraits` keys its per-resource trait request on — *not* the
+    resource UUIDs the topology also carries. Layout, by field number:
+
+        1 sites_with_membership[] -> 3 membership[] -> 1 member[] -> 2 id
+
+    Returned in encounter order, de-duplicated; empty if the shape is unfamiliar.
+    """
+    if not raw:
+        return []
+    out: list[str] = []
+    try:
+        for site in parse(raw).get_msgs(1):
+            for group in site.get_msgs(3):
+                for member in group.get_msgs(1):
+                    value = member.get_str(2)
+                    if value and value not in out:
+                        out.append(value)
+    except Exception as exc:  # noqa: BLE001 — a shape change must not break setup
+        log.debug("could not walk GetSitesForUser for hardware ids: %s", exc)
+    return out
+
+
+def build_subscribe_request(channel: str, hardware_ids: Iterable[str]) -> bytes:
+    """Serialize a SubscribeAndGetTraitsRequest for `channel`.
+
+        SubscribeAndGetTraitsRequest {
+          1 subscriber_resource_id: ResourceId { 1 id }
+          2 resources[]: ResourceIdWithTraitMetadata {
+              1 resource_id: ResourceId { 1 id }
+              2 traits[]:    TraitMetadata { 1 vendor_id, 3 trait_id }
+            }
+        }
+
+    The subscriber is identified by the *Ably channel name* we picked, which is
+    why a locally generated device UUID works — this call is the registration.
+    """
+    traits = b"".join(
+        field_message(2, field_varint(1, vendor) + field_varint(3, trait))
+        for vendor, trait in SUBSCRIBE_TRAITS
+    )
+    body = field_message(1, field_string(1, channel))
+    for hardware_id in hardware_ids:
+        body += field_message(
+            2, field_message(1, field_string(1, hardware_id)) + traits
+        )
+    return body
+
+
 def _walk_strings(msg: Message, depth: int = 0):
     """Yield every UTF-8-decodable leaf string in a message tree (bounded depth)."""
     if depth > 8:
@@ -239,6 +314,7 @@ class CloudBackend:
         self._host = host
         self._key_name = key_name
         self._reconnect_seconds = reconnect_seconds
+        self._hardware_ids: list[str] = []
 
         self._on_schema: SchemaCallback | None = None
         self._on_reading: ReadingCallback | None = None
@@ -269,13 +345,14 @@ class CloudBackend:
             self._thread = None
             log.info("cloud backend stopped")
 
-    def probe(self, timeout: float = 15.0) -> PanelSchema:
+    def probe(self, timeout: float = 45.0) -> PanelSchema:
         """Bootstrap, subscribe, and return the first content-bearing schema.
 
-        A one-shot connectivity check for the config flow. Auth and channel
+        A one-shot connectivity check for the config flow. Auth and topology
         problems surface as their own exceptions; `TimeoutError` means the
-        channel attached but SPAN published nothing to it, which is what a
-        `device_uuid` the cloud does not recognize looks like from our side.
+        channel attached and the subscribe was accepted, but no content-bearing
+        frame followed. Allow generous time: the first frames after a subscribe
+        are often lean energy/interval ones carrying no circuits.
         """
         # Run it once up front so a bad token or missing channel raises here
         # rather than being swallowed by the stream thread's retry loop.
@@ -309,7 +386,11 @@ class CloudBackend:
         while not self._stop.is_set():
             try:
                 token, channel = self.bootstrap()
-                log.info("subscribing to Ably channel %s", channel)
+                log.info("attaching to Ably channel %s", channel)
+                # Registration is per-connection as far as we can tell, so it is
+                # re-issued on every (re)attach, from a helper thread because
+                # stream_frames blocks for the life of the stream.
+                self._schedule_subscribe(channel)
                 cloud_ably.stream_frames(
                     token,
                     channel,
@@ -333,10 +414,17 @@ class CloudBackend:
         """Authenticate, resolve topology, and obtain an Ably token + channel."""
         access_token = cloud_auth.access_token_from_store(self._token_store)
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
-            if self._serial is None:
-                self._serial = _parse_sites_serial(grpc.get_sites_for_user())
-                if self._serial:
-                    log.info("resolved panel serial %s from GetSitesForUser", self._serial)
+            if self._serial is None or not self._hardware_ids:
+                sites = grpc.get_sites_for_user()
+                if self._serial is None:
+                    self._serial = _parse_sites_serial(sites)
+                    if self._serial:
+                        log.info(
+                            "resolved panel serial %s from GetSitesForUser", self._serial
+                        )
+                if not self._hardware_ids:
+                    self._hardware_ids = parse_sites_hardware_ids(sites)
+                    log.debug("subscribable hardware ids: %s", self._hardware_ids)
 
             request = field_string(1, self._device_uuid)
             directive = parse_ably_token(
@@ -357,6 +445,50 @@ class CloudBackend:
             )
             return details.token, channel
         raise cloud_ably.AblyError("AblyToken response had neither a token nor a TokenRequest")
+
+    def _schedule_subscribe(self, channel: str) -> None:
+        """Fire `subscribe` shortly after the caller starts reading the stream."""
+
+        def worker() -> None:
+            if self._stop.wait(SUBSCRIBE_DELAY_SECONDS):
+                return
+            try:
+                self.subscribe(channel)
+            except Exception as exc:  # noqa: BLE001 — the stream retry owns recovery
+                if not self._stop.is_set():
+                    log.error(
+                        "SubscribeAndGetTraits failed (%s); the channel will stay "
+                        "silent until the next reconnect",
+                        exc,
+                    )
+
+        threading.Thread(
+            target=worker, name="span-cloud-subscribe", daemon=True
+        ).start()
+
+    def subscribe(self, channel: str) -> bytes:
+        """Register `channel` as a telemetry subscriber; return the trait snapshot.
+
+        Without this SPAN publishes nothing, so a failure here is the difference
+        between live entities and an empty integration.
+        """
+        if not self._hardware_ids:
+            raise cloud_grpc.GrpcError(
+                5,
+                "GetSitesForUser returned no subscribable hardware ids",
+                "SubscribeAndGetTraits",
+            )
+        access_token = cloud_auth.access_token_from_store(self._token_store)
+        request = build_subscribe_request(channel, self._hardware_ids)
+        with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
+            snapshot = grpc.subscribe_and_get_traits(request)
+        log.info(
+            "subscribed %d resource(s) for telemetry on %s (%d-byte trait snapshot)",
+            len(self._hardware_ids),
+            channel,
+            len(snapshot),
+        )
+        return snapshot
 
     def _default_channel(self) -> str | None:
         if not self._user_id:

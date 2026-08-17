@@ -87,11 +87,11 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         if self.schema is not None:
             return
         _LOGGER.warning(
-            "No SPAN telemetry after %ds, so no entities have been created. The "
-            "Ably channel is bound to the device UUID this entry was configured "
-            "with; if it is not the one SPAN publishes for, the channel attaches "
-            "but stays silent. Reconfigure the integration with the device UUID "
-            "from your SPAN mobile client.",
+            "No SPAN telemetry after %ds, so no entities have been created. "
+            "Entities are built from the first frame SPAN publishes, and SPAN only "
+            "publishes once our SubscribeAndGetTraits registration is accepted — "
+            "look for a subscribe error above. Reloading the integration retries "
+            "the whole handshake.",
             SCHEMA_GRACE_SECONDS,
         )
 
