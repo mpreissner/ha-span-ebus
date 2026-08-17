@@ -21,7 +21,8 @@ mobilefrontend.prd.span.io                      → gRPC data plane (Bearer = Co
         ├─ SearchResourcesForSerial   → (empty in capture)
         ├─ SubscribeAndGetTraits      → REQUIRED: registers the channel; + trait snapshot
         ├─ GetHistoryAggregation      → historical energy
-        └─ ListDispatches             → schedules / dispatches
+        ├─ ListDispatches             → schedules / dispatches
+        └─ SendMessages               → the ONLY write: trait commands, e.g. a breaker toggle
 rest.ably.io/keys/v8kFxw.VMjbuw/requestToken    → exchange TokenRequest → real Ably token
 rest.ably.io/comet/connect + /{conn}/recv       → LIVE realtime power stream (base64 protobuf)
 ```
@@ -285,7 +286,47 @@ qualified with their panel spaces. A non-panel instance *absent* from a non-empt
 snapshot is the main feed (instance 2 here; its power tracks the panel total to
 within one sampling window), published as `feed-<id>`.
 
-## 4. app-api GraphQL — what it's actually for
+### 3g. The same snapshot carries relay state — and the command address
+
+Trait **1/31** (`SwitchLoadManagementTrait`) has one entry per breaker, keyed by
+the *same* instance id as 1/15 and the telemetry:
+
+```
+1 { 1 TraitRef -> 1/15, same instance   <- the circuit this switch belongs to
+    2 config { … thresholds … }
+    3 switch_state                       <- 1 UNKNOWN, 2 OPEN, 3 CLOSED
+    5 last_disconnect_msec { 1 utc }
+    6 last_reconnect_msec  { 1 utc } }
+```
+
+**CLOSED = energized.** Live snapshot: 27 circuits, 27 switchable, all CLOSED. The
+back-ref is checked against the id we looked the entry up under; a disagreement
+yields no relay control rather than a possibly-wrong target (27/27 agreed).
+
+The entry also supplies the command address: its resource's `hardware_id` (the
+panel, not the site), the instance id, and the trait metadata (vendor 1, trait 31,
+version 1 — the snapshot omits `product_id`, so it is echoed back as absent).
+
+## 4. Circuit control — the one write path
+
+Toggling a breaker is a `SendMessages` POST carrying a `TraitMessage` addressed to
+that 1/31 instance; wire format and payload bytes are in
+[CLOUD-PROTO.md § The command surface](CLOUD-PROTO.md#the-command-surface--sendmessages),
+the whole design in [specs/circuit-control.md](specs/circuit-control.md).
+
+Two consequences for the flow:
+
+- **The reply is an ack, not an answer.** The app matches the real
+  `SwitchLoadManagementCommandResponses` by `request_id` on the Ably *trait*
+  channel, which we do not read. So a panel-side policy refusal
+  (`ALWAYS_ON_CIRCUIT`, `MINIMUM_RECONNECT_TIME`) surfaces as the state reverting,
+  not as an error.
+- **State needs its own refresh.** Telemetry never carries `switch_state`, so
+  `SubscribeAndGetTraits` is re-issued on a timer (`SWITCH_REFRESH_SECONDS = 60`)
+  and again a few seconds after a command. That is also how a breaker toggled in
+  the SPAN app reaches Home Assistant.
+
+## 5. app-api GraphQL — what it's actually for
 
 `app-api.prod.span-csp.com/graphql` is still live but only serves **app
 configuration and third-party integration keys** (Customer.io, Zendesk, Segment).
@@ -307,8 +348,10 @@ returns `buildings: null`; ignore it.
    **Keep the subscribe response** — it is what names the circuits (§3f). The
    schema is held back a couple of seconds waiting for it, since HA fixes entity
    names at creation.
-4. **History**: `GetHistoryAggregation` for backfill / long-term stats.
-5. ~~**Blocker**: recover the telemetry `.proto`~~ — **resolved.** Schema recovered
+4. **Control**: `SendMessages` with a 1/31 `TraitMessage` to open/close a relay
+   (§4); state comes from re-reading the snapshot, not from the reply.
+5. **History**: `GetHistoryAggregation` for backfill / long-term stats.
+6. ~~**Blocker**: recover the telemetry `.proto`~~ — **resolved.** Schema recovered
    from the APK (see `docs/CLOUD-PROTO.md`) and live-confirmed; the cloud backend
    decodes circuits + site flows end-to-end.
 

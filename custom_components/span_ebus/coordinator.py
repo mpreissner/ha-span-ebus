@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
@@ -29,6 +31,20 @@ _LOGGER = logging.getLogger(__name__)
 # once a frame describes them, so a quiet stream otherwise looks like a broken
 # integration with an empty log.
 SCHEMA_GRACE_SECONDS = 60
+
+
+@dataclass
+class _Platform:
+    """One platform's claim on the schema: which specs it wants, and what it has.
+
+    Each platform keeps its own `seen` set because they partition the schema —
+    the sensor platform must not build an entity for the relay property, and the
+    switch platform must not build one for power.
+    """
+
+    adder: Callable[[list[PropertySpec]], None]
+    wants: Callable[[PropertySpec], bool]
+    seen: set[str] = field(default_factory=set)
 
 
 class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
@@ -60,8 +76,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
         self._flush_scheduled = False
-        self._known_keys: set[str] = set()
-        self._entity_adder: Callable[[list[PropertySpec]], None] | None = None
+        self._platforms: list[_Platform] = []
         self._cancel_grace: Callable[[], None] | None = None
 
     # --- lifecycle ---------------------------------------------------------
@@ -99,12 +114,35 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
 
     @callback
     def register_entity_adder(
-        self, adder: Callable[[list[PropertySpec]], None]
+        self,
+        adder: Callable[[list[PropertySpec]], None],
+        wants: Callable[[PropertySpec], bool],
     ) -> None:
-        """Let the sensor platform create entities as the schema arrives."""
-        self._entity_adder = adder
+        """Let a platform create entities for the specs it claims, as they arrive.
+
+        Platforms register before the first frame, so `wants` is also replayed
+        against a schema that has already landed (a reload, or a second platform
+        setting up late).
+        """
+        platform = _Platform(adder=adder, wants=wants)
+        self._platforms.append(platform)
         if self.schema is not None:
-            self._emit_new_specs(self.schema)
+            self._emit_to(platform, self.schema)
+
+    # --- commands ----------------------------------------------------------
+
+    async def async_send_command(self, key: str, value: str) -> None:
+        """Write one settable property, e.g. `circuit-42/relay` -> `OPEN`.
+
+        The backend call is blocking gRPC, so it runs in an executor. It also
+        emits the new state through the normal reading callback, but that arrives
+        on the backend thread a moment later; the local update below means the
+        switch stops showing its old position as soon as the call returns.
+        """
+        await self.hass.async_add_executor_job(self._backend.send_command, key, value)
+        data = dict(self.data or {})
+        data[key] = Reading(key=key, value=value, timestamp=time.time())
+        self.async_set_updated_data(data)
 
     # --- backend callbacks (run on the backend's thread) -------------------
 
@@ -127,17 +165,20 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
 
     @callback
     def _emit_new_specs(self, schema: PanelSchema) -> None:
-        if self._entity_adder is None:
-            return
+        for platform in self._platforms:
+            self._emit_to(platform, schema)
+
+    @callback
+    def _emit_to(self, platform: _Platform, schema: PanelSchema) -> None:
         new = [
             spec
             for key, spec in schema.properties.items()
-            if key not in self._known_keys
+            if key not in platform.seen and platform.wants(spec)
         ]
         if not new:
             return
-        self._known_keys.update(spec.key for spec in new)
-        self._entity_adder(new)
+        platform.seen.update(spec.key for spec in new)
+        platform.adder(new)
 
     @callback
     def _flush(self) -> None:

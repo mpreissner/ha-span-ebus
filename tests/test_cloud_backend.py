@@ -3,14 +3,16 @@
 import json
 import threading
 import time
+from dataclasses import replace
 
 import pytest
 
 from span_bridge import cloud_pb as pb
 from span_bridge.backends import cloud
+from span_bridge.cloud_commands import SwitchTarget
 from span_bridge.cloud_telemetry import Channel, CircuitSample, Frame
 from span_bridge.cloud_traits import CircuitInfo
-from span_bridge.models import NodeKind
+from span_bridge.models import DataType, NodeKind
 
 
 def _frame() -> Frame:
@@ -51,6 +53,23 @@ def _circuits() -> dict[int, CircuitInfo]:
     return {
         54: CircuitInfo(instance_id=54, label="Branch A", spaces=(33,), breaker_amps=20),
     }
+
+
+def _switch(instance_id: int) -> SwitchTarget:
+    return SwitchTarget(
+        resource_id="a1b2c3d4e5f60718", instance_id=instance_id, metadata=(1, None, 31, 1)
+    )
+
+
+def _switchable_circuits(relay_closed: bool | None = True) -> dict[int, CircuitInfo]:
+    """`_circuits()` where circuit 54 also resolved a switch trait.
+
+    The feed (2) deliberately keeps no entry, so a snapshot that never mentioned
+    an instance cannot end up with a relay control.
+    """
+    circuits = _circuits()
+    circuits[54] = replace(circuits[54], relay_closed=relay_closed, switch=_switch(54))
+    return circuits
 
 
 def test_schema_nodes_and_kinds():
@@ -466,6 +485,177 @@ def test_probe_times_out_on_a_silent_channel(monkeypatch, tmp_path):
 
     with pytest.raises(TimeoutError):
         backend.probe(timeout=0.2)
+
+
+def test_relay_is_advertised_only_where_a_switch_trait_was_resolved():
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _switchable_circuits())
+
+    relay = schema.properties["circuit-54/relay"]
+    assert relay.settable is True
+    assert relay.datatype is DataType.ENUM
+    assert relay.enum_values == cloud.RELAY_STATES
+    assert relay.node_name == "Branch A"
+
+    # The feed and the panel are metering nodes, and no snapshot entry addresses
+    # them — offering a switch there would mean commanding something else.
+    assert "feed-2/relay" not in schema.properties
+    assert "panel/relay" not in schema.properties
+    # And a snapshot without switch traits leaves every circuit read-only.
+    assert "circuit-54/relay" not in cloud.schema_from_frame(
+        "<cloud-serial>", _frame(), _circuits()
+    ).properties
+
+
+def test_relay_readings_report_the_snapshot_state():
+    def state(relay_closed):
+        readings = cloud.readings_from_frame(
+            _frame(), 1.0, _switchable_circuits(relay_closed)
+        )
+        return {r.key: r.value for r in readings}["circuit-54/relay"]
+
+    assert state(True) == "CLOSED"
+    assert state(False) == "OPEN"
+    # The panel really does report UNKNOWN; it must not be flattened to OPEN,
+    # which would show a live breaker as off.
+    assert state(None) == "UNKNOWN"
+
+
+def test_every_advertised_relay_has_a_reading():
+    # Same contract as the metering properties: no dead entities.
+    frame = _frame()
+    circuits = _switchable_circuits()
+    schema = cloud.schema_from_frame("<cloud-serial>", frame, circuits)
+    keys = {r.key for r in cloud.readings_from_frame(frame, 1.0, circuits)}
+    assert set(schema.properties) <= keys
+
+
+def test_parse_relay_command_reads_the_obvious_words_and_refuses_the_rest():
+    assert cloud.parse_relay_command("CLOSED") is True
+    assert cloud.parse_relay_command("open") is False
+    for word in ("on", "true", "1", " Close "):
+        assert cloud.parse_relay_command(word) is True
+    for word in ("off", "false", "0"):
+        assert cloud.parse_relay_command(word) is False
+    # Anything ambiguous is dropped rather than guessed: the wrong guess opens a
+    # breaker.
+    for junk in ("", "toggle", "maybe", "2", "OPENISH"):
+        assert cloud.parse_relay_command(junk) is None
+
+
+class _FakeGrpc:
+    """Stands in for CloudGrpcClient, recording what got posted."""
+
+    def __init__(self, sent: list[bytes], token: str, *, host: str | None = None):
+        self._sent = sent
+        self.token = token
+        self.host = host
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def send_messages(self, request: bytes) -> bytes:
+        self._sent.append(request)
+        return b""
+
+
+def _wire_grpc(monkeypatch, sent: list[bytes]) -> None:
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", lambda store: "tok")
+    monkeypatch.setattr(
+        cloud.cloud_grpc,
+        "CloudGrpcClient",
+        lambda token, **kw: _FakeGrpc(sent, token, **kw),
+    )
+    # The post-command snapshot re-read waits on a thread; keep the test quick.
+    monkeypatch.setattr(cloud, "POST_COMMAND_REFRESH_SECONDS", 0.01)
+
+
+def test_send_command_posts_a_switch_request_for_the_addressed_instance(
+    monkeypatch, tmp_path
+):
+    sent: list[bytes] = []
+    _wire_grpc(monkeypatch, sent)
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid")
+    backend._circuits = _switchable_circuits()
+    readings: list = []
+    backend._on_reading = readings.append
+
+    backend.send_command("circuit-54/relay", "OPEN")
+
+    assert len(sent) == 1
+    message = pb.parse(sent[0]).get_msgs(1)[0]
+    # Right trait, right instance — the only two ways to hit the wrong breaker.
+    assert message.get_msg(1).get_uint(3) == 31
+    assert message.get_msg(2).get_msg(2).get_uint(1) == 54
+    assert message.get_msg(2).get_msg(1).get_str(1) == "a1b2c3d4e5f60718"
+    payload = message.get_msg(14).get_msg(2).get_bytes(1)
+    assert payload == cloud.cloud_commands.disconnect_payload()
+
+    # The intended state is reported at once, so the UI does not snap back while
+    # the relay travels, and the local snapshot agrees with what we sent.
+    assert [(r.key, r.value) for r in readings] == [("circuit-54/relay", "OPEN")]
+    assert backend._circuits[54].relay_closed is False
+
+    backend.send_command("circuit-54/relay", "on")
+    assert pb.parse(sent[1]).get_msgs(1)[0].get_msg(14).get_msg(2).get_bytes(
+        1
+    ) == cloud.cloud_commands.release_payload()
+    assert backend._circuits[54].relay_closed is True
+
+
+def test_send_command_stays_silent_on_anything_it_cannot_address(monkeypatch, tmp_path):
+    sent: list[bytes] = []
+    _wire_grpc(monkeypatch, sent)
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid")
+    backend._circuits = _switchable_circuits()
+    readings: list = []
+    backend._on_reading = readings.append
+
+    backend.send_command("circuit-54/power", "0")  # not a writable property
+    backend.send_command("feed-2/relay", "OPEN")  # no snapshot entry
+    backend.send_command("panel/relay", "OPEN")  # not a circuit node
+    backend.send_command("circuit-99/relay", "OPEN")  # unknown instance
+    backend.send_command("circuit-54/relay", "toggle")  # unreadable value
+
+    assert sent == []
+    assert readings == []
+    assert backend._circuits[54].relay_closed is True
+
+
+def test_relay_state_refreshes_on_a_timer_and_announces_changes(monkeypatch, tmp_path):
+    # Telemetry never carries switch state, and we do not read the trait channel,
+    # so a breaker toggled in the SPAN app only reaches HA via this re-read.
+    monkeypatch.setattr(cloud, "SUBSCRIBE_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(cloud, "SWITCH_REFRESH_SECONDS", 0.01)
+    states = iter([True, False])
+    monkeypatch.setattr(
+        cloud,
+        "parse_trait_snapshot",
+        lambda raw: _switchable_circuits(next(states, False)),
+    )
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid")
+    monkeypatch.setattr(backend, "subscribe", lambda channel: b"snapshot")
+    readings: list = []
+    backend._on_reading = readings.append
+
+    try:
+        backend._schedule_subscribe("c:u:d")
+        deadline = time.time() + 5.0
+        while not readings and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        backend.stop(join_timeout=1.0)
+
+    # The first snapshot is what the schema is built from, so it announces
+    # nothing; the refresh that follows publishes the state it found.
+    assert readings
+    assert readings[0].key == "circuit-54/relay"
+    assert readings[0].value == "OPEN"
 
 
 def test_probe_propagates_bootstrap_failure(monkeypatch, tmp_path):

@@ -45,7 +45,9 @@ async def async_setup_entry(
     def add_specs(specs: list[PropertySpec]) -> None:
         async_add_entities(SpanSensor(coordinator, spec) for spec in specs)
 
-    coordinator.register_entity_adder(add_specs)
+    # Settable properties belong to a control platform (the relay is a switch);
+    # everything the panel merely reports is a sensor.
+    coordinator.register_entity_adder(add_specs, lambda spec: not spec.settable)
 
 
 class SpanSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):

@@ -22,7 +22,7 @@ from .span_client import cloud_auth
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 
 type SpanConfigEntry = ConfigEntry[SpanCloudCoordinator]
 
