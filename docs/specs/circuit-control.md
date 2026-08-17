@@ -1,6 +1,9 @@
 # Spec — circuit control (relay on/off) over the SPAN cloud
 
-**Status:** implemented, pending a live write test on a benign circuit.
+**Status:** implemented; the write path is accepted by the live service, and a
+toggle of a real breaker is the remaining check. Commands were validated against
+production by addressing trait instance 999 — an id no panel has — so the
+envelope, the auth and the requester are all proven without moving a relay.
 **Scope:** turn a detected breaker on or off from Home Assistant, and report the
 relay's current state, using the same cloud path the mobile app uses.
 
@@ -66,16 +69,59 @@ on:  { 2: ReleaseDisconnectSwitchRequest { 1: DisconnectReason { 3: control_sour
 with `ControlFunctionSource.USER_COMMAND = 5`. So the entire payload for "off" is
 six bytes, `0a 04 0a 02 18 05` — see `cloud_commands.py`.
 
-Note the resource id appears twice under different field numbers: `#1` of
-`InstanceMetadata`, `#2` of `RequestMetadata` (whose `#1` is the unset timestamp).
+Note a `resource_id` appears twice under different field numbers, and the two
+name **different things**. `#1` of `InstanceMetadata` is the resource that owns
+the trait instance (the panel). `#2` of `RequestMetadata` (whose `#1` is the
+unset timestamp) is the *requester* — who is asking — and must be the caller's
+own user id; see "Requester" below.
 
 Trait ids: **`SwitchLoadManagementTrait` is 1/31**, and its `trait_instance_id` is
 the *same* 30..56 id the telemetry frames and `CircuitBreakerTrait` (1/15) use, so
 a circuit that reports power as instance 42 is switched as instance 42.
 `trait_metadata` is echoed verbatim from the snapshot entry that declared the
 instance (vendor 1, trait 31, version 1 — no `product_id`, which the snapshot
-omits); `resource_id` is the hardware id of the resource block the entry came
-from, i.e. the panel, not the site.
+omits); `InstanceMetadata.resource_id` is the hardware id of the resource block
+the entry came from, i.e. the panel, not the site.
+
+### Requester — `RequestMetadata.resource_id`
+
+Discovered from a live failure, not from the app bundle. Sending the panel's
+hardware id here — the obvious reading, since the same value is correct in
+`InstanceMetadata` — is rejected:
+
+```
+PERMISSION_DENIED (7): [Validation Error]: Requester <panel-hw-id>,
+does not contain <userId>
+```
+
+`<userId>` is the `username` claim of the Cognito access token (**not** `sub`,
+which is a different UUID) — the same `<userId>` in the Ably channel name
+`c:<userId>:<deviceUUID>`. It never appears in any response body, so the server
+resolved it from the bearer token. Read the message as: *the resource you named
+does not contain the calling user.*
+
+Which resource does contain the user? Established empirically against the live
+service, aimed at trait instance 999 — an id this panel does not have, so no
+breaker could move whatever the answer turned out to be:
+
+| requester sent | result |
+| --- | --- |
+| panel hardware id | `PERMISSION_DENIED` |
+| site hardware id | `PERMISSION_DENIED` |
+| site resource UUID (dashed and stripped) | `PERMISSION_DENIED` |
+| panel resource UUID (dashed and stripped) | `PERMISSION_DENIED` |
+| panel device UUID | `PERMISSION_DENIED` |
+| **the caller's user id** | **accepted** |
+
+The same run also confirmed that `InstanceMetadata.resource_id` has no bearing
+on the check: crossing the two ids changed which value the error quoted, and it
+always quoted `RequestMetadata`'s.
+
+So SPAN models the user as a resource, and a command is signed with it: the only
+thing that "contains" the user is the user. `cloud_auth.user_id_from_token`
+reads the claim, and `backends/cloud.py` calls it per command rather than
+caching a configured value, so the requester always matches the token the same
+request authenticates with.
 
 ### Responses (not consumed yet)
 

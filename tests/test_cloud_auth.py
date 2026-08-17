@@ -7,6 +7,7 @@ without a real server.
 """
 
 import base64
+import json
 
 from span_bridge import cloud_auth as ca
 
@@ -107,3 +108,32 @@ def test_process_challenge_produces_valid_signature():
     assert resp["PASSWORD_CLAIM_SIGNATURE"] == expected_sig
     assert resp["USERNAME"] == user_id
     assert resp["PASSWORD_CLAIM_SECRET_BLOCK"] == secret_block_b64
+
+
+def _access_token(claims: dict | None) -> str:
+    if claims is None:
+        return "not.a.jwt"
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"header.{body}.signature"
+
+
+def test_user_id_comes_from_the_username_claim_not_the_subject():
+    # SPAN's user id is `username`, a dash-stripped UUID. Cognito's `sub` is a
+    # different UUID entirely, and sending it as a command's requester is
+    # rejected — so reading the wrong claim would be a silent, live-only failure.
+    token = _access_token(
+        {
+            "sub": "f8015330-8011-7055-244b-9b7fd7f18135",
+            "username": "00112233445566778899aabbccddeeff",
+        }
+    )
+    assert ca.user_id_from_token(token) == "00112233445566778899aabbccddeeff"
+
+
+def test_a_token_without_a_usable_username_yields_none():
+    assert ca.user_id_from_token(_access_token({"sub": "s"})) is None
+    assert ca.user_id_from_token(_access_token({"username": ""})) is None
+    assert ca.user_id_from_token(_access_token({"username": 7})) is None
+    # Malformed tokens must not raise on a path that runs during setup.
+    assert ca.user_id_from_token(_access_token(None)) is None
+    assert ca.user_id_from_token("") is None
