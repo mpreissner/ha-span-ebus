@@ -40,6 +40,13 @@ What live frames add to the static recovery:
     scalar yet still emits the message holding it. Treating the two alike makes
     a circuit that switches off freeze at its last non-zero reading, so
     `_leaf_value` distinguishes them.
+  * The `combined` slot's *current* is the larger of the two legs, not their
+    sum — verified on every frame, for the panel feeder and for three-wire
+    circuits alike (whichever leg is higher is the one that appears). That is
+    the right convention for a series path through a two-pole breaker, and it
+    makes the figure busbar loading rather than a total. Per-leg current is
+    populated separately and is what shows whether a panel is balanced; per-leg
+    *power* is never populated.
   * The `combined` slot's *voltage* is unreliable: it equals line_an + line_bn
     on most frames but reads a frame-wide 0.88x or 0.99x of that on others, for
     every circuit at once regardless of load. The per-leg voltages are stable in

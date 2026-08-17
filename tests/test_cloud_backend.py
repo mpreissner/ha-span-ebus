@@ -83,7 +83,15 @@ def test_schema_advertises_only_properties_the_wire_feeds():
     panel_props = {
         spec.property_id for spec in schema.properties.values() if spec.node_id == "panel"
     }
-    assert panel_props == {"power", "current", "voltage_l1", "voltage_l2", "frequency"}
+    assert panel_props == {
+        "power",
+        "current",
+        "current_l1",
+        "current_l2",
+        "voltage_l1",
+        "voltage_l2",
+        "frequency",
+    }
 
 
 def test_schema_names_nodes_from_the_trait_snapshot():
@@ -140,10 +148,14 @@ def test_readings_keys_values_and_timestamp():
 
 def test_panel_readings_cover_legs_and_frequency():
     by_key = {r.key: r.value for r in cloud.readings_from_frame(_frame(), timestamp=1.0)}
-    assert by_key["panel/current"] == "10.189"
     assert by_key["panel/voltage_l1"] == "119.964"
     assert by_key["panel/voltage_l2"] == "119.856"
     assert by_key["panel/frequency"] == "60.038"
+    # Per-leg current is what answers "is the panel balanced?"; `current` is the
+    # combined channel's, which the wire reports as the larger leg, not the sum.
+    assert by_key["panel/current_l1"] == "9.133"
+    assert by_key["panel/current_l2"] == "10.189"
+    assert by_key["panel/current"] == "10.189"
 
 
 def test_readings_keys_follow_the_node_mapping():

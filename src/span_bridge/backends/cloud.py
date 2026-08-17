@@ -98,9 +98,16 @@ _PROPS_BY_KIND: dict[str, tuple[tuple[str, str, str, str], ...]] = {
     # The panel is the one node with trustworthy voltage and frequency. Its
     # `combined` voltage is skipped deliberately: it drifts frame-wide against
     # the leg voltages, which are steady.
+    #
+    # `current` is the *combined* channel's, which the wire reports as the larger
+    # of the two legs rather than their sum — busbar loading, the figure to
+    # compare against the main breaker. The per-leg currents are what shows
+    # whether the panel is balanced, so both are published.
     "panel": (
         ("power", "W", "combined", "power_w"),
         ("current", "A", "combined", "current_a"),
+        ("current_l1", "A", "line_an", "current_a"),
+        ("current_l2", "A", "line_bn", "current_a"),
         ("voltage_l1", "V", "line_an", "voltage_v"),
         ("voltage_l2", "V", "line_bn", "voltage_v"),
         ("frequency", "Hz", "combined", "freq_hz"),
