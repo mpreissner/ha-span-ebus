@@ -36,7 +36,9 @@ from .span_client.backend import CloudBackend
 _LOGGER = logging.getLogger(__name__)
 
 # How long to wait for the first telemetry frame when validating the channel.
-PROBE_TIMEOUT = 15.0
+# Generous: the subscribe is deliberately delayed a couple of seconds and the
+# first frames SPAN sends often carry no circuits.
+PROBE_TIMEOUT = 45.0
 
 STEP_USER_SCHEMA = vol.Schema(
     {
@@ -45,9 +47,6 @@ STEP_USER_SCHEMA = vol.Schema(
         ),
         vol.Required(CONF_PASSWORD): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
-        ),
-        vol.Required(CONF_DEVICE_UUID): TextSelector(
-            TextSelectorConfig(type=TextSelectorType.TEXT)
         ),
     }
 )
@@ -65,12 +64,15 @@ def _user_id_from_access_token(access_token: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _normalize_device_uuid(raw: str) -> str | None:
-    """Accept a device UUID in any common spelling, or None if it isn't one."""
-    try:
-        return str(uuid.UUID(raw.strip()))
-    except (ValueError, AttributeError):
-        return None
+def _new_device_uuid() -> str:
+    """Mint this install's client id for the Ably channel.
+
+    SPAN does not issue these — the AblyToken RPC echoes back whatever we send,
+    and `SubscribeAndGetTraits` registers the resulting channel for us. Uppercase
+    to match the mobile client's spelling; channel names are case-sensitive, so
+    whatever we generate here must then be used verbatim forever.
+    """
+    return str(uuid.uuid4()).upper()
 
 
 def _probe(
@@ -78,10 +80,9 @@ def _probe(
 ) -> str | None:
     """Verify the channel actually carries telemetry; return the panel serial.
 
-    Runs on an executor thread. The device UUID is the identifier SPAN's cloud
-    binds the Ably channel to, so a wrong one attaches to a channel that simply
-    stays silent — which used to leave the integration installed with zero
-    entities and nothing in the log. Probing here turns that into a form error.
+    Runs on an executor thread. This exercises the whole live path — topology
+    lookup, Ably token, subscribe, first frame — so setup fails loudly instead of
+    finishing with zero entities and nothing in the log.
     """
     with tempfile.TemporaryDirectory() as tmp:
         token_path = Path(tmp) / "tokens.json"
@@ -106,52 +107,50 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             email = user_input[CONF_EMAIL]
             password = user_input[CONF_PASSWORD]
-            device_uuid = _normalize_device_uuid(user_input[CONF_DEVICE_UUID])
+            # Reauth must keep the entry's existing channel id; setup mints one.
+            device_uuid = self._existing_device_uuid() or _new_device_uuid()
 
-            if device_uuid is None:
-                errors[CONF_DEVICE_UUID] = "invalid_device_uuid"
+            try:
+                tokens = await self.hass.async_add_executor_job(
+                    cloud_auth.authenticate, email, password
+                )
+            except cloud_auth.CloudAuthError:
+                errors["base"] = "invalid_auth"
+            except Exception:
+                _LOGGER.exception("unexpected error authenticating to SPAN cloud")
+                errors["base"] = "cannot_connect"
             else:
+                # The password is discarded here — only tokens are persisted.
+                user_id = _user_id_from_access_token(tokens.access_token)
+                serial: str | None = None
                 try:
-                    tokens = await self.hass.async_add_executor_job(
-                        cloud_auth.authenticate, email, password
+                    serial = await self.hass.async_add_executor_job(
+                        _probe, tokens, device_uuid, user_id
                     )
-                except cloud_auth.CloudAuthError:
-                    errors["base"] = "invalid_auth"
+                except TimeoutError:
+                    errors["base"] = "no_telemetry"
                 except Exception:
-                    _LOGGER.exception("unexpected error authenticating to SPAN cloud")
+                    _LOGGER.exception("SPAN cloud telemetry probe failed")
                     errors["base"] = "cannot_connect"
-                else:
-                    # The password is discarded here — only tokens are persisted.
-                    user_id = _user_id_from_access_token(tokens.access_token)
-                    serial: str | None = None
-                    try:
-                        serial = await self.hass.async_add_executor_job(
-                            _probe, tokens, device_uuid, user_id
-                        )
-                    except TimeoutError:
-                        errors[CONF_DEVICE_UUID] = "no_telemetry"
-                    except Exception:
-                        _LOGGER.exception("SPAN cloud telemetry probe failed")
-                        errors["base"] = "cannot_connect"
 
-                    if not errors:
-                        await self.async_set_unique_id(user_id or email.lower())
+                if not errors:
+                    await self.async_set_unique_id(user_id or email.lower())
 
-                        data = {
-                            CONF_EMAIL: email,
-                            CONF_TOKENS: dataclasses.asdict(tokens),
-                            CONF_USER_ID: user_id,
-                            CONF_DEVICE_UUID: device_uuid,
-                            CONF_SERIAL: serial,
-                        }
+                    data = {
+                        CONF_EMAIL: email,
+                        CONF_TOKENS: dataclasses.asdict(tokens),
+                        CONF_USER_ID: user_id,
+                        CONF_DEVICE_UUID: device_uuid,
+                        CONF_SERIAL: serial,
+                    }
 
-                        if self._reauth_entry_data is not None:
-                            entry = self._get_reauth_entry()
-                            self._abort_if_unique_id_mismatch(reason="wrong_account")
-                            return self.async_update_reload_and_abort(entry, data=data)
+                    if self._reauth_entry_data is not None:
+                        entry = self._get_reauth_entry()
+                        self._abort_if_unique_id_mismatch(reason="wrong_account")
+                        return self.async_update_reload_and_abort(entry, data=data)
 
-                        self._abort_if_unique_id_configured()
-                        return self.async_create_entry(title=email, data=data)
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(title=email, data=data)
 
         return self.async_show_form(
             step_id="user",
@@ -161,20 +160,24 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    def _suggested_values(self, user_input: dict[str, Any] | None) -> dict[str, Any]:
-        """Prefill email and device UUID so a retry doesn't retype them.
+    def _existing_device_uuid(self) -> str | None:
+        """The channel id already on the entry, on reauth.
 
-        On reauth the device UUID is already known and must not change — the
-        Ably channel is bound to it — so it comes from the existing entry.
+        It must survive re-authentication: SPAN's realtime channel name embeds it
+        verbatim, so a new one would silently orphan every existing entity.
         """
+        if self._reauth_entry_data is None:
+            return None
+        value = self._reauth_entry_data.get(CONF_DEVICE_UUID)
+        return value if isinstance(value, str) and value else None
+
+    def _suggested_values(self, user_input: dict[str, Any] | None) -> dict[str, Any]:
+        """Prefill the email so a retry or reauth doesn't retype it."""
         suggested: dict[str, Any] = {}
         if self._reauth_entry_data is not None:
             suggested[CONF_EMAIL] = self._reauth_entry_data.get(CONF_EMAIL)
-            suggested[CONF_DEVICE_UUID] = self._reauth_entry_data.get(CONF_DEVICE_UUID)
-        if user_input:
-            for key in (CONF_EMAIL, CONF_DEVICE_UUID):
-                if user_input.get(key):
-                    suggested[key] = user_input[key]
+        if user_input and user_input.get(CONF_EMAIL):
+            suggested[CONF_EMAIL] = user_input[CONF_EMAIL]
         return {k: v for k, v in suggested.items() if v is not None}
 
     async def async_step_reauth(

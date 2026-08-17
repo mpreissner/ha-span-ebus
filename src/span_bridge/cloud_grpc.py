@@ -158,3 +158,12 @@ class CloudGrpcClient:
     def search_resources_for_serial(self, request: bytes) -> bytes:
         """SearchResourcesForSerial: map a panel serial → its trait resources."""
         return self.call("SearchResourcesForSerial", request)
+
+    def subscribe_and_get_traits(self, request: bytes) -> bytes:
+        """SubscribeAndGetTraits: register for telemetry → a trait snapshot.
+
+        This is what makes SPAN publish to our Ably channel; without it the
+        channel attaches and stays silent. The response is a one-shot ~22 KB
+        snapshot of the subscribed resources' traits.
+        """
+        return self.call("SubscribeAndGetTraits", request)

@@ -37,9 +37,12 @@ class PanelConfig:
 class CloudConfig:
     """How to reach SPAN's cloud data plane (the hybrid live-data path).
 
-    `device_uuid` is a stable client identifier the AblyToken RPC binds the
-    realtime channel to; `user_id` (the Cognito sub) lets us construct the
-    channel name `c:<user_id>:<device_uuid>` if the RPC doesn't return it.
+    `device_uuid` is a client identifier we choose, not one SPAN issues: the
+    AblyToken RPC echoes it into the realtime channel name and the backend
+    registers that channel for telemetry. Leave it unset for a per-run id, or
+    pin it to keep the same channel across restarts. `user_id` (the Cognito sub)
+    lets us construct the channel name `c:<user_id>:<device_uuid>` if the RPC
+    doesn't return it.
     """
 
     token_store: Path = Path.home() / ".span-cloud.json"
