@@ -253,12 +253,45 @@ class CloudBackend:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, join_timeout: float = 10.0) -> None:
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=10.0)
+            # The stream thread only notices `_stop` on its next SSE event, so a
+            # silent channel can outlast the join. It is a daemon and exits on
+            # the next event or transport error; callers that cannot wait (the
+            # config-flow probe) pass a short timeout.
+            self._thread.join(timeout=join_timeout)
             self._thread = None
             log.info("cloud backend stopped")
+
+    def probe(self, timeout: float = 15.0) -> PanelSchema:
+        """Bootstrap, subscribe, and return the first content-bearing schema.
+
+        A one-shot connectivity check for the config flow. Auth and channel
+        problems surface as their own exceptions; `TimeoutError` means the
+        channel attached but SPAN published nothing to it, which is what a
+        `device_uuid` the cloud does not recognize looks like from our side.
+        """
+        # Run it once up front so a bad token or missing channel raises here
+        # rather than being swallowed by the stream thread's retry loop.
+        self.bootstrap()
+
+        captured: list[PanelSchema] = []
+        got = threading.Event()
+
+        def on_schema(schema: PanelSchema) -> None:
+            captured.append(schema)
+            got.set()
+
+        self.start(on_schema, lambda _reading: None)
+        try:
+            if not got.wait(timeout):
+                raise TimeoutError(
+                    f"no telemetry arrived on the Ably channel within {timeout:.0f}s"
+                )
+        finally:
+            self.stop(join_timeout=1.0)
+        return captured[0]
 
     def send_command(self, key: str, value: str) -> None:
         # Writing a dispatch is a separate RPC surface not covered by this read
@@ -270,7 +303,7 @@ class CloudBackend:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                token, channel = self._bootstrap()
+                token, channel = self.bootstrap()
                 log.info("subscribing to Ably channel %s", channel)
                 cloud_ably.stream_frames(
                     token,
@@ -291,7 +324,7 @@ class CloudBackend:
             # Wait, but wake immediately on stop.
             self._stop.wait(self._reconnect_seconds)
 
-    def _bootstrap(self) -> tuple[str, str]:
+    def bootstrap(self) -> tuple[str, str]:
         """Authenticate, resolve topology, and obtain an Ably token + channel."""
         access_token = cloud_auth.access_token_from_store(self._token_store)
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
