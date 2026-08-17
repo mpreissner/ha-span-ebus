@@ -27,10 +27,27 @@ the *quantity and unit* come from the slot position, not the leaf type:
     SingleChannelMeterPower: 1 current(mA) 2 voltage(mV) 3 power(mW) 4 freq(mHz)
     DoubleChannelMeterPower: 1 line_an 2 line_bn 3 combined (each a Single…)
 
+`panel_power` (tag 14) is *not* a SingleChannelMeterPower despite sharing the
+oneof — see `_decode_panel`.
+
+What live frames add to the static recovery:
+
+  * Which slots a circuit actually populates depends on its wiring. A two-wire
+    (120 V branch) sample carries current and power but never voltage: the slot
+    is absent from the wire, not zero, on every sample observed. Only the panel
+    block reports voltage.
+  * A *present but empty* slot means zero, not missing — proto3 omits the zero
+    scalar yet still emits the message holding it. Treating the two alike makes
+    a circuit that switches off freeze at its last non-zero reading, so
+    `_leaf_value` distinguishes them.
+  * The `combined` slot's *voltage* is unreliable: it equals line_an + line_bn
+    on most frames but reads a frame-wide 0.88x or 0.99x of that on others, for
+    every circuit at once regardless of load. The per-leg voltages are stable in
+    every frame, so consumers should prefer those and ignore combined voltage.
+
 Static recovery is exact for field numbers and units; the one thing it cannot
 pin is which physical circuit a given `trait_instance_id` maps to — that mapping
-comes from the resource topology (SearchResourcesForSerial), resolved by the
-backend, not here.
+comes from the trait snapshot (see `cloud_traits`), resolved by the backend.
 """
 
 from __future__ import annotations
@@ -85,6 +102,10 @@ class Channel:
     def voltage_v(self) -> float | None:
         return None if self.voltage_mv is None else self.voltage_mv / 1000.0
 
+    @property
+    def freq_hz(self) -> float | None:
+        return None if self.freq_mhz is None else self.freq_mhz / 1000.0
+
 
 @dataclass
 class CircuitSample:
@@ -125,6 +146,12 @@ def _leaf_value(msg: Message | None) -> int | None:
     Two shapes occur: a bare `{3: value}` (channel slots) and a
     `{1: quality, 2: {3: value}}` (site directional flows). Both resolve to the
     varint at field #3 of the innermost message.
+
+    An absent wrapper (`msg is None`) means the quantity is not measured. A
+    wrapper that is present but carries no scalar means *zero*: proto3 drops the
+    zero value and keeps the message around it. Returning None for that case
+    would strand a switched-off circuit at its last non-zero reading, so the two
+    are kept distinct.
     """
     if msg is None:
         return None
@@ -133,8 +160,8 @@ def _leaf_value(msg: Message | None) -> int | None:
         return direct
     inner = msg.get_msg(2)
     if inner is not None:
-        return inner.get_int_opt(3)
-    return None
+        return inner.get_int_opt(3) or 0
+    return 0
 
 
 def _decode_single_channel(msg: Message) -> Channel:
@@ -145,6 +172,46 @@ def _decode_single_channel(msg: Message) -> Channel:
         power_mw=_leaf_value(msg.get_msg(3)),
         freq_mhz=_leaf_value(msg.get_msg(4)),
     )
+
+
+def _decode_double_channel(
+    msg: Message,
+) -> tuple[Channel | None, Channel | None, Channel | None]:
+    """DoubleChannelMeterPower: 1 line_an, 2 line_bn, 3 combined."""
+    an, bn, combined = msg.get_msg(1), msg.get_msg(2), msg.get_msg(3)
+    return (
+        _decode_single_channel(an) if an is not None else None,
+        _decode_single_channel(bn) if bn is not None else None,
+        _decode_single_channel(combined) if combined is not None else None,
+    )
+
+
+def _decode_panel(
+    msg: Message,
+) -> tuple[Channel | None, Channel | None, Channel | None]:
+    """PanelInstant — the panel's own metering, and not a SingleChannelMeterPower.
+
+    Verified against live frames; the useful content is all under field #1:
+
+        1 { 1: line_an, 2: line_bn, 3: combined, 4: { 3: frequency_mHz } }
+        2 { … }          a second such block, all-zero on a panel with no DER
+        3 { 2: { 3: power_mW } }   total panel power
+        4 { 2: { 3: power_mW } }   a second power-like value, ~1% below #3
+        10 { … }         another all-zero block
+
+    Field #1's combined power matches the site `grid` flow exactly, frame for
+    frame, so that block — not #3 or #4 — is the authoritative panel meter. The
+    earlier decoder read this message as a SingleChannelMeterPower, which put a
+    power value (~4 000 000) into the frequency slot and left panel current and
+    voltage empty.
+    """
+    meter = msg.get_msg(1)
+    if meter is None:
+        return None, None, None
+    an, bn, combined = _decode_double_channel(meter)
+    if combined is not None:
+        combined.freq_mhz = _leaf_value(meter.get_msg(4))
+    return an, bn, combined
 
 
 def _decode_instance(sample: Message) -> CircuitSample | None:
@@ -162,15 +229,9 @@ def _decode_instance(sample: Message) -> CircuitSample | None:
         if kind == "two_wire":
             cs.combined = _decode_single_channel(body)
         elif kind == "three_wire":
-            # DoubleChannelMeterPower: 1 line_an, 2 line_bn, 3 combined.
-            an = body.get_msg(1)
-            bn = body.get_msg(2)
-            comb = body.get_msg(3)
-            cs.line_an = _decode_single_channel(an) if an else None
-            cs.line_bn = _decode_single_channel(bn) if bn else None
-            cs.combined = _decode_single_channel(comb) if comb else None
-        else:  # panel — PanelInstant; expose its combined power if present
-            cs.combined = _decode_single_channel(body)
+            cs.line_an, cs.line_bn, cs.combined = _decode_double_channel(body)
+        else:  # panel
+            cs.line_an, cs.line_bn, cs.combined = _decode_panel(body)
         return cs
     return None
 

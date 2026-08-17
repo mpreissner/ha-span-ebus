@@ -13,6 +13,7 @@ Flow, on `start()` (see the sibling modules for the wire detail):
     cloud_ably.request_token            -> a usable Ably realtime token
     cloud_ably.stream_frames            -> base64-protobuf telemetry frames
     cloud_grpc.subscribe_and_get_traits -> registers the channel for publishing
+    cloud_traits.parse_trait_snapshot   -> circuit labels, breakers, panel spaces
     cloud_telemetry.decode_frame        -> circuits + site flows
     -> PanelSchema (synthesized on the first frame) + a stream of Readings
 
@@ -43,7 +44,8 @@ from pathlib import Path
 
 from . import cloud_ably, cloud_auth, cloud_grpc
 from .cloud_pb import Message, field_message, field_string, field_varint, parse
-from .cloud_telemetry import Frame, decode_frame
+from .cloud_telemetry import CircuitSample, Frame, decode_frame
+from .cloud_traits import CircuitInfo, parse_trait_snapshot
 from .models import DataType, NodeKind, PanelSchema, PropertySpec, Reading
 
 # Backend callbacks (previously defined on the daemon's backend Protocol).
@@ -57,6 +59,13 @@ log = logging.getLogger(__name__)
 # assume the backend tolerates the reverse.
 SUBSCRIBE_DELAY_SECONDS = 2.0
 
+# How long to hold the schema back waiting for the subscribe snapshot's circuit
+# labels. Entity names are fixed at creation, so a couple of seconds is worth
+# spending to name circuits "Cooktop" rather than "Circuit 30". The snapshot
+# normally lands before the first frame — SPAN publishes nothing until the
+# subscribe is accepted — so this only covers the race.
+SCHEMA_LABEL_WAIT_SECONDS = 5.0
+
 # The (vendor_id, trait_id) pairs to subscribe, exactly as the SPAN mobile client
 # asks for them (recovered from an iOS capture). The publisher sends only traits
 # a subscriber requested, so this set — not just the resource — decides what
@@ -69,13 +78,37 @@ SUBSCRIBE_TRAITS = (
     (1, 5), (1, 6), (1, 4), (1, 40), (1, 20), (5, 3), (1, 42),
 )
 
-# Per-circuit properties we surface, with (datatype, unit) and the Channel attr
-# they read. Units follow SPAN's native quantities after the decoder's ÷1000.
-_CIRCUIT_PROPS = (
-    ("power", DataType.FLOAT, "W", "power_w"),
-    ("current", DataType.FLOAT, "A", "current_a"),
-    ("voltage", DataType.FLOAT, "V", "voltage_v"),
-)
+# Properties per sample kind, as (property_id, unit, CircuitSample attribute
+# holding the channel, Channel attribute holding the value). Units follow SPAN's
+# native quantities after the decoder's ÷1000.
+#
+# The split matters because Home Assistant creates one entity per property: a
+# property the wire never carries becomes a permanently unavailable sensor. What
+# each kind actually reports was established against live frames (see
+# cloud_telemetry's module docstring).
+_PROPS_BY_KIND: dict[str, tuple[tuple[str, str, str, str], ...]] = {
+    # 120 V branches meter current and power; their voltage slot is never sent.
+    "two_wire": (
+        ("power", "W", "combined", "power_w"),
+        ("current", "A", "combined", "current_a"),
+    ),
+    # 240 V circuits also meter each leg, but a leg voltage there is just another
+    # reading of the panel's own busbars, so the panel node carries those.
+    "three_wire": (
+        ("power", "W", "combined", "power_w"),
+        ("current", "A", "combined", "current_a"),
+    ),
+    # The panel is the one node with trustworthy voltage and frequency. Its
+    # `combined` voltage is skipped deliberately: it drifts frame-wide against
+    # the leg voltages, which are steady.
+    "panel": (
+        ("power", "W", "combined", "power_w"),
+        ("current", "A", "combined", "current_a"),
+        ("voltage_l1", "V", "line_an", "voltage_v"),
+        ("voltage_l2", "V", "line_bn", "voltage_v"),
+        ("frequency", "Hz", "combined", "freq_hz"),
+    ),
+}
 
 # Site directional flows carry watts, except these which are volts / hertz.
 _SITE_VOLT_FLOWS = {"voltage_l1", "voltage_l2"}
@@ -102,32 +135,96 @@ def _fmt(value: float | None) -> str | None:
     return None if value is None else f"{value:.3f}"
 
 
-def schema_from_frame(serial: str, frame: Frame) -> PanelSchema:
-    """Synthesize a PanelSchema from one decoded frame.
+def _node_for(
+    sample: CircuitSample, circuits: dict[int, CircuitInfo]
+) -> tuple[str, NodeKind]:
+    """Stable node id and kind for one telemetry sample.
 
-    The cloud gives us `trait_instance_id`s, not friendly circuit labels (those
-    come from the resource topology and are filled in later via
-    `PanelSchema.resolve_node_names` if we learn them). Each circuit becomes a
-    node with power/current/voltage properties; the panel total and the site
-    directional flows get their own nodes.
+    Node ids stay keyed on the instance id even once we know a circuit's label,
+    so renaming a circuit in the SPAN app does not orphan its entity history.
+    The label rides along as the node's display name instead.
     """
-    schema = PanelSchema(serial=serial)
+    if sample.kind == "panel":
+        return "panel", NodeKind.CORE
+    if circuits and sample.instance_id not in circuits:
+        # We have the panel's circuit list and this instance is not on it, so it
+        # is not a branch circuit. On a MAIN 40 the single such sample is the
+        # main feed, whose power tracks the panel total to within one sampling
+        # window.
+        return f"feed-{sample.instance_id}", NodeKind.LUGS
+    return _circuit_node(sample.instance_id), NodeKind.CIRCUIT
+
+
+def _node_names(
+    frame: Frame, circuits: dict[int, CircuitInfo]
+) -> dict[str, str]:
+    """Display name per node id, from the trait snapshot where we have one.
+
+    Labels are the user's own and need not be unique — two 20 A circuits can
+    both be "Outlets" — so a repeated label is qualified with the panel spaces
+    the circuit occupies, which are unique by construction.
+    """
+    names: dict[str, str] = {}
+    labels: dict[int, str] = {}
+    seen: dict[str, int] = {}
 
     for samples in frame.resources.values():
         for sample in samples:
+            info = circuits.get(sample.instance_id)
+            if sample.kind == "panel" or info is None:
+                continue
+            label = info.display_name
+            labels[sample.instance_id] = label
+            seen[label] = seen.get(label, 0) + 1
+
+    for samples in frame.resources.values():
+        for sample in samples:
+            node_id, _kind = _node_for(sample, circuits)
             if sample.kind == "panel":
-                node_id, kind = "panel", NodeKind.CORE
-            else:
-                node_id, kind = _circuit_node(sample.instance_id), NodeKind.CIRCUIT
-            for prop_id, dtype, unit, _attr in _CIRCUIT_PROPS:
+                names[node_id] = "Panel"
+            elif node_id.startswith("feed-"):
+                names[node_id] = "Main feed"
+            elif sample.instance_id in labels:
+                label = labels[sample.instance_id]
+                info = circuits[sample.instance_id]
+                if seen.get(label, 0) > 1 and info.spaces:
+                    spaces = ", ".join(str(s) for s in info.spaces)
+                    label = f"{label} ({spaces})"
+                names[node_id] = label
+    return names
+
+
+def schema_from_frame(
+    serial: str, frame: Frame, circuits: dict[int, CircuitInfo] | None = None
+) -> PanelSchema:
+    """Synthesize a PanelSchema from one decoded frame.
+
+    Telemetry frames identify circuits only by `trait_instance_id`. Those are
+    internal identifiers with no relation to panel spaces — a 40-space MAIN 40
+    reports instances up to 56 — so `circuits`, parsed from the subscribe
+    snapshot, supplies the user's labels, breaker ratings and real space numbers.
+    Without it nodes fall back to instance-id names.
+
+    Properties are chosen per sample kind so every entity we advertise is one the
+    wire actually feeds; the site directional flows get their own node.
+    """
+    circuits = circuits or {}
+    schema = PanelSchema(serial=serial)
+    names = _node_names(frame, circuits)
+
+    for samples in frame.resources.values():
+        for sample in samples:
+            node_id, kind = _node_for(sample, circuits)
+            for prop_id, unit, _source, _attr in _PROPS_BY_KIND.get(sample.kind, ()):
                 schema.add(
                     PropertySpec(
                         node_id=node_id,
                         node_kind=kind,
                         property_id=prop_id,
                         name=prop_id,
-                        datatype=dtype,
+                        datatype=DataType.FLOAT,
                         unit=unit,
+                        node_name=names.get(node_id),
                     )
                 )
 
@@ -139,6 +236,7 @@ def schema_from_frame(serial: str, frame: Frame) -> PanelSchema:
                 node_kind=NodeKind.POWER_FLOWS,
                 property_id=flow,
                 name=flow,
+                node_name="Site",
                 datatype=DataType.FLOAT,
                 unit=unit,
             )
@@ -147,18 +245,27 @@ def schema_from_frame(serial: str, frame: Frame) -> PanelSchema:
     return schema
 
 
-def readings_from_frame(frame: Frame, timestamp: float | None = None) -> list[Reading]:
-    """Flatten a decoded frame into Readings keyed `<node-id>/<property-id>`."""
+def readings_from_frame(
+    frame: Frame,
+    timestamp: float | None = None,
+    circuits: dict[int, CircuitInfo] | None = None,
+) -> list[Reading]:
+    """Flatten a decoded frame into Readings keyed `<node-id>/<property-id>`.
+
+    `circuits` must match what `schema_from_frame` was given, so reading keys
+    line up with the advertised properties.
+    """
     ts = time.time() if timestamp is None else timestamp
+    circuits = circuits or {}
     out: list[Reading] = []
 
     for samples in frame.resources.values():
         for sample in samples:
-            node_id = "panel" if sample.kind == "panel" else _circuit_node(sample.instance_id)
-            channel = sample.combined
-            if channel is None:
-                continue
-            for prop_id, _dtype, _unit, attr in _CIRCUIT_PROPS:
+            node_id, _kind = _node_for(sample, circuits)
+            for prop_id, _unit, source, attr in _PROPS_BY_KIND.get(sample.kind, ()):
+                channel = getattr(sample, source, None)
+                if channel is None:
+                    continue
                 val = _fmt(getattr(channel, attr))
                 if val is not None:
                     out.append(Reading(key=f"{node_id}/{prop_id}", value=val, timestamp=ts))
@@ -315,12 +422,15 @@ class CloudBackend:
         self._key_name = key_name
         self._reconnect_seconds = reconnect_seconds
         self._hardware_ids: list[str] = []
+        # instance id -> circuit identity, from the subscribe snapshot.
+        self._circuits: dict[int, CircuitInfo] = {}
 
         self._on_schema: SchemaCallback | None = None
         self._on_reading: ReadingCallback | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._schema_sent = False
+        self._label_deadline = 0.0
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -329,6 +439,7 @@ class CloudBackend:
         self._on_reading = on_reading
         self._stop.clear()
         self._schema_sent = False
+        self._label_deadline = time.monotonic() + SCHEMA_LABEL_WAIT_SECONDS
         self._thread = threading.Thread(
             target=self._run, name="span-cloud", daemon=True
         )
@@ -453,7 +564,12 @@ class CloudBackend:
             if self._stop.wait(SUBSCRIBE_DELAY_SECONDS):
                 return
             try:
-                self.subscribe(channel)
+                circuits = parse_trait_snapshot(self.subscribe(channel))
+                if circuits:
+                    self._circuits = circuits
+                # The subscribe answered, so there is nothing left to wait for:
+                # release the schema even if the snapshot named no circuits.
+                self._label_deadline = 0.0
             except Exception as exc:  # noqa: BLE001 — the stream retry owns recovery
                 if not self._stop.is_set():
                     log.error(
@@ -504,17 +620,19 @@ class CloudBackend:
 
         # The stream interleaves power frames (with circuits) and lean energy/
         # interval frames (empty of resources+flows). Hold the schema until a
-        # content-bearing frame so we don't publish an empty topology.
+        # content-bearing frame so we don't publish an empty topology — and,
+        # briefly, until the subscribe snapshot has named the circuits.
         if (
             not self._schema_sent
             and self._on_schema is not None
             and (frame.resources or frame.site_flows)
+            and (self._circuits or time.monotonic() >= self._label_deadline)
         ):
             serial = self._serial or "span-cloud"
-            self._on_schema(schema_from_frame(serial, frame))
+            self._on_schema(schema_from_frame(serial, frame, self._circuits))
             self._schema_sent = True
 
         if self._on_reading is not None:
             ts = frame.epoch_millis / 1000.0 if frame.epoch_millis else None
-            for reading in readings_from_frame(frame, ts):
+            for reading in readings_from_frame(frame, ts, self._circuits):
                 self._on_reading(reading)

@@ -107,14 +107,76 @@ all appeared populated):
   `common.TraitMetric { 1 metric_metadata (MetricInstanceMetadata w/ metric_id),
   2 metric (bytes) }` — **field 2 is the packed sub-message** above.
 
-## One remaining runtime-calibration step
+## The runtime calibration — done (live-validated 2026-08-17)
 
-Field numbers and units are exact. The only thing static recovery can't confirm
-is **which leaf field the live stream actually populates for each circuit** (the
-frame's innermost `{ … }` — whether a given reading lands in `Power.#1` vs a
-directional wrapper). This is a single live calibration: subscribe, toggle a
-known load, and confirm which field number tracks it. It is a data-labeling
-step, not a missing-schema step — the schema itself is fully recovered.
+Field numbers and units are exact, but static recovery cannot say **which leaf
+each circuit actually populates**. That calibration is now complete, against a
+capture of 12 consecutive frames, and it corrected two readings:
+
+### Which slots a circuit populates depends on its wiring
+
+`InstancePowerStatsSample`: `2 trait_instance_id`, `4 metrics_received_percent`,
+oneof `summaries { 11 two_wire | 12 three_wire | 14 panel_power }`.
+
+- **two_wire** (a 120 V branch) carries current and power. Its **voltage slot is
+  absent on every sample observed** (184/184) — not zero, absent. Advertising a
+  voltage entity for a 120 V branch therefore creates a permanently blank sensor,
+  so the backend does not.
+- **three_wire** populates `1 line_an, 2 line_bn, 3 combined`. A leg voltage here
+  is just another reading of the panel's busbars, so those live on the panel node.
+- **panel_power** is **not** a `SingleChannelMeterPower` despite sharing the
+  oneof — see below.
+
+### `panel_power` (#14) layout
+
+Field numbers line up with the statically recovered `PanelInstant` above
+(`1 feeder, 2 feedthrough, 3 total_branch, 4 balance`), and `feeder` turns out to
+be a full `DoubleChannelMeterPower` with frequency appended:
+
+```
+1  feeder      { 1: line_an, 2: line_bn, 3: combined, 4: { 3: frequency_mHz } }
+2  feedthrough { … }         same shape, all-zero on a panel with no DER
+3  total_branch { 2: { 3: power_mW } }
+4  balance      { 2: { 3: power_mW } }   ~1% below #3
+10 { … }                     all-zero
+```
+
+The feeder is the authoritative meter: its combined power equals the site `grid`
+flow **exactly, frame for frame**. Live values: `line_an` 119.964 V / 9.133 A,
+`line_bn` 119.856 V / 10.189 A, combined 239.820 V / 10.189 A / 4066.568 W,
+60.038 Hz. An earlier decoder read this message as a `SingleChannelMeterPower`,
+which pushed a power value (~4 000 000) into the frequency slot and left panel
+current and voltage empty — the panel is in fact the one node with trustworthy
+voltage and frequency.
+
+### A present-but-empty slot means zero
+
+proto3 omits a zero scalar but **still emits the message that holds it**. So
+"slot present, empty body" = 0, and "slot absent" = not measured. Conflating them
+strands a switched-off circuit at its last non-zero reading, which is exactly
+what was observed (instance 51 held ~0.12 W across the frames where its power
+slot was present and empty). `cloud_telemetry._leaf_value` keeps the two apart.
+
+### Combined voltage is unreliable; per-leg voltage is not
+
+The `combined` slot's voltage equals `line_an + line_bn` on most frames but reads
+a frame-wide **0.88×** or **0.99×** of that on others — identically for every
+circuit in the frame, regardless of load, so it is frame-level staleness rather
+than a measurement. The per-leg voltages are steady in every frame. Publish those
+and ignore combined voltage.
+
+### What the frames carry
+
+Content frames are `kind=5`, one per second. Only three site flows actually
+arrive (`grid`, `grid_to_home`, `home`); 51/52/53 never did, and flows are
+advertised only when present, so no blank site entities are created. Envelope
+body fields 4 and 5 remain undecoded. In the capture, the first four frames after
+the subscribe carried no push envelope at all — which is why the config flow's
+probe allows a generous timeout.
+
+Circuit **identity** — which physical circuit a `trait_instance_id` is — is not in
+the telemetry stream at all; it comes from the trait snapshot
+([CLOUD-FLOW.md §3f](CLOUD-FLOW.md#3f-the-trait-snapshot--circuit-identity-live-validated-2026-08-17)).
 
 ## Frame envelope (positional — Ably push framing, not an `io.span` type)
 
