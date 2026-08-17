@@ -157,6 +157,17 @@ strands a switched-off circuit at its last non-zero reading, which is exactly
 what was observed (instance 51 held ~0.12 W across the frames where its power
 slot was present and empty). `cloud_telemetry._leaf_value` keeps the two apart.
 
+### Combined current is the larger leg, not the sum
+
+On the panel feeder and on three-wire circuits alike, `combined.current` equals
+whichever of `line_an` / `line_bn` is higher — on every frame, in both directions
+(sometimes L1, sometimes L2). That is the right convention for a series path
+through a two-pole breaker, and it makes the figure **busbar loading** (compare it
+against the main breaker) rather than a total. Per-leg current is populated
+separately and is what shows whether the panel is balanced, so the backend
+publishes `panel/current_l1` and `panel/current_l2` alongside it. Per-leg
+**power** is never populated — only `combined` carries power.
+
 ### Combined voltage is unreliable; per-leg voltage is not
 
 The `combined` slot's voltage equals `line_an + line_bn` on most frames but reads
