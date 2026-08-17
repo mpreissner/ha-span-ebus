@@ -69,6 +69,22 @@ Other scalar leaves: `Current.current_rms_milliamps` (uint32, mA),
 `Voltage.voltage_rms_millivolts` (uint32, mV),
 `Frequency.line_frequency_millihertz` (uint32, mHz).
 
+### The stats wrapper — and why sign matters
+
+No reading is sent as a bare scalar. Each one arrives inside an aggregate-stats
+message, of which only `avg` is ever populated on the realtime channel:
+
+| type | 1 | 2 | 3 |
+|---|---|---|---|
+| `UnsignedAggregateStats` | `min` uint32 | `max` uint32 | `avg` **uint32** |
+| `SignedAggregateStats` | `min` sint32 | `max` sint32 | `avg` **sint32** |
+
+That is why every reading sits at field #3 of its wrapper. Which wrapper it is
+depends on the quantity: current, voltage and frequency are unsigned; **anything
+that is a power is signed, so its `avg` is zig-zag encoded**. Decoding a power as
+a plain varint returns exactly *twice* the real value while it is positive, and a
+large positive value once it goes negative — see the calibration below.
+
 ### Aggregation containers (field numbers = the split you subscribe to)
 
 `SiteInstantPower` and `SiteEnergy` share the same directional field numbering —
@@ -111,7 +127,9 @@ all appeared populated):
 
 Field numbers and units are exact, but static recovery cannot say **which leaf
 each circuit actually populates**. That calibration is now complete, against a
-capture of 12 consecutive frames, and it corrected two readings:
+capture of 12 consecutive frames, and it corrected four readings — the panel
+block, the sign encoding of every power, zero-suppressed slots, and what the
+`combined` current actually means:
 
 ### Which slots a circuit populates depends on its wiring
 
@@ -143,11 +161,35 @@ be a full `DoubleChannelMeterPower` with frequency appended:
 
 The feeder is the authoritative meter: its combined power equals the site `grid`
 flow **exactly, frame for frame**. Live values: `line_an` 119.964 V / 9.133 A,
-`line_bn` 119.856 V / 10.189 A, combined 239.820 V / 10.189 A / 4066.568 W,
+`line_bn` 119.856 V / 10.189 A, combined 239.820 V / 10.189 A / 2033.284 W,
 60.038 Hz. An earlier decoder read this message as a `SingleChannelMeterPower`,
-which pushed a power value (~4 000 000) into the frequency slot and left panel
+which pushed a power value into the frequency slot and left panel
 current and voltage empty — the panel is in fact the one node with trustworthy
 voltage and frequency.
+
+### Power is zig-zagged, so read it as an sint32
+
+Every power on the wire is a `SignedAggregateStats.avg` (sint32). Reading it as a
+plain varint doubles it. The frames prove it without needing a second source:
+
+| | line_an | line_bn | total |
+|---|---|---|---|
+| voltage | 119.964 V | 119.856 V | |
+| current | 9.133 A | 10.189 A | |
+| apparent | 1095.6 VA | 1220.8 VA | **2316.4 VA** |
+
+Against that, the panel feeder's combined power read as an unsigned varint is
+4066.568 W — a power factor of **1.76**, which no meter can report. Zig-zag
+decoded it is **2033.284 W**, i.e. PF 0.88. The same halving puts every branch
+circuit back under PF 1 (before the fix, seven of them were between 1.6 and 1.9),
+and it holds the two identities that were already exact: the feeder still equals
+the site `grid` flow frame for frame, and the branch powers still sum to `home` —
+both sides were doubled, so the ratios never gave the bug away.
+
+The sign is not cosmetic: an export encodes as an *odd* varint, so a site pushing
+1.5 kW back to the grid would read as a large positive import rather than
+−1500 W. Only powers are affected — current, voltage and frequency are unsigned
+and are read as-is.
 
 ### A present-but-empty slot means zero
 

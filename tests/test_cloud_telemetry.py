@@ -11,8 +11,17 @@ from span_bridge.cloud_telemetry import decode_frame
 
 
 def _leaf(value: int) -> bytes:
-    """A measurement wrapper carrying its scalar at field #3."""
+    """An UnsignedAggregateStats leaf: its `avg` (field #3) as a plain varint."""
     return pb.field_varint(3, value)
+
+
+def _signed_leaf(value: int) -> bytes:
+    """A SignedAggregateStats leaf: `avg` is an sint32, so zig-zag encoded.
+
+    Every power on the wire arrives this way. The encoder is inline rather than
+    borrowed from `cloud_pb`, which only ever needs to *read* signed values.
+    """
+    return pb.field_varint(3, (value << 1) ^ (value >> 63))
 
 
 def _single(current_ma=None, voltage_mv=None, power_mw=None, freq_mhz=None) -> bytes:
@@ -23,7 +32,7 @@ def _single(current_ma=None, voltage_mv=None, power_mw=None, freq_mhz=None) -> b
     if voltage_mv is not None:
         out += pb.field_message(2, _leaf(voltage_mv))
     if power_mw is not None:
-        out += pb.field_message(3, _leaf(power_mw))
+        out += pb.field_message(3, _signed_leaf(power_mw))
     if freq_mhz is not None:
         out += pb.field_message(4, _leaf(freq_mhz))
     return out
@@ -68,16 +77,20 @@ def _instance_panel(instance_id, an, bn, combined, freq_mhz, quality=100) -> byt
     meter += pb.field_message(3, _single(**combined))
     meter += pb.field_message(4, _leaf(freq_mhz))
     panel = pb.field_message(1, meter)
-    panel += pb.field_message(3, pb.field_message(2, _leaf(4_000_000)))
+    panel += pb.field_message(3, pb.field_message(2, _signed_leaf(2_000_000)))
     body = pb.field_varint(2, instance_id)
     body += pb.field_varint(4, quality)
     body += pb.field_message(14, panel)
     return body
 
 
-def _site_flow(no, milli):
-    """A directional flow: { <no>: {1: quality, 2: {3: milliwatts}} }."""
-    inner = pb.field_varint(1, 100) + pb.field_message(2, _leaf(milli))
+def _site_flow(no, milliwatts):
+    """A directional flow: `AggregatePowerStats {1 quality, 2 real_power}`.
+
+    The power is a SignedAggregateStats, hence zig-zagged — `grid` goes negative
+    whenever the site exports.
+    """
+    inner = pb.field_varint(1, 100) + pb.field_message(2, _signed_leaf(milliwatts))
     return pb.field_message(no, inner)
 
 
@@ -86,29 +99,33 @@ def build_frame() -> bytes:
     site_block = pb.field_message(1, pb.field_string(1, "site1234"))
 
     # site metric: { #2: SiteInstantPower{ 1 grid, 2 home, 11 grid_to_home } }
-    site_power = _site_flow(1, 14_273_400) + _site_flow(2, 14_276_100) + _site_flow(11, 14_273_400)
+    site_power = _site_flow(1, 2_033_284) + _site_flow(2, 1_980_500) + _site_flow(11, 2_033_284)
     site_metric = pb.field_message(2, site_power)
 
     # resource block: { #1 {1: resourceId}, #2*: samples }
+    # Every sample below stays inside its own apparent power (V × I) — a reading
+    # that implies a power factor above 1 is the signature of decoding a power as
+    # an unsigned varint, which is exactly what this fixture has to catch.
     samples = (
-        pb.field_message(2, _instance_two_wire(54, power_mw=674_394, current_ma=3_010))
+        pb.field_message(2, _instance_two_wire(54, power_mw=341_980, current_ma=3_010))
         + pb.field_message(
             2,
+            # Only `combined` carries power; the legs report current and voltage.
             _instance_three_wire(
                 2,
-                an=dict(current_ma=31_280, voltage_mv=120_110, power_mw=7_140_000),
-                bn=dict(current_ma=29_023, voltage_mv=119_988, power_mw=7_139_000),
-                combined=dict(current_ma=31_280, voltage_mv=240_099, power_mw=14_279_434),
+                an=dict(current_ma=31_280, voltage_mv=120_110),
+                bn=dict(current_ma=29_023, voltage_mv=119_988),
+                combined=dict(current_ma=31_280, voltage_mv=240_099, power_mw=6_872_000),
             ),
         )
         + pb.field_message(
             2,
             _instance_panel(
                 1,
-                an=dict(current_ma=9_133, voltage_mv=119_964, power_mw=1_095_000),
-                bn=dict(current_ma=10_189, voltage_mv=119_856, power_mw=1_220_000),
+                an=dict(current_ma=9_133, voltage_mv=119_964),
+                bn=dict(current_ma=10_189, voltage_mv=119_856),
                 combined=dict(
-                    current_ma=10_189, voltage_mv=239_820, power_mw=14_273_400
+                    current_ma=10_189, voltage_mv=239_820, power_mw=2_033_284
                 ),
                 freq_mhz=60_038,
             ),
@@ -143,9 +160,9 @@ def test_decode_frame_top_level():
 
 def test_site_flows_scaled_to_watts():
     f = decode_frame(build_frame())
-    assert round(f.site_flows["grid"], 1) == 14273.4
-    assert round(f.site_flows["home"], 1) == 14276.1
-    assert round(f.site_flows["grid_to_home"], 1) == 14273.4
+    assert round(f.site_flows["grid"], 3) == 2033.284
+    assert round(f.site_flows["home"], 1) == 1980.5
+    assert round(f.site_flows["grid_to_home"], 3) == 2033.284
 
 
 def test_two_wire_circuit_power_and_current():
@@ -154,7 +171,7 @@ def test_two_wire_circuit_power_and_current():
     c = by_id[54]
     assert c.kind == "two_wire"
     assert c.quality_pct == 100
-    assert round(c.power_w, 3) == 674.394
+    assert round(c.power_w, 3) == 341.980
     assert round(c.combined.current_a, 3) == 3.010
     # A 120 V branch never sends a voltage slot at all — absent, not zero.
     assert c.combined.voltage_mv is None
@@ -165,8 +182,9 @@ def test_three_wire_main_legs_and_combined():
     by_id = {s.instance_id: s for s in f.resources["res5678"]}
     main = by_id[2]
     assert main.kind == "three_wire"
-    # combined power is the true total, ≈ the site grid figure
-    assert round(main.power_w, 1) == 14279.4
+    # Only `combined` carries the circuit's power; the legs carry current/voltage.
+    assert round(main.power_w, 1) == 6872.0
+    assert main.line_an.power_mw is None and main.line_bn.power_mw is None
     assert round(main.combined.voltage_v, 1) == 240.1
     assert round(main.line_an.voltage_v, 2) == 120.11
     assert round(main.line_bn.current_a, 3) == 29.023
@@ -195,6 +213,35 @@ def test_present_but_empty_slots_read_as_zero():
     assert off.combined.current_a == 0.0
     # The voltage slot really is absent here, and must stay distinguishable.
     assert off.combined.voltage_mv is None
+
+
+def test_power_is_read_as_a_zigzagged_sint():
+    # A power leaf is a SignedAggregateStats, so its avg is an sint32. Read as a
+    # plain varint, a positive reading comes back exactly doubled: 341.980 W
+    # would have been 683.960 W, and every circuit would show a power factor
+    # near twice its real one.
+    f = decode_frame(build_frame())
+    c = {s.instance_id: s for s in f.resources["res5678"]}[54]
+    assert c.combined.power_mw == 341_980
+    # The varint actually on the wire is twice that — the decoder undoes it.
+    assert pb.parse(_signed_leaf(341_980)).get_uint(3) == 683_960
+    # Current in the same sample is unsigned and must be left alone.
+    assert c.combined.current_ma == 3_010
+    assert pb.parse(_leaf(3_010)).get_uint(3) == 3_010
+
+
+def test_export_reads_as_negative_power():
+    # Zig-zag makes an export an odd varint. Decoded unsigned it would surface as
+    # a large positive number, so a site sending power back to the grid would
+    # read as an enormous import.
+    site_power = _site_flow(1, -1_500_250) + _site_flow(23, 2_400_000)
+    body = pb.field_message(2, pb.field_message(2, site_power))
+    env = pb.field_varint(1, 5) + pb.field_message(3, body)
+    raw = pb.field_message(16, pb.field_message(3, env))
+
+    f = decode_frame(raw)
+    assert round(f.site_flows["grid"], 3) == -1500.250
+    assert round(f.site_flows["solar_to_grid"], 1) == 2400.0
 
 
 def test_missing_subtrees_are_tolerated():
