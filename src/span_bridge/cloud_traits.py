@@ -17,7 +17,7 @@ wire field number (recovered from live payloads; there is no public `.proto`):
             3 { 1: metadata, 2: <trait value> }
 
 The snapshot's pointer type, a `TraitRef`, is
-`{ 1: { 1: vendor_id, 3: trait_id }, 2: { 1: instance_id } }`. Three traits
+`{ 1: { 1: vendor_id, 3: trait_id }, 2: { 1: instance_id } }`. Four traits
 matter here:
 
     1/15  circuit, keyed by the *telemetry* instance id. Its position block is
@@ -26,6 +26,14 @@ matter here:
           circuit's label and to the space(s) it occupies.
     1/16  circuit label  { 2: wire config, 3: breaker amps, 4: user label }
     1/17  panel space    { 3: displayed space number }
+    1/31  switch/load management, keyed by the *same* instance id as 1/15:
+          { 1: TraitRef back to 1/15, 2: config, 3: switch_state,
+            5: last_disconnect_msec, 6: last_reconnect_msec }
+
+`SwitchState` is `{ 0 UNSPECIFIED, 1 UNKNOWN, 2 OPEN, 3 CLOSED }`, so CLOSED
+means energized. 1/31 is also the trait a relay command is addressed to, which is
+why the entries' resource id and trait metadata are kept here rather than reduced
+away — see `cloud_commands.SwitchTarget`.
 
 Space numbers are the panel's own: a MAIN 40 reports 40 spaces numbered 9..48,
 because spaces 1..8 are the main-breaker module that an MLO 48 swaps out for a
@@ -33,6 +41,7 @@ further branch module.
 
 Trait ids are opaque and undocumented, so every accessor here is defensive: a
 snapshot we cannot read degrades to unnamed circuits rather than breaking setup.
+A circuit whose switch trait we cannot resolve simply gets no relay control.
 """
 
 from __future__ import annotations
@@ -40,6 +49,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .cloud_commands import SwitchTarget
 from .cloud_pb import Message, ProtoError, parse
 
 log = logging.getLogger(__name__)
@@ -48,6 +58,13 @@ VENDOR_SPAN = 1
 TRAIT_CIRCUIT = 15
 TRAIT_LABEL = 16
 TRAIT_SPACE = 17
+TRAIT_SWITCH = 31
+
+# SwitchState. Only CLOSED means the circuit is energized; OPEN and the two
+# not-a-state values are all "not energized", but only OPEN is *known* to be.
+SWITCH_STATE_UNKNOWN = 1
+SWITCH_STATE_OPEN = 2
+SWITCH_STATE_CLOSED = 3
 
 # Circuit position blocks, keyed by wire kind. These field numbers match the
 # telemetry oneof tags (11 two_wire / 12 three_wire), which is how the two sides
@@ -59,6 +76,20 @@ _MAX_DEPTH = 8
 
 
 @dataclass(frozen=True)
+class TraitEntry:
+    """One trait instance as the snapshot declared it.
+
+    The value is what every reader here wants, but `resource_id` and `metadata`
+    are what a *command* needs — they address the instance — so they are carried
+    alongside instead of being dropped.
+    """
+
+    resource_id: str | None
+    metadata: tuple[int, int | None, int, int | None]
+    value: Message
+
+
+@dataclass(frozen=True)
 class CircuitInfo:
     """What the trait snapshot knows about one telemetry instance."""
 
@@ -67,6 +98,12 @@ class CircuitInfo:
     # Panel spaces the circuit occupies, as displayed on the panel (e.g. 9, 11).
     spaces: tuple[int, ...] = ()
     breaker_amps: int | None = None
+    # Relay state from trait 1/31: True = CLOSED (energized), False = OPEN,
+    # None = the panel reported UNKNOWN or we could not read the trait.
+    relay_closed: bool | None = None
+    # How to address this circuit's relay, when the snapshot told us. `None`
+    # means no relay control is offered for this circuit.
+    switch: SwitchTarget | None = None
 
     @property
     def display_name(self) -> str:
@@ -89,24 +126,30 @@ def parse_trait_snapshot(raw: bytes) -> dict[int, CircuitInfo]:
         return {}
 
     circuits: dict[int, CircuitInfo] = {}
-    for (vendor, trait, instance), body in traits.items():
+    for (vendor, trait, instance), entry in traits.items():
         if (vendor, trait) != (VENDOR_SPAN, TRAIT_CIRCUIT):
             continue
-        info = _circuit_from(instance, body, traits)
+        info = _circuit_from(instance, entry.value, traits)
         if info is not None:
             circuits[instance] = info
 
     named = sum(1 for c in circuits.values() if c.label)
+    switchable = sum(1 for c in circuits.values() if c.switch is not None)
     log.info(
-        "trait snapshot resolved %d circuit(s), %d with labels", len(circuits), named
+        "trait snapshot resolved %d circuit(s), %d with labels, %d switchable",
+        len(circuits),
+        named,
+        switchable,
     )
     return circuits
 
 
-def _index_traits(raw: bytes) -> dict[tuple[int, int, int], Message]:
-    """Flatten the snapshot into (vendor, trait, instance) -> trait value."""
-    out: dict[tuple[int, int, int], Message] = {}
+def _index_traits(raw: bytes) -> dict[tuple[int, int, int], TraitEntry]:
+    """Flatten the snapshot into (vendor, trait, instance) -> TraitEntry."""
+    out: dict[tuple[int, int, int], TraitEntry] = {}
     for resource in parse(raw).get_msgs(1):
+        resource_ref = resource.get_msg(1)
+        resource_id = resource_ref.get_str(1) if resource_ref is not None else None
         for entry in resource.get_msgs(2):
             key, instance, value = entry.get_msg(1), entry.get_msg(2), entry.get_msg(3)
             if key is None or value is None:
@@ -118,16 +161,23 @@ def _index_traits(raw: bytes) -> dict[tuple[int, int, int], Message]:
             if vendor is None or trait is None:
                 continue
             ident = (instance.get_int_opt(1) or 0) if instance is not None else 0
-            out[(vendor, trait, ident)] = parse(body)
+            out[(vendor, trait, ident)] = TraitEntry(
+                resource_id=resource_id,
+                # product_id and version are absent for some traits; carry them
+                # as None so a command echoes exactly what the snapshot said.
+                metadata=(vendor, key.get_int_opt(2), trait, key.get_int_opt(4)),
+                value=parse(body),
+            )
     return out
 
 
 def _circuit_from(
     instance: int,
     body: Message,
-    traits: dict[tuple[int, int, int], Message],
+    traits: dict[tuple[int, int, int], TraitEntry],
 ) -> CircuitInfo | None:
     """Build a CircuitInfo by following trait 1/15's refs to its label and spaces."""
+    relay_closed, switch = _switch_for(instance, traits)
     inner = body.get_msg(1)
     if inner is None:
         return None
@@ -138,7 +188,7 @@ def _circuit_from(
         if position is not None:
             break
     if position is None:
-        return CircuitInfo(instance_id=instance)
+        return CircuitInfo(instance_id=instance, relay_closed=relay_closed, switch=switch)
 
     refs = _trait_refs(position)
     label_ids = [i for vendor, trait, i in refs if (vendor, trait) == (VENDOR_SPAN, TRAIT_LABEL)]
@@ -163,15 +213,61 @@ def _circuit_from(
         label=label or None,
         spaces=tuple(sorted(set(spaces))),
         breaker_amps=amps,
+        relay_closed=relay_closed,
+        switch=switch,
     )
 
 
+def _switch_for(
+    instance: int,
+    traits: dict[tuple[int, int, int], TraitEntry],
+) -> tuple[bool | None, SwitchTarget | None]:
+    """Relay state and command address from the 1/31 entry at `instance`.
+
+    Returns `(None, None)` when there is no switch trait for the instance, or when
+    the entry does not agree that it belongs to *this* circuit: its field #1 is a
+    TraitRef back to the 1/15 instance it switches, and a command sent to the
+    wrong instance would open somebody else's breaker. A disagreement is not
+    something to guess through.
+    """
+    entry = traits.get((VENDOR_SPAN, TRAIT_SWITCH, instance))
+    if entry is None or entry.resource_id is None:
+        return None, None
+    inner = _msg_or_none(entry.value, 1)
+    if inner is None:
+        return None, None
+
+    back_ref = _trait_refs(inner)
+    if (VENDOR_SPAN, TRAIT_CIRCUIT, instance) not in back_ref:
+        log.debug(
+            "switch trait instance %d does not point back at circuit %d; "
+            "offering no relay control",
+            instance,
+            instance,
+        )
+        return None, None
+
+    state = inner.get_int_opt(3)
+    relay_closed: bool | None = None
+    if state == SWITCH_STATE_CLOSED:
+        relay_closed = True
+    elif state == SWITCH_STATE_OPEN:
+        relay_closed = False
+
+    target = SwitchTarget(
+        resource_id=entry.resource_id,
+        instance_id=instance,
+        metadata=entry.metadata,
+    )
+    return relay_closed, target
+
+
 def _trait_inner(
-    traits: dict[tuple[int, int, int], Message], trait: int, instance: int
+    traits: dict[tuple[int, int, int], TraitEntry], trait: int, instance: int
 ) -> Message | None:
     """The payload of trait `VENDOR_SPAN/trait` at `instance`, one level in."""
-    body = traits.get((VENDOR_SPAN, trait, instance))
-    return _msg_or_none(body, 1) if body is not None else None
+    entry = traits.get((VENDOR_SPAN, trait, instance))
+    return _msg_or_none(entry.value, 1) if entry is not None else None
 
 
 def _trait_refs(msg: Message, depth: int = 0) -> list[tuple[int, int, int]]:

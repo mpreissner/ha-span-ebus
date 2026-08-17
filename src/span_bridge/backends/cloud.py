@@ -27,9 +27,11 @@ The network loop runs on a daemon thread; `start()` returns immediately, matchin
 `EbusBackend`. The pure mapping functions (`schema_from_frame`,
 `readings_from_frame`, `parse_ably_token`) are module-level and unit-tested.
 
-Commands are not yet wired: writing a dispatch is a separate RPC surface
-(ListDispatches/SetDispatch) that this read path does not cover, so
-`send_command` logs and no-ops rather than pretending to act.
+One command is wired: a circuit's `relay`. Writes go out on a single RPC,
+`SendMessages`, as a trait command addressed to the breaker's switch trait — see
+`cloud_commands` and docs/specs/circuit-control.md. Relay *state* is not in the
+telemetry stream at all; it lives in the subscribe snapshot, so the snapshot is
+re-read on a timer and again shortly after a command.
 """
 
 from __future__ import annotations
@@ -39,10 +41,10 @@ import logging
 import threading
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import cloud_ably, cloud_auth, cloud_grpc
+from .. import cloud_ably, cloud_auth, cloud_commands, cloud_grpc
 from ..cloud_pb import Message, field_message, field_string, field_varint, parse
 from ..cloud_telemetry import CircuitSample, Frame, decode_frame
 from ..cloud_traits import CircuitInfo, parse_trait_snapshot
@@ -118,6 +120,29 @@ _PROPS_BY_KIND: dict[str, tuple[tuple[str, str, str, str], ...]] = {
 _SITE_VOLT_FLOWS = {"voltage_l1", "voltage_l2"}
 _SITE_HZ_FLOWS = {"frequency"}
 
+# The one settable property. Its vocabulary is the ebus/Homie path's: CLOSED is
+# energized, and `discovery.component_for` already turns a settable `relay` into
+# an HA switch with those payloads, so nothing downstream needs to learn a new
+# word. UNKNOWN is a state the panel reports, never a command.
+RELAY_PROPERTY = "relay"
+RELAY_STATES = ("OPEN", "CLOSED", "UNKNOWN")
+
+# Relay state is absent from telemetry frames, so it is only as fresh as the last
+# trait snapshot. Re-read it on this cadence to pick up changes made in the SPAN
+# app or by the panel's own load management.
+SWITCH_REFRESH_SECONDS = 60.0
+
+# And again this soon after we send a command, so a relay the panel refused
+# (ALWAYS_ON_CIRCUIT, MINIMUM_RECONNECT_TIME) converges back to the truth
+# instead of sitting on our optimistic guess for a full refresh interval.
+POST_COMMAND_REFRESH_SECONDS = 3.0
+
+# Accepted command spellings. HA sends CLOSED/OPEN via MQTT discovery, but the
+# integration's switch platform and hand-written automations both reach for
+# booleans, and rejecting those would be a confusing failure.
+_RELAY_CLOSE_WORDS = {"closed", "close", "true", "on", "1"}
+_RELAY_OPEN_WORDS = {"open", "false", "off", "0"}
+
 
 @dataclass
 class AblyDirective:
@@ -137,6 +162,35 @@ def _circuit_node(instance_id: int) -> str:
 
 def _fmt(value: float | None) -> str | None:
     return None if value is None else f"{value:.3f}"
+
+
+def relay_state(info: CircuitInfo) -> str:
+    """The circuit's relay as a Homie enum value."""
+    if info.relay_closed is None:
+        return "UNKNOWN"
+    return "CLOSED" if info.relay_closed else "OPEN"
+
+
+def parse_relay_command(value: str) -> bool | None:
+    """Interpret a relay command as "should the relay end up closed?".
+
+    Returns None for anything unrecognized, which the caller drops rather than
+    guessing at — the wrong guess opens a breaker.
+    """
+    word = str(value).strip().lower()
+    if word in _RELAY_CLOSE_WORDS:
+        return True
+    if word in _RELAY_OPEN_WORDS:
+        return False
+    return None
+
+
+def _switchable(sample: CircuitSample, circuits: dict[int, CircuitInfo]) -> CircuitInfo | None:
+    """The CircuitInfo for `sample` if — and only if — we can address its relay."""
+    if sample.kind == "panel":
+        return None
+    info = circuits.get(sample.instance_id)
+    return info if info is not None and info.switch is not None else None
 
 
 def _node_for(
@@ -231,6 +285,22 @@ def schema_from_frame(
                         node_name=names.get(node_id),
                     )
                 )
+            # Only circuits whose switch trait the snapshot resolved get a relay,
+            # so an unreadable snapshot leaves a working read-only panel rather
+            # than switches that fail the moment anyone touches them.
+            if _switchable(sample, circuits) is not None:
+                schema.add(
+                    PropertySpec(
+                        node_id=node_id,
+                        node_kind=kind,
+                        property_id=RELAY_PROPERTY,
+                        name=RELAY_PROPERTY,
+                        datatype=DataType.ENUM,
+                        settable=True,
+                        enum_values=RELAY_STATES,
+                        node_name=names.get(node_id),
+                    )
+                )
 
     for flow in frame.site_flows:
         unit = "V" if flow in _SITE_VOLT_FLOWS else "Hz" if flow in _SITE_HZ_FLOWS else "W"
@@ -273,6 +343,17 @@ def readings_from_frame(
                 val = _fmt(getattr(channel, attr))
                 if val is not None:
                     out.append(Reading(key=f"{node_id}/{prop_id}", value=val, timestamp=ts))
+            # Relay state comes from the trait snapshot, not the frame; it rides
+            # along on frames only so the value keeps getting republished.
+            info = _switchable(sample, circuits)
+            if info is not None:
+                out.append(
+                    Reading(
+                        key=f"{node_id}/{RELAY_PROPERTY}",
+                        value=relay_state(info),
+                        timestamp=ts,
+                    )
+                )
 
     for flow, value in frame.site_flows.items():
         out.append(Reading(key=f"site/{flow}", value=_fmt(value), timestamp=ts))
@@ -435,6 +516,11 @@ class CloudBackend:
         self._stop = threading.Event()
         self._schema_sent = False
         self._label_deadline = 0.0
+        # Set to wake the snapshot-refresh loop before its timer is up.
+        self._refresh_request = threading.Event()
+        # Bumped on every (re)attach so a refresh loop left over from a previous
+        # connection retires instead of subscribing a channel that is gone.
+        self._subscribe_epoch = 0
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -490,10 +576,77 @@ class CloudBackend:
             self.stop(join_timeout=1.0)
         return captured[0]
 
+    # --- commands ----------------------------------------------------------
+
     def send_command(self, key: str, value: str) -> None:
-        # Writing a dispatch is a separate RPC surface not covered by this read
-        # path; in the hybrid setup, route commands through the ebus backend.
-        log.warning("cloud backend is read-only; ignoring command %s -> %s", key, value)
+        """Open or close a circuit's relay. `key` is `circuit-<instance>/relay`.
+
+        Raises `GrpcError` if the panel rejects the call outright; the bridge logs
+        that and Home Assistant surfaces it as a failed call. A command the *panel*
+        declines on policy grounds (an always-on circuit, a minimum reconnect
+        time) still returns OK here — it shows up as the state reverting on the
+        next snapshot refresh, which is scheduled below.
+        """
+        node_id, _, prop = key.rpartition("/")
+        if prop != RELAY_PROPERTY:
+            log.warning("cloud backend has no writable '%s' property; ignoring %s", prop, key)
+            return
+
+        info = self._circuit_for_node(node_id)
+        if info is None or info.switch is None:
+            log.warning("no switch trait known for %s; ignoring relay command", key)
+            return
+
+        closed = parse_relay_command(value)
+        if closed is None:
+            log.warning("unrecognized relay command %r for %s; ignoring", value, key)
+            return
+
+        request = cloud_commands.build_switch_request(info.switch, closed)
+        access_token = cloud_auth.access_token_from_store(self._token_store)
+        with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
+            grpc.send_messages(request)
+        log.info("relay command accepted for %s -> %s", key, "CLOSED" if closed else "OPEN")
+
+        # Report the intended state at once so the UI doesn't snap back while the
+        # relay moves, then re-read the snapshot to replace the guess with truth.
+        self._circuits[info.instance_id] = replace(info, relay_closed=closed)
+        self._emit_relay_reading(self._circuits[info.instance_id])
+        self._request_refresh(POST_COMMAND_REFRESH_SECONDS)
+
+    def _circuit_for_node(self, node_id: str) -> CircuitInfo | None:
+        """Resolve a `circuit-<instance>` node id back to its CircuitInfo."""
+        prefix = _circuit_node("")
+        if not node_id.startswith(prefix):
+            return None
+        try:
+            instance = int(node_id[len(prefix) :])
+        except ValueError:
+            return None
+        return self._circuits.get(instance)
+
+    def _emit_relay_reading(self, info: CircuitInfo) -> None:
+        if self._on_reading is None:
+            return
+        self._on_reading(
+            Reading(
+                key=f"{_circuit_node(info.instance_id)}/{RELAY_PROPERTY}",
+                value=relay_state(info),
+                timestamp=time.time(),
+            )
+        )
+
+    def _request_refresh(self, delay: float) -> None:
+        """Ask the refresh loop to re-read the trait snapshot in `delay` seconds."""
+
+        def worker() -> None:
+            if self._stop.wait(delay):
+                return
+            self._refresh_request.set()
+
+        threading.Thread(
+            target=worker, name="span-cloud-relay-refresh", daemon=True
+        ).start()
 
     # --- network loop ------------------------------------------------------
 
@@ -562,29 +715,71 @@ class CloudBackend:
         raise cloud_ably.AblyError("AblyToken response had neither a token nor a TokenRequest")
 
     def _schedule_subscribe(self, channel: str) -> None:
-        """Fire `subscribe` shortly after the caller starts reading the stream."""
+        """Subscribe shortly after the caller starts reading the stream, then keep
+        re-reading the snapshot so relay state stays current."""
+        self._subscribe_epoch += 1
+        epoch = self._subscribe_epoch
 
         def worker() -> None:
             if self._stop.wait(SUBSCRIBE_DELAY_SECONDS):
                 return
-            try:
-                circuits = parse_trait_snapshot(self.subscribe(channel))
-                if circuits:
-                    self._circuits = circuits
-                # The subscribe answered, so there is nothing left to wait for:
-                # release the schema even if the snapshot named no circuits.
-                self._label_deadline = 0.0
-            except Exception as exc:  # noqa: BLE001 — the stream retry owns recovery
-                if not self._stop.is_set():
-                    log.error(
-                        "SubscribeAndGetTraits failed (%s); the channel will stay "
-                        "silent until the next reconnect",
-                        exc,
-                    )
+            first = True
+            while epoch == self._subscribe_epoch:
+                try:
+                    self._refresh_circuits(channel, announce=not first)
+                except Exception as exc:  # noqa: BLE001 — the stream retry owns recovery
+                    if self._stop.is_set():
+                        return
+                    if first:
+                        log.error(
+                            "SubscribeAndGetTraits failed (%s); the channel will stay "
+                            "silent until the next reconnect",
+                            exc,
+                        )
+                    else:
+                        log.warning("relay state refresh failed (%s); keeping last known", exc)
+                first = False
+                if not self._wait_before_refresh(SWITCH_REFRESH_SECONDS):
+                    return
 
         threading.Thread(
             target=worker, name="span-cloud-subscribe", daemon=True
         ).start()
+
+    def _refresh_circuits(self, channel: str, *, announce: bool = False) -> None:
+        """Re-read the trait snapshot, updating circuit identities and relay state.
+
+        `announce` publishes the relay values straight away, which is how a change
+        made in the SPAN app reaches Home Assistant: telemetry frames never carry
+        switch state, so without this the value would only move when we ourselves
+        commanded it.
+        """
+        circuits = parse_trait_snapshot(self.subscribe(channel))
+        if circuits:
+            self._circuits = circuits
+            if announce:
+                for info in circuits.values():
+                    if info.switch is not None:
+                        self._emit_relay_reading(info)
+        # The subscribe answered, so there is nothing left to wait for: release
+        # the schema even if the snapshot named no circuits.
+        self._label_deadline = 0.0
+
+    def _wait_before_refresh(self, seconds: float) -> bool:
+        """Sleep until the next refresh is due; False means we are shutting down.
+
+        Woken early by `_request_refresh`, and polled in short slices so `stop()`
+        is not held up by a refresh interval.
+        """
+        deadline = time.monotonic() + seconds
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            if self._refresh_request.wait(min(1.0, remaining)):
+                self._refresh_request.clear()
+                return True
+        return False
 
     def subscribe(self, channel: str) -> bytes:
         """Register `channel` as a telemetry subscriber; return the trait snapshot.
