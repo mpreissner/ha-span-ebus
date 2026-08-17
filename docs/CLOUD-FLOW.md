@@ -241,6 +241,50 @@ reverse works, and re-issues it on every reconnect. `MultiResourceSubscribe` and
 `MultiSubscribe` also exist on the service but return `PERMISSION_DENIED` for
 every subscriber shape tried — they are not this path.
 
+### 3f. The trait snapshot — circuit identity (live-validated 2026-08-17)
+
+The ~22 KB response to §3e is not a bonus to discard: it is the **only** source of
+circuit identity. Telemetry frames name a circuit solely by `trait_instance_id`,
+an internal number with no relation to a panel space — on a MAIN 40 the instance
+ids observed were `1, 2, 30…56` for a panel with 40 spaces, which is why entities
+were being created as `circuit-56` on a 40-space panel.
+
+Snapshot layout, by wire field number:
+
+```
+1 resource[]
+    1 { 1: hardware_id }
+    2 trait_entry[]
+        1 { 1: vendor_id, 3: trait_id }
+        2 { 1: instance_id }
+        3 { 1: metadata, 2: <trait value, packed> }
+```
+
+Its pointer type is a `TraitRef`:
+`{ 1: { 1: vendor_id, 3: trait_id }, 2: { 1: instance_id } }`. Three of the 31
+subscribed traits carry the identity:
+
+| trait | value | holds |
+|---|---|---|
+| `1/15` circuit | keyed by the **telemetry** instance id; position block at #11 (two-wire) or #13 (three-wire) | TraitRefs to the label and space(s) |
+| `1/16` circuit label | `{ 2: wire config, 3: breaker amps, 4: user label }` | the user's own name, e.g. "Branch A", and the breaker rating |
+| `1/17` panel space | `{ 3: displayed space number }` | the number printed on the panel |
+
+The refs are not at fixed offsets — depth varies by wire kind — so
+`cloud_traits._trait_refs` walks the position subtree and filters by trait id.
+
+**Space numbering**: a MAIN 40 reports its 40 spaces as **9…48**. Spaces 1–8 are
+the main-breaker module that an MLO 48 swaps for a further branch module, so both
+panels share one numbering scheme. Live snapshot: 27 circuits, every space in
+9…48, breaker ratings 15–45 A.
+
+Entity **node ids stay keyed on the instance id** (`circuit-30`) so renaming a
+circuit in the SPAN app does not orphan its history; the label rides along as the
+node's display name. Duplicate labels — two circuits can both be "Outlets" — are
+qualified with their panel spaces. A non-panel instance *absent* from a non-empty
+snapshot is the main feed (instance 2 here; its power tracks the panel total to
+within one sampling window), published as `feed-<id>`.
+
 ## 4. app-api GraphQL — what it's actually for
 
 `app-api.prod.span-csp.com/graphql` is still live but only serves **app
@@ -260,6 +304,9 @@ returns `buildings: null`; ignore it.
    naming that channel (§3e, mandatory) → decode base64-protobuf frames. Re-issue
    token on ~1h expiry, and re-subscribe on every reconnect. (Live-validated and
    implemented in `cloud_ably`/`backends.cloud`.)
+   **Keep the subscribe response** — it is what names the circuits (§3f). The
+   schema is held back a couple of seconds waiting for it, since HA fixes entity
+   names at creation.
 4. **History**: `GetHistoryAggregation` for backfill / long-term stats.
 5. ~~**Blocker**: recover the telemetry `.proto`~~ — **resolved.** Schema recovered
    from the APK (see `docs/CLOUD-PROTO.md`) and live-confirmed; the cloud backend
