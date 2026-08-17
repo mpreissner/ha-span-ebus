@@ -1,6 +1,9 @@
 """Tests for the cloud backend's pure mapping functions."""
 
 import json
+import time
+
+import pytest
 
 from span_bridge import cloud_pb as pb
 from span_bridge.backends import cloud
@@ -98,9 +101,59 @@ def test_handle_frame_defers_schema_until_content(monkeypatch, tmp_path):
 
 
 def test_parse_sites_serial_walks_tree():
-    # nest a serial a couple of levels deep
-    inner = pb.field_string(3, "<cloud-serial>")
+    # nest a serial a couple of levels deep. The scanner keys off the "XC-"
+    # prefix real cloud serials carry, so the placeholder must keep that shape.
+    inner = pb.field_string(3, "XC-0000-00000")
     mid = pb.field_message(2, inner)
     raw = pb.field_message(1, mid)
-    assert cloud._parse_sites_serial(raw) == "<cloud-serial>"
+    assert cloud._parse_sites_serial(raw) == "XC-0000-00000"
     assert cloud._parse_sites_serial(b"") is None
+
+
+def test_probe_returns_schema_from_first_content_frame(monkeypatch, tmp_path):
+    # The config flow uses probe() to prove the channel actually carries data.
+    monkeypatch.setattr(cloud, "decode_frame", lambda raw: _frame())
+
+    def fake_stream(token, channel, on_frame, *, stop=None, **kw):
+        on_frame(b"frame")
+        while stop is None or not stop():
+            time.sleep(0.01)
+
+    monkeypatch.setattr(cloud.cloud_ably, "stream_frames", fake_stream)
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", serial="XC-1")
+    monkeypatch.setattr(backend, "bootstrap", lambda: ("tok", "c:u:d"))
+
+    schema = backend.probe(timeout=5.0)
+    assert schema.serial == "XC-1"
+    assert "circuit-54/power" in schema.properties
+
+
+def test_probe_times_out_on_a_silent_channel(monkeypatch, tmp_path):
+    # A device UUID the cloud does not publish for attaches fine but stays
+    # silent; probe must raise rather than report success with no entities.
+    def silent_stream(token, channel, on_frame, *, stop=None, **kw):
+        while stop is None or not stop():
+            time.sleep(0.01)
+
+    monkeypatch.setattr(cloud.cloud_ably, "stream_frames", silent_stream)
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "wrong-uuid")
+    monkeypatch.setattr(backend, "bootstrap", lambda: ("tok", "c:u:d"))
+
+    with pytest.raises(TimeoutError):
+        backend.probe(timeout=0.2)
+
+
+def test_probe_propagates_bootstrap_failure(monkeypatch, tmp_path):
+    # Auth/channel errors must surface as themselves, not as a timeout — the
+    # stream thread's retry loop would otherwise swallow them.
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid")
+
+    def boom():
+        raise cloud.cloud_ably.AblyError("no channel")
+
+    monkeypatch.setattr(backend, "bootstrap", boom)
+
+    with pytest.raises(cloud.cloud_ably.AblyError):
+        backend.probe(timeout=0.2)
