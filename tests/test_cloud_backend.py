@@ -9,6 +9,7 @@ import pytest
 from span_bridge import cloud_pb as pb
 from span_bridge.backends import cloud
 from span_bridge.cloud_telemetry import Channel, CircuitSample, Frame
+from span_bridge.cloud_traits import CircuitInfo
 from span_bridge.models import NodeKind
 
 
@@ -24,16 +25,32 @@ def _frame() -> Frame:
                     quality_pct=100,
                     combined=Channel(current_ma=3010, power_mw=674394),
                 ),
+                # A three_wire sample the trait snapshot does not list: the feed.
+                CircuitSample(
+                    instance_id=2,
+                    kind="three_wire",
+                    quality_pct=100,
+                    combined=Channel(current_ma=10021, power_mw=14273000),
+                ),
                 CircuitSample(
                     instance_id=1,
                     kind="panel",
                     quality_pct=100,
-                    combined=Channel(power_mw=14273602),
+                    combined=Channel(current_ma=10189, power_mw=14273602, freq_mhz=60038),
+                    line_an=Channel(current_ma=9133, voltage_mv=119964),
+                    line_bn=Channel(current_ma=10189, voltage_mv=119856),
                 ),
             ]
         },
         site_flows={"grid": 14273.4, "voltage_l1": 120.1, "frequency": 60.01},
     )
+
+
+def _circuits() -> dict[int, CircuitInfo]:
+    """A trait snapshot mapping, with placeholder labels — 2 is absent (the feed)."""
+    return {
+        54: CircuitInfo(instance_id=54, label="Branch A", spaces=(33,), breaker_amps=20),
+    }
 
 
 def test_schema_nodes_and_kinds():
@@ -49,6 +66,67 @@ def test_schema_nodes_and_kinds():
     assert schema.properties["site/frequency"].unit == "Hz"
 
 
+def test_schema_advertises_only_properties_the_wire_feeds():
+    # Every advertised property must have a reading, or HA gets a dead entity.
+    frame = _frame()
+    schema = cloud.schema_from_frame("<cloud-serial>", frame)
+    keys = {r.key for r in cloud.readings_from_frame(frame)}
+    assert set(schema.properties) <= keys
+
+    # Circuits get power and current only; voltage and frequency are the panel's.
+    circuit_props = {
+        spec.property_id
+        for spec in schema.properties.values()
+        if spec.node_id == "circuit-54"
+    }
+    assert circuit_props == {"power", "current"}
+    panel_props = {
+        spec.property_id for spec in schema.properties.values() if spec.node_id == "panel"
+    }
+    assert panel_props == {"power", "current", "voltage_l1", "voltage_l2", "frequency"}
+
+
+def test_schema_names_nodes_from_the_trait_snapshot():
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits())
+    names = {spec.node_id: spec.node_name for spec in schema.properties.values()}
+    assert names["circuit-54"] == "Branch A"
+    assert names["panel"] == "Panel"
+    assert names["site"] == "Site"
+    # An instance missing from a non-empty snapshot is the main feed, not a circuit.
+    assert names["feed-2"] == "Main feed"
+    assert schema.properties["feed-2/power"].node_kind is NodeKind.LUGS
+    # The node *id* stays keyed on the instance id, so renaming a circuit in the
+    # SPAN app does not orphan its entity history.
+    assert "circuit-54/power" in schema.properties
+
+
+def test_duplicate_labels_are_qualified_by_panel_space():
+    frame = _frame()
+    frame.resources["res1"].append(
+        CircuitSample(
+            instance_id=55,
+            kind="two_wire",
+            combined=Channel(current_ma=100, power_mw=12000),
+        )
+    )
+    circuits = _circuits()
+    circuits[55] = CircuitInfo(instance_id=55, label="Branch A", spaces=(35,))
+
+    schema = cloud.schema_from_frame("<cloud-serial>", frame, circuits)
+    names = {spec.node_id: spec.node_name for spec in schema.properties.values()}
+    assert names["circuit-54"] == "Branch A (33)"
+    assert names["circuit-55"] == "Branch A (35)"
+
+
+def test_without_a_snapshot_every_sample_stays_a_circuit():
+    # No labels means no way to tell the feed apart, so nothing is reclassified
+    # and names fall back to the ids.
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame())
+    assert "circuit-2/power" in schema.properties
+    assert "feed-2/power" not in schema.properties
+    assert schema.properties["circuit-54/power"].node_name is None
+
+
 def test_readings_keys_values_and_timestamp():
     readings = cloud.readings_from_frame(_frame(), timestamp=123.0)
     by_key = {r.key: r.value for r in readings}
@@ -58,6 +136,40 @@ def test_readings_keys_values_and_timestamp():
     assert by_key["panel/power"] == "14273.602"
     assert by_key["site/grid"] == "14273.400"
     assert all(r.timestamp == 123.0 for r in readings)
+
+
+def test_panel_readings_cover_legs_and_frequency():
+    by_key = {r.key: r.value for r in cloud.readings_from_frame(_frame(), timestamp=1.0)}
+    assert by_key["panel/current"] == "10.189"
+    assert by_key["panel/voltage_l1"] == "119.964"
+    assert by_key["panel/voltage_l2"] == "119.856"
+    assert by_key["panel/frequency"] == "60.038"
+
+
+def test_readings_keys_follow_the_node_mapping():
+    frame = _frame()
+    by_key = {r.key: r.value for r in cloud.readings_from_frame(frame, 1.0, _circuits())}
+    # Same node ids the schema advertised, so readings land on real entities.
+    assert by_key["feed-2/power"] == "14273.000"
+    assert "circuit-2/power" not in by_key
+
+
+def test_a_zero_reading_is_published_not_dropped():
+    # A switched-off circuit reports 0, and must not be left at its last value.
+    frame = Frame(
+        resources={
+            "res1": [
+                CircuitSample(
+                    instance_id=51,
+                    kind="two_wire",
+                    combined=Channel(current_ma=0, power_mw=0),
+                )
+            ]
+        }
+    )
+    by_key = {r.key: r.value for r in cloud.readings_from_frame(frame, 1.0)}
+    assert by_key["circuit-51/power"] == "0.000"
+    assert by_key["circuit-51/current"] == "0.000"
 
 
 def test_parse_ably_token_ready_token():
@@ -99,6 +211,50 @@ def test_handle_frame_defers_schema_until_content(monkeypatch, tmp_path):
     assert len(schemas) == 1
     assert schemas[0].serial == "XC-1"
     assert backend._schema_sent is True
+
+
+def test_schema_waits_briefly_for_the_circuit_labels(monkeypatch, tmp_path):
+    # Entity names are fixed at creation, so the schema holds back until the
+    # subscribe snapshot has named the circuits — but not forever.
+    monkeypatch.setattr(cloud, "decode_frame", lambda raw: _frame())
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", serial="XC-1")
+    schemas: list = []
+    backend._on_schema = schemas.append
+    backend._label_deadline = time.monotonic() + 60.0
+
+    backend._handle_frame(b"frame")  # snapshot not in yet -> hold
+    assert schemas == []
+
+    backend._circuits = _circuits()
+    backend._handle_frame(b"frame")
+    assert len(schemas) == 1
+    names = {s.node_id: s.node_name for s in schemas[0].properties.values()}
+    assert names["circuit-54"] == "Branch A"
+
+
+def test_schema_is_released_once_the_subscribe_answers(monkeypatch, tmp_path):
+    # An unfamiliar snapshot yields no labels; waiting out the deadline would
+    # only delay the entities, so the subscribe's return releases the schema.
+    monkeypatch.setattr(cloud, "SUBSCRIBE_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(
+        cloud.cloud_ably, "stream_frames", lambda *a, **kw: kw["stop"] and None
+    )
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", serial="XC-1")
+    backend._label_deadline = time.monotonic() + 60.0
+    monkeypatch.setattr(backend, "subscribe", lambda channel: b"unfamiliar")
+
+    backend._schedule_subscribe("c:u:d")
+    deadline = time.time() + 5.0
+    while backend._label_deadline and time.time() < deadline:
+        time.sleep(0.01)
+    assert backend._label_deadline == 0.0
+
+    monkeypatch.setattr(cloud, "decode_frame", lambda raw: _frame())
+    schemas: list = []
+    backend._on_schema = schemas.append
+    backend._handle_frame(b"frame")
+    assert len(schemas) == 1
+    assert schemas[0].properties["circuit-54/power"].node_name is None
 
 
 def test_parse_sites_serial_walks_tree():
@@ -263,9 +419,13 @@ def test_probe_returns_schema_from_first_content_frame(monkeypatch, tmp_path):
     # The config flow uses probe() to prove the channel actually carries data.
     monkeypatch.setattr(cloud, "decode_frame", lambda raw: _frame())
 
+    monkeypatch.setattr(cloud, "SUBSCRIBE_DELAY_SECONDS", 0.01)
+
+    # A live channel pushes a frame a second, so keep pushing: the first frames
+    # can arrive before the subscribe snapshot has named the circuits.
     def fake_stream(token, channel, on_frame, *, stop=None, **kw):
-        on_frame(b"frame")
         while stop is None or not stop():
+            on_frame(b"frame")
             time.sleep(0.01)
 
     monkeypatch.setattr(cloud.cloud_ably, "stream_frames", fake_stream)

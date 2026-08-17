@@ -30,9 +30,15 @@ obtain access tokens; it is never stored. Only the resulting tokens are kept
 
 Setup takes up to a minute: it registers this install as a telemetry client and
 waits for a real frame before finishing, rather than completing and leaving you
-with zero entities. You then get one device per panel with a sensor for each
-circuit's power (plus current / voltage / site flows where reported), updated at
-~1–2 Hz.
+with zero entities. You then get one device per panel, updated at ~1–2 Hz, with:
+
+- **each circuit** named as you named it in the SPAN app, reporting power and
+  current (a 120 V branch does not meter its own voltage, so none is offered);
+- **the panel** — power, current, per-leg voltage (L1/L2) and line frequency;
+- **the main feed** and the **site flows** SPAN reports (grid, home, …).
+
+Circuit entity ids are keyed on SPAN's internal circuit identifier rather than its
+label or panel space, so renaming a circuit in the SPAN app keeps its history.
 
 ### How it gets your live data
 
