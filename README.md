@@ -43,6 +43,23 @@ with zero entities. You then get one device per panel, updated at ~1–2 Hz, wit
 Circuit entity ids are keyed on SPAN's internal circuit identifier rather than its
 label or panel space, so renaming a circuit in the SPAN app keeps its history.
 
+### Circuit control
+
+Each breaker SPAN reports a switch for also gets a **switch entity** that turns
+the circuit off and on, the same operation as the toggle on the app's breaker
+screen. A circuit only gets one if the panel actually told us how to address its
+relay, so nothing appears for the main feed, the panel's own metering, or a
+circuit we could not resolve — better a missing switch than one that commands the
+wrong breaker.
+
+Turning a circuit **on** *releases* our own disconnect rather than forcing the
+relay closed, so the panel's reasons for holding a circuit open (backup reserve,
+load shed, a minimum reconnect time) still win. If the panel declines — an
+always-on circuit, or one it reconnected too recently — the switch flips back
+within a few seconds. Relay state is read from the panel roughly once a minute and
+right after any change, so toggling a breaker in the SPAN app shows up here too.
+Details: [docs/specs/circuit-control.md](docs/specs/circuit-control.md).
+
 ### How it gets your live data
 
 SPAN's realtime telemetry arrives on an Ably channel named

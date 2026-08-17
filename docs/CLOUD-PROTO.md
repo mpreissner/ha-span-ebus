@@ -231,6 +231,59 @@ Circuit **identity** — which physical circuit a `trait_instance_id` is — is 
 the telemetry stream at all; it comes from the trait snapshot
 ([CLOUD-FLOW.md §3f](CLOUD-FLOW.md#3f-the-trait-snapshot--circuit-identity-live-validated-2026-08-17)).
 
+## The command surface — `SendMessages`
+
+Everything above is read-only. Writes go through exactly one method, and there is
+no per-trait RPC:
+
+```
+POST /io.span.services.mobilefrontend.MobileFrontendService/SendMessages
+     SendMessagesRequest { 1 msgs[]: TraitMessage }
+```
+
+The recovered schema has **no `SendMessagesResponse`** — the HTTP reply is an ack.
+The app registers each `request_id` in a local table and waits for the real answer
+on the Ably *trait* channel, polling every `COMMAND_CHECK_INTERVAL_MS = 100` up to
+`DEFAULT_TIMEOUT_MS = 30000`.
+
+```
+TraitMessage {
+  1  trait_metadata    : TraitMetadata    { 1 vendor_id, 2 product_id, 3 trait_id, 4 version }
+  2  instance_metadata : InstanceMetadata { 1 resource_id{1 id}, 2 trait_instance_id{1 id} }
+  14 command_request   : CommandRequest {
+       1 request_metadata : RequestMetadata { 1 time_stamp (unset by the app),
+                                              2 resource_id{1 id},
+                                              3 request_id{1 id},
+                                              4 client_timeout_duration_msec }
+       2 payload          : TraitCommandRequestPayload { 1 payload bytes } }
+}
+```
+
+The resource id appears **twice under different field numbers** — `#1` of
+`InstanceMetadata` and `#2` of `RequestMetadata` — which is easy to get wrong
+because `#1` of `RequestMetadata` is the timestamp the app never sets.
+`request_id` is a UUID v4.
+
+`payload` is the target trait's own `…CommandRequests` message, opaque to the
+envelope. For `SwitchLoadManagementTrait` (**1/31**, whose `trait_instance_id` is
+the same 30..56 id the telemetry frames and `CircuitBreakerTrait` 1/15 use):
+
+```
+off: { 1: DisconnectSwitchRequest        { 1: DisconnectReason { 3: control_source } } }
+on:  { 2: ReleaseDisconnectSwitchRequest { 1: DisconnectReason { 3: control_source } } }
+```
+
+`DisconnectReason` has `1 control_function_source`, `2 manual_control_source`,
+`3 control_source`; the app populates only `#3`, with
+`ControlFunctionSource.USER_COMMAND = 5`, so the whole "off" payload is six bytes,
+`0a 04 0a 02 18 05`. Request `#3`, `override_disconnect_switch_request`, exists but
+the app only sends it from its power-outage warning sheet.
+
+Relay **state** is not in the telemetry stream; it is `switch_state` in the 1/31
+snapshot entry, `SwitchState { 0 UNSPECIFIED, 1 UNKNOWN, 2 OPEN, 3 CLOSED }` —
+CLOSED means energized. Full write-up in
+[specs/circuit-control.md](specs/circuit-control.md).
+
 ## Frame envelope (positional — Ably push framing, not an `io.span` type)
 
 The outermost frame is Ably-side push framing, decoded positionally:

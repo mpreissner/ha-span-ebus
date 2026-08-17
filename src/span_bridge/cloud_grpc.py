@@ -167,3 +167,15 @@ class CloudGrpcClient:
         snapshot of the subscribed resources' traits.
         """
         return self.call("SubscribeAndGetTraits", request)
+
+    def send_messages(self, request: bytes) -> bytes:
+        """SendMessages: the single write path for every trait command.
+
+        There is no per-trait RPC; a breaker toggle, like anything else that acts
+        on a trait, is a `TraitMessage` posted here (see `cloud_commands`). The
+        reply is an ack — the recovered schema has no `SendMessagesResponse` — so
+        an empty body with `grpc-status: 0` is success. The command's real answer
+        goes to the app's Ably trait channel, which we do not read; we confirm by
+        re-reading the trait snapshot instead.
+        """
+        return self.call("SendMessages", request)

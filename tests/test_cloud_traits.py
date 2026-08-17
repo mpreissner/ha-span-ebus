@@ -6,14 +6,21 @@ Labels are placeholders — no captured payload or real circuit name is committe
 """
 
 from span_bridge import cloud_pb as pb
+from span_bridge.cloud_commands import SwitchTarget
 from span_bridge.cloud_traits import (
+    SWITCH_STATE_CLOSED,
+    SWITCH_STATE_OPEN,
+    SWITCH_STATE_UNKNOWN,
     TRAIT_CIRCUIT,
     TRAIT_LABEL,
     TRAIT_SPACE,
+    TRAIT_SWITCH,
     VENDOR_SPAN,
     CircuitInfo,
     parse_trait_snapshot,
 )
+
+HARDWARE_ID = "a1b2c3d4e5f60718"
 
 
 def _trait_ref(trait: int, instance: int) -> bytes:
@@ -22,9 +29,17 @@ def _trait_ref(trait: int, instance: int) -> bytes:
     return pb.field_message(1, key) + pb.field_message(2, pb.field_varint(1, instance))
 
 
-def _entry(trait: int, instance: int, value: bytes) -> bytes:
-    """One trait_entry: its key, its instance, and its value at 3 -> 2."""
-    key = pb.field_varint(1, VENDOR_SPAN) + pb.field_varint(3, trait)
+def _entry(trait: int, instance: int, value: bytes, version: int = 1) -> bytes:
+    """One trait_entry: its key, its instance, and its value at 3 -> 2.
+
+    The key carries no `product_id` (#2), matching real snapshots — which is why
+    a command echoes the metadata back rather than reconstructing it.
+    """
+    key = (
+        pb.field_varint(1, VENDOR_SPAN)
+        + pb.field_varint(3, trait)
+        + pb.field_varint(4, version)
+    )
     return pb.field_message(
         2,
         pb.field_message(1, key)
@@ -55,18 +70,34 @@ def _space(number: int) -> bytes:
     return pb.field_message(1, pb.field_varint(3, number))
 
 
+def _switch(circuit_instance: int, state: int) -> bytes:
+    """Trait 1/31's value: a back-ref to the circuit it switches, plus its state.
+
+        { 1: { 1: TraitRef -> 1/15 same instance, 2: config, 3: switch_state } }
+    """
+    config = pb.field_varint(1, 2) + pb.field_varint(22, 32)
+    inner = (
+        pb.field_message(1, _trait_ref(TRAIT_CIRCUIT, circuit_instance))
+        + pb.field_message(2, config)
+        + pb.field_varint(3, state)
+    )
+    return pb.field_message(1, inner)
+
+
 def build_snapshot() -> bytes:
     entries = (
         # a 120 V branch on one space, and a 240 V one straddling two
         _entry(TRAIT_CIRCUIT, 30, _circuit(11, label_id=101, space_ids=[9]))
         + _entry(TRAIT_LABEL, 101, _label("Branch A", 20))
         + _entry(TRAIT_SPACE, 9, _space(9))
+        + _entry(TRAIT_SWITCH, 30, _switch(30, SWITCH_STATE_CLOSED))
         + _entry(TRAIT_CIRCUIT, 56, _circuit(13, label_id=102, space_ids=[47, 48]))
         + _entry(TRAIT_LABEL, 102, _label("Branch B", 40, wire=2))
         + _entry(TRAIT_SPACE, 47, _space(47))
         + _entry(TRAIT_SPACE, 48, _space(48))
+        + _entry(TRAIT_SWITCH, 56, _switch(56, SWITCH_STATE_OPEN))
     )
-    resource = pb.field_message(1, pb.field_string(1, "a1b2c3d4e5f60718")) + entries
+    resource = pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + entries
     return pb.field_message(1, resource)
 
 
@@ -76,7 +107,14 @@ def test_resolves_labels_amps_and_spaces():
 
     branch = circuits[30]
     assert branch == CircuitInfo(
-        instance_id=30, label="Branch A", spaces=(9,), breaker_amps=20
+        instance_id=30,
+        label="Branch A",
+        spaces=(9,),
+        breaker_amps=20,
+        relay_closed=True,
+        switch=SwitchTarget(
+            resource_id=HARDWARE_ID, instance_id=30, metadata=(1, None, 31, 1)
+        ),
     )
 
     # A three-wire circuit's position block sits at #13 rather than #11, and it
@@ -106,6 +144,59 @@ def test_display_name_falls_back_to_the_instance_id():
     circuits = parse_trait_snapshot(orphan)
     assert circuits[42].label is None
     assert circuits[42].display_name == "Circuit 42"
+
+
+def test_relay_state_and_command_address_come_from_the_switch_trait():
+    circuits = parse_trait_snapshot(build_snapshot())
+    # CLOSED means energized, so the boolean must not be read as "disconnected".
+    assert circuits[30].relay_closed is True
+    assert circuits[56].relay_closed is False
+    # The command address is the panel resource plus the same instance id the
+    # telemetry uses — no extra RPC needed to switch a circuit we can meter.
+    assert circuits[56].switch == SwitchTarget(
+        resource_id=HARDWARE_ID, instance_id=56, metadata=(1, None, 31, 1)
+    )
+
+
+def test_unknown_switch_state_is_not_reported_as_open():
+    # UNKNOWN is a state the panel really sends. Collapsing it to False would
+    # show a live breaker as off.
+    entries = _entry(TRAIT_CIRCUIT, 30, _circuit(11, 101, [9])) + _entry(
+        TRAIT_SWITCH, 30, _switch(30, SWITCH_STATE_UNKNOWN)
+    )
+    raw = pb.field_message(
+        1, pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + entries
+    )
+    info = parse_trait_snapshot(raw)[30]
+    assert info.relay_closed is None
+    # The circuit is still addressable, so the control exists and reads unknown.
+    assert info.switch is not None
+
+
+def test_a_switch_trait_pointing_elsewhere_yields_no_control():
+    # The 1/31 entry names the circuit it switches. If that disagrees with the
+    # instance we looked it up under, the mapping is not one we understand — and
+    # acting on it would open some other breaker.
+    entries = _entry(TRAIT_CIRCUIT, 30, _circuit(11, 101, [9])) + _entry(
+        TRAIT_SWITCH, 30, _switch(31, SWITCH_STATE_CLOSED)
+    )
+    raw = pb.field_message(
+        1, pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + entries
+    )
+    info = parse_trait_snapshot(raw)[30]
+    assert info.switch is None
+    assert info.relay_closed is None
+
+
+def test_a_circuit_without_a_switch_trait_stays_read_only():
+    circuits = parse_trait_snapshot(
+        pb.field_message(
+            1,
+            pb.field_message(1, pb.field_string(1, HARDWARE_ID))
+            + _entry(TRAIT_CIRCUIT, 42, _circuit(11, 101, [9])),
+        )
+    )
+    assert circuits[42].switch is None
 
 
 def test_unfamiliar_or_empty_snapshots_degrade_quietly():
