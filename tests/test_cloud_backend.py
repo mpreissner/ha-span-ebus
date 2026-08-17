@@ -23,26 +23,26 @@ def _frame() -> Frame:
                     instance_id=54,
                     kind="two_wire",
                     quality_pct=100,
-                    combined=Channel(current_ma=3010, power_mw=674394),
+                    combined=Channel(current_ma=3010, power_mw=341980),
                 ),
                 # A three_wire sample the trait snapshot does not list: the feed.
                 CircuitSample(
                     instance_id=2,
                     kind="three_wire",
                     quality_pct=100,
-                    combined=Channel(current_ma=10021, power_mw=14273000),
+                    combined=Channel(current_ma=10021, power_mw=2003000),
                 ),
                 CircuitSample(
                     instance_id=1,
                     kind="panel",
                     quality_pct=100,
-                    combined=Channel(current_ma=10189, power_mw=14273602, freq_mhz=60038),
+                    combined=Channel(current_ma=10189, power_mw=2033284, freq_mhz=60038),
                     line_an=Channel(current_ma=9133, voltage_mv=119964),
                     line_bn=Channel(current_ma=10189, voltage_mv=119856),
                 ),
             ]
         },
-        site_flows={"grid": 14273.4, "voltage_l1": 120.1, "frequency": 60.01},
+        site_flows={"grid": 2033.284, "voltage_l1": 120.1, "frequency": 60.01},
     )
 
 
@@ -114,7 +114,7 @@ def test_duplicate_labels_are_qualified_by_panel_space():
         CircuitSample(
             instance_id=55,
             kind="two_wire",
-            combined=Channel(current_ma=100, power_mw=12000),
+            combined=Channel(current_ma=100, power_mw=6000),
         )
     )
     circuits = _circuits()
@@ -138,11 +138,11 @@ def test_without_a_snapshot_every_sample_stays_a_circuit():
 def test_readings_keys_values_and_timestamp():
     readings = cloud.readings_from_frame(_frame(), timestamp=123.0)
     by_key = {r.key: r.value for r in readings}
-    assert by_key["circuit-54/power"] == "674.394"
+    assert by_key["circuit-54/power"] == "341.980"
     assert by_key["circuit-54/current"] == "3.010"
     assert "circuit-54/voltage" not in by_key  # two_wire had no voltage
-    assert by_key["panel/power"] == "14273.602"
-    assert by_key["site/grid"] == "14273.400"
+    assert by_key["panel/power"] == "2033.284"
+    assert by_key["site/grid"] == "2033.284"
     assert all(r.timestamp == 123.0 for r in readings)
 
 
@@ -162,7 +162,7 @@ def test_readings_keys_follow_the_node_mapping():
     frame = _frame()
     by_key = {r.key: r.value for r in cloud.readings_from_frame(frame, 1.0, _circuits())}
     # Same node ids the schema advertised, so readings land on real entities.
-    assert by_key["feed-2/power"] == "14273.000"
+    assert by_key["feed-2/power"] == "2003.000"
     assert "circuit-2/power" not in by_key
 
 
