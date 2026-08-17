@@ -34,7 +34,10 @@ with zero entities. You then get one device per panel, updated at ~1–2 Hz, wit
 
 - **each circuit** named as you named it in the SPAN app, reporting power and
   current (a 120 V branch does not meter its own voltage, so none is offered);
-- **the panel** — power, current, per-leg voltage (L1/L2) and line frequency;
+- **the panel** — power, line frequency, per-leg voltage and per-leg current
+  (L1/L2, for checking how evenly the legs are loaded), plus a combined current
+  that is the *higher* of the two legs rather than their sum, i.e. busbar loading
+  to compare against your main breaker;
 - **the main feed** and the **site flows** SPAN reports (grid, home, …).
 
 Circuit entity ids are keyed on SPAN's internal circuit identifier rather than its
