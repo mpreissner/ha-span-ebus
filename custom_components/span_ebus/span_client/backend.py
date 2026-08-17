@@ -605,8 +605,10 @@ class CloudBackend:
             log.warning("unrecognized relay command %r for %s; ignoring", value, key)
             return
 
-        request = cloud_commands.build_switch_request(info.switch, closed)
         access_token = cloud_auth.access_token_from_store(self._token_store)
+        request = cloud_commands.build_switch_request(
+            info.switch, closed, requester_id=self._requester_id(access_token)
+        )
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
             grpc.send_messages(request)
         log.info("relay command accepted for %s -> %s", key, "CLOSED" if closed else "OPEN")
@@ -616,6 +618,21 @@ class CloudBackend:
         self._circuits[info.instance_id] = replace(info, relay_closed=closed)
         self._emit_relay_reading(self._circuits[info.instance_id])
         self._request_refresh(POST_COMMAND_REFRESH_SECONDS)
+
+    def _requester_id(self, access_token: str) -> str:
+        """Who a write says it is: this user's SPAN id.
+
+        Read from the token rather than from config, because it has to match the
+        id the server resolves from that same token; a stale configured value
+        would only earn a PERMISSION_DENIED.
+        """
+        user_id = cloud_auth.user_id_from_token(access_token) or self._user_id
+        if not user_id:
+            raise RuntimeError(
+                "cannot send a command: the access token carries no username claim "
+                "to name as the requester"
+            )
+        return user_id
 
     def _circuit_for_node(self, node_id: str) -> CircuitInfo | None:
         """Resolve a `circuit-<instance>` node id back to its CircuitInfo."""
