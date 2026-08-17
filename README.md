@@ -21,11 +21,26 @@ whichever is used:
    Integration), or install it if listed.
 2. **Restart Home Assistant.**
 3. **Settings → Devices & Services → Add Integration → “SPAN Panel (eBus)”.**
-4. Sign in with your SPAN account email and password.
+4. Sign in with your SPAN account email and password, and supply your **device
+   UUID** (see below).
 
 Your password is used **once**, locally, to compute the Cognito SRP proof and
 obtain access tokens; it is never stored. Only the resulting tokens are kept
 (auto-refreshing), and a re-auth prompt appears if they ever fully expire.
+
+### The device UUID
+
+SPAN's realtime telemetry is published on an Ably channel named
+`c:<userId>:<deviceUUID>`, where `deviceUUID` is the **per-install client
+identifier your SPAN mobile app registered** — the same value the daemon reads
+from `SPAN_CLOUD_DEVICE_UUID`. It cannot be generated: an unrecognized UUID gets
+a valid token for a channel SPAN never publishes to, so the stream attaches and
+then stays silent, and **no entities are created**.
+
+Setup therefore waits for a real telemetry frame before finishing and reports
+*“SPAN sent no telemetry on the channel for this device UUID”* if none arrives.
+Recover the value from a capture of the app's `AblyToken` call — see
+[docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md) §3a.
 
 You get one device per panel with a sensor for each circuit's power (plus
 current / voltage / site flows where reported), updated at ~1–2 Hz.

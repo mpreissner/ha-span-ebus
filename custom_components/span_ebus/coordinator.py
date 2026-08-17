@@ -16,6 +16,7 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
@@ -23,6 +24,11 @@ from .span_client.backend import CloudBackend
 from .span_client.models import PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
+
+# If the channel is silent this long after start, say so. Entities only exist
+# once a frame describes them, so a quiet stream otherwise looks like a broken
+# integration with an empty log.
+SCHEMA_GRACE_SECONDS = 60
 
 
 class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
@@ -56,6 +62,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         self._flush_scheduled = False
         self._known_keys: set[str] = set()
         self._entity_adder: Callable[[list[PropertySpec]], None] | None = None
+        self._cancel_grace: Callable[[], None] | None = None
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -63,10 +70,30 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         """Start the backend thread. Non-blocking; frames arrive shortly after."""
         self.data = {}
         self._backend.start(self._on_schema, self._on_reading)
+        self._cancel_grace = async_call_later(
+            self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent
+        )
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
+        if self._cancel_grace is not None:
+            self._cancel_grace()
+            self._cancel_grace = None
         await self.hass.async_add_executor_job(self._backend.stop)
+
+    @callback
+    def _warn_if_silent(self, _now) -> None:
+        self._cancel_grace = None
+        if self.schema is not None:
+            return
+        _LOGGER.warning(
+            "No SPAN telemetry after %ds, so no entities have been created. The "
+            "Ably channel is bound to the device UUID this entry was configured "
+            "with; if it is not the one SPAN publishes for, the channel attaches "
+            "but stays silent. Reconfigure the integration with the device UUID "
+            "from your SPAN mobile client.",
+            SCHEMA_GRACE_SECONDS,
+        )
 
     # --- entity registration ----------------------------------------------
 
