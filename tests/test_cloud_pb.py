@@ -4,7 +4,7 @@ No captured data: every message here is built with the writer and parsed back,
 so the codec is exercised end-to-end on synthetic input.
 """
 
-from span_bridge import cloud_pb as pb
+from span_client import cloud_pb as pb
 
 
 def test_varint_roundtrip():

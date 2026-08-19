@@ -149,7 +149,7 @@ def _cognito_timestamp(now: datetime.datetime | None = None) -> str:
     Built by hand so the process locale can't change the month/day names or
     zero-pad the day, either of which makes the signature fail.
     """
-    now = now or datetime.datetime.now(datetime.timezone.utc)
+    now = now or datetime.datetime.now(datetime.UTC)
     days = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     months = (
         "Jan", "Feb", "Mar", "Apr", "May", "Jun",

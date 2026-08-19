@@ -53,9 +53,11 @@ def peer_chain_pem(host: str, port: int, timeout: int = CONNECT_TIMEOUT) -> list
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
 
-    with socket.create_connection((host, port), timeout=timeout) as raw:
-        with context.wrap_socket(raw, server_hostname=host) as tls:
-            return [ssl.DER_cert_to_PEM_cert(der) for der in tls.get_unverified_chain() or []]
+    with (
+        socket.create_connection((host, port), timeout=timeout) as raw,
+        context.wrap_socket(raw, server_hostname=host) as tls,
+    ):
+        return [ssl.DER_cert_to_PEM_cert(der) for der in tls.get_unverified_chain() or []]
 
 
 def verifies_peer(ca_cert_path: Path | str, host: str, port: int,
@@ -68,8 +70,10 @@ def verifies_peer(ca_cert_path: Path | str, host: str, port: int,
     """
     try:
         context = build_ssl_context(ca_cert_path)
-        with socket.create_connection((host, port), timeout=timeout) as raw:
-            with context.wrap_socket(raw, server_hostname=host):
-                return True
+        with (
+            socket.create_connection((host, port), timeout=timeout) as raw,
+            context.wrap_socket(raw, server_hostname=host),
+        ):
+            return True
     except (OSError, ssl.SSLError):
         return False

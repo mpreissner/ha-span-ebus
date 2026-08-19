@@ -9,7 +9,7 @@ without a real server.
 import base64
 import json
 
-from span_bridge import cloud_auth as ca
+from span_client import cloud_auth as ca
 
 
 def test_pad_hex_prefixes_when_high_bit_set():
@@ -25,7 +25,7 @@ def test_cognito_timestamp_is_c_locale_unpadded_day():
     import datetime
 
     ts = ca._cognito_timestamp(
-        datetime.datetime(2026, 8, 6, 9, 4, 5, tzinfo=datetime.timezone.utc)
+        datetime.datetime(2026, 8, 6, 9, 4, 5, tzinfo=datetime.UTC)
     )
     # Day-of-month must NOT be zero-padded; names are English regardless of locale.
     assert ts == "Thu Aug 6 09:04:05 UTC 2026"

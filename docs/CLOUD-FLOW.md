@@ -225,7 +225,7 @@ Three things are easy to get wrong, and each fails differently:
   both the site and the gateway hardware ids.
 - **Traits must be enumerated.** The publisher sends only what a subscriber asked
   for, so the backend carries the app's exact 31 `(vendor_id, trait_id)` pairs
-  verbatim (see `SUBSCRIBE_TRAITS` in `backends/cloud.py`). Vendor 1 is SPAN's
+  verbatim (see `SUBSCRIBE_TRAITS` in `span_client/backend.py`). Vendor 1 is SPAN's
   trait namespace, 5 the Weave-derived common one.
 
 Diagnostics, since the errors are opaque:

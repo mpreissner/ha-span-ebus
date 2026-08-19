@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .models import DataType, NodeKind, PanelSchema, PropertySpec
+from ..models import DataType, NodeKind, PanelSchema, PropertySpec
 
 log = logging.getLogger(__name__)
 

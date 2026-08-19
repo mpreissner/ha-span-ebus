@@ -1,34 +1,61 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+# Tooling configuration for the SPAN Panel (eBus) Home Assistant integration.
+#
+# Nothing here is published as a package. HACS installs the integration by
+# copying custom_components/span_ebus/ into a Home Assistant config directory,
+# and the runtime dependencies that needs are declared in its manifest.json.
+# This file exists to configure ruff and pytest, and to pin the dev toolchain.
 
-[project]
-name = "span-bridge"
-version = "0.1.7"
-description = "Bridge a SPAN Panel MAIN 40 (Gen3) into Home Assistant over MQTT"
-readme = "README.md"
-requires-python = ">=3.13"
-license = { text = "MIT" }
-
-dependencies = [
-    "paho-mqtt>=2.1.0",
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.16",
+    # Imported by the cloud client under test.
     "requests>=2.31.0",
-    # HTTP/2 for the cloud backend's gRPC unary calls and Ably SSE stream.
     "httpx[http2]>=0.27",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.6",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/span_bridge"]
-
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+# Home Assistant 2024.12 requires Python 3.12, so that is the floor the shipped
+# integration has to run on — not the newer interpreter used for development.
+target-version = "py312"
+
+[tool.ruff.lint]
+# Pinned explicitly. Without a select, the rule set is whatever ruff defaults to
+# on the day it runs, which is how 42 findings accumulated unnoticed.
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # import sorting
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "C4",        # comprehensions
+    "SIM",       # simplify
+    "RUF",       # ruff-specific
+    "PIE",       # misc lints
+    "FURB",      # refurb
+    "S",         # bandit
+    "BLE",       # blind except
+    "PYI",       # stub/typing conventions
+]
+
+ignore = [
+    # Bandit flags any name containing "token"/"password" as a hardcoded
+    # secret. This is a token-brokering client, so nearly every such name is a
+    # false positive; real credentials come from the user at runtime and are
+    # never literals. Reinstate if that ever stops being true.
+    "S105", "S106",
+    # Prose in docstrings and comments uses typographic characters (x, ->)
+    # deliberately; RUF001 still guards identifiers, where it matters.
+    "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on internals and use asserts by design.
+"tests/*" = ["S101"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The integration is what ships and what HA imports, so it is what the tests
+# import too — `span_client` resolves inside custom_components/span_ebus/.
+pythonpath = ["custom_components/span_ebus"]

@@ -7,8 +7,8 @@ assertions exist to pin the structure recovered in
 docs/specs/circuit-control.md rather than to exercise logic.
 """
 
-from span_bridge import cloud_pb as pb
-from span_bridge.cloud_commands import (
+from span_client import cloud_pb as pb
+from span_client.cloud_commands import (
     CONTROL_SOURCE_USER_COMMAND,
     DEFAULT_TIMEOUT_MS,
     TRAIT_SWITCH_LOAD_MANAGEMENT,
@@ -75,7 +75,7 @@ def test_the_requester_is_the_user_not_the_panel_that_owns_the_trait():
     )
     assert msg.get_msg(2).get_msg(1).get_str(1) == TARGET.resource_id
     assert msg.get_msg(14).get_msg(1).get_msg(2).get_str(1) == REQUESTER
-    assert REQUESTER != TARGET.resource_id
+    assert TARGET.resource_id != REQUESTER
 
 
 def test_trait_message_addresses_the_instance_three_times_over():
@@ -127,7 +127,7 @@ def test_request_ids_are_unique_per_call():
 
 def test_send_messages_wraps_each_message_in_field_one():
     request = pb.parse(build_send_messages(b"\x08\x01", b"\x08\x02"))
-    assert [v for v in request.values(1)] == [b"\x08\x01", b"\x08\x02"]
+    assert list(request.values(1)) == [b"\x08\x01", b"\x08\x02"]
 
 
 def test_build_switch_request_is_one_message_ready_to_post():

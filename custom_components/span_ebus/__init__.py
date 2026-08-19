@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from pathlib import Path
@@ -64,7 +65,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> boo
 
 
 def _remove_quietly(path: Path) -> None:
-    try:
+    with contextlib.suppress(OSError):
         os.remove(path)
-    except OSError:
-        pass
