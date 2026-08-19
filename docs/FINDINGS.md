@@ -244,3 +244,22 @@ tracks:
 The earlier flat "do not build a cloud scraper" is retracted: the pcap evidence
 shows the local button-press path is a dead end on this firmware, and the cloud
 flow is the only route to data before SPAN ships the local API.
+
+### Open question — what local auth will require, and what that costs the user
+
+Transport selection is not purely internal, because the two paths may not need
+the same things from the user. If **proof-of-proximity survives** (door switch,
+or the passphrase from the app), a local-only install needs no SPAN account at
+all — the user presses a button and never types a password. If SPAN instead
+**requires a one-time cloud auth** to mint a local access token, then even
+local-only setup starts with account credentials, and the config flow looks
+much the same as it does today.
+
+Either way, **local-only must be an offered choice**, not an inference. Most
+users will want the cloud fallback and it should be the default, but someone
+who has deliberately kept a panel off the internet should be able to say so and
+have the integration honor it rather than quietly reaching out. Which of the
+two auth shapes lands decides how much the config flow can drop when they do.
+
+Not designed yet, and it cannot be until SPAN ships the API and we see which
+authentication it accepts.
