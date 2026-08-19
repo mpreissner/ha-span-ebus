@@ -244,9 +244,7 @@ def load_cache(auth_file: Path) -> dict:
 
     mode = auth_file.stat().st_mode
     if mode & (stat.S_IRWXG | stat.S_IRWXO):
-        log.warning(
-            "%s is readable by other users; run 'chmod 600 %s'", auth_file, auth_file
-        )
+        log.warning("%s is readable by other users; run 'chmod 600 %s'", auth_file, auth_file)
 
     return json.loads(auth_file.read_text())
 

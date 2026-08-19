@@ -151,15 +151,9 @@ def build_trait_message(
         + field_message(3, field_string(1, request_id or str(uuid.uuid4())))
         + field_varint(4, timeout_ms)
     )
-    command = field_message(1, request_metadata) + field_message(
-        2, field_message(1, payload)
-    )
+    command = field_message(1, request_metadata) + field_message(2, field_message(1, payload))
 
-    return (
-        field_message(1, metadata)
-        + field_message(2, instance)
-        + field_message(14, command)
-    )
+    return field_message(1, metadata) + field_message(2, instance) + field_message(14, command)
 
 
 def build_send_messages(*messages: bytes) -> bytes:

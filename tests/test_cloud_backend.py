@@ -94,9 +94,7 @@ def test_schema_advertises_only_properties_the_wire_feeds():
 
     # Circuits get power and current only; voltage and frequency are the panel's.
     circuit_props = {
-        spec.property_id
-        for spec in schema.properties.values()
-        if spec.node_id == "circuit-54"
+        spec.property_id for spec in schema.properties.values() if spec.node_id == "circuit-54"
     }
     assert circuit_props == {"power", "current"}
     panel_props = {
@@ -267,9 +265,7 @@ def test_schema_is_released_once_the_subscribe_answers(monkeypatch, tmp_path):
     # An unfamiliar snapshot yields no labels; waiting out the deadline would
     # only delay the entities, so the subscribe's return releases the schema.
     monkeypatch.setattr(cloud, "SUBSCRIBE_DELAY_SECONDS", 0.01)
-    monkeypatch.setattr(
-        cloud.cloud_ably, "stream_frames", lambda *a, **kw: kw["stop"] and None
-    )
+    monkeypatch.setattr(cloud.cloud_ably, "stream_frames", lambda *a, **kw: kw["stop"] and None)
     backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", serial="XC-1")
     backend._label_deadline = time.monotonic() + 60.0
     monkeypatch.setattr(backend, "subscribe", lambda channel: b"unfamiliar")
@@ -501,16 +497,15 @@ def test_relay_is_advertised_only_where_a_switch_trait_was_resolved():
     assert "feed-2/relay" not in schema.properties
     assert "panel/relay" not in schema.properties
     # And a snapshot without switch traits leaves every circuit read-only.
-    assert "circuit-54/relay" not in cloud.schema_from_frame(
-        "<cloud-serial>", _frame(), _circuits()
-    ).properties
+    assert (
+        "circuit-54/relay"
+        not in cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits()).properties
+    )
 
 
 def test_relay_readings_report_the_snapshot_state():
     def state(relay_closed):
-        readings = cloud.readings_from_frame(
-            _frame(), 1.0, _switchable_circuits(relay_closed)
-        )
+        readings = cloud.readings_from_frame(_frame(), 1.0, _switchable_circuits(relay_closed))
         return {r.key: r.value for r in readings}["circuit-54/relay"]
 
     assert state(True) == "CLOSED"
@@ -572,9 +567,7 @@ class _FakeGrpc:
         return b""
 
 
-def _wire_grpc(
-    monkeypatch, sent: list[bytes], token: str | None = None
-) -> list[_FakeGrpc]:
+def _wire_grpc(monkeypatch, sent: list[bytes], token: str | None = None) -> list[_FakeGrpc]:
     """Point the backend at fake gRPC; returns the clients it opens, in order."""
     clients: list[_FakeGrpc] = []
 
@@ -593,9 +586,7 @@ def _wire_grpc(
     return clients
 
 
-def test_send_command_posts_a_switch_request_for_the_addressed_instance(
-    monkeypatch, tmp_path
-):
+def test_send_command_posts_a_switch_request_for_the_addressed_instance(monkeypatch, tmp_path):
     sent: list[bytes] = []
     _wire_grpc(monkeypatch, sent)
 
@@ -623,9 +614,10 @@ def test_send_command_posts_a_switch_request_for_the_addressed_instance(
     assert backend._circuits[54].relay_closed is False
 
     backend.send_command("circuit-54/relay", "on")
-    assert pb.parse(sent[1]).get_msgs(1)[0].get_msg(14).get_msg(2).get_bytes(
-        1
-    ) == cloud.cloud_commands.release_payload()
+    assert (
+        pb.parse(sent[1]).get_msgs(1)[0].get_msg(14).get_msg(2).get_bytes(1)
+        == cloud.cloud_commands.release_payload()
+    )
     assert backend._circuits[54].relay_closed is True
 
 
