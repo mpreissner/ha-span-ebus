@@ -1,12 +1,12 @@
 {
   "domain": "span_ebus",
   "name": "SPAN Panel (eBus)",
-  "version": "0.1.7",
-  "documentation": "https://github.com/mpreissner/ha-span-ebus",
-  "issue_tracker": "https://github.com/mpreissner/ha-span-ebus/issues",
   "codeowners": ["@mpreissner"],
   "config_flow": true,
-  "iot_class": "cloud_push",
+  "documentation": "https://github.com/mpreissner/ha-span-ebus",
   "integration_type": "device",
-  "requirements": ["requests>=2.31.0", "httpx[http2]>=0.27.0"]
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/mpreissner/ha-span-ebus/issues",
+  "requirements": ["requests>=2.31.0", "httpx[http2]>=0.27.0"],
+  "version": "0.1.7"
 }
