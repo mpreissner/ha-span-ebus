@@ -8,10 +8,10 @@ legacy gRPC one — or a cloud scraper — changes nothing else.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class DataType(str, Enum):
+class DataType(StrEnum):
     """Homie 5 property datatypes."""
 
     STRING = "string"
@@ -25,7 +25,7 @@ class DataType(str, Enum):
     JSON = "json"
 
 
-class NodeKind(str, Enum):
+class NodeKind(StrEnum):
     """Node types the panel exposes. `CIRCUIT` nodes are keyed by UUID."""
 
     CORE = "core"
@@ -93,7 +93,7 @@ class PanelSchema:
                 out.setdefault(spec.node_id, []).append(spec)
         return out
 
-    def resolve_node_names(self, readings: dict[str, str]) -> "PanelSchema":
+    def resolve_node_names(self, readings: dict[str, str]) -> PanelSchema:
         """Return a copy with `node_name` filled in from observed `name` values.
 
         Circuit nodes are keyed by opaque UUID; their human label arrives as the

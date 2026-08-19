@@ -83,7 +83,12 @@ custom_components/span_ebus/
   coordinator.py     stream lifecycle, entity discovery, state
   sensor.py          circuit / panel / site-flow sensors
   switch.py          circuit relay switches
-  span_client/       cloud client: Cognito auth, gRPC, Ably SSE, traits
+  span_client/       the panel data layer, and the only copy of it
+    backend.py       CloudBackend: stream lifecycle, traits, commands
+    cloud_*.py       Cognito auth, gRPC, protobuf, Ably SSE, telemetry
+    models.py        normalized panel / node / property / reading types
+    local/           staged for the local API; not imported yet
+tests/               run against span_client, i.e. against what ships
 docs/CLOUD-FLOW.md   the cloud path, end to end
 docs/CLOUD-PROTO.md  protobuf shapes for the gRPC calls
 docs/FINDINGS.md     empirical results from this panel

@@ -5,8 +5,7 @@ import json
 
 import httpx
 import pytest
-
-from span_bridge import cloud_ably as a
+from span_client import cloud_ably as a
 
 
 def _client(handler) -> httpx.Client:

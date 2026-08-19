@@ -29,9 +29,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Callable
 
 import httpx
 
@@ -125,8 +124,7 @@ def iter_sse_events(lines: Iterator[str]) -> Iterator[tuple[str, str]]:
         if line.startswith(":"):
             continue
         field, _, value = line.partition(":")
-        if value.startswith(" "):
-            value = value[1:]
+        value = value.removeprefix(" ")
         if field == "event":
             event = value
         elif field == "data":

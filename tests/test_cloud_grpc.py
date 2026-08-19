@@ -1,8 +1,7 @@
 """Tests for the gRPC length-prefix framing (the network-free part)."""
 
 import pytest
-
-from span_bridge import cloud_grpc as g
+from span_client import cloud_grpc as g
 
 
 def test_frame_roundtrip():

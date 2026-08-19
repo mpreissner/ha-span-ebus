@@ -1,13 +1,13 @@
 """Tests for Homie 5 schema parsing and firmware quirk compensation."""
 
-from span_bridge.homie import (
+from span_client.local.homie import (
     classify_node,
     effective_unit,
     parse_description,
     parse_value_topic,
     topic_for,
 )
-from span_bridge.models import DataType, NodeKind
+from span_client.models import DataType, NodeKind
 
 SERIAL = "<local-serial>"
 CIRCUIT_UUID = "ac3dccda46a94b98878a227df6fed588"

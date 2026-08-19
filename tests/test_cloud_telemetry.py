@@ -6,8 +6,8 @@ The layout, field numbers and milli-unit conventions match real frames, which
 were validated separately against a live capture during development.
 """
 
-from span_bridge import cloud_pb as pb
-from span_bridge.cloud_telemetry import decode_frame
+from span_client import cloud_pb as pb
+from span_client.cloud_telemetry import decode_frame
 
 
 def _leaf(value: int) -> bytes:
@@ -103,7 +103,7 @@ def build_frame() -> bytes:
     site_metric = pb.field_message(2, site_power)
 
     # resource block: { #1 {1: resourceId}, #2*: samples }
-    # Every sample below stays inside its own apparent power (V × I) — a reading
+    # Every sample below stays inside its own apparent power (V x I) — a reading
     # that implies a power factor above 1 is the signature of decoding a power as
     # an unsigned varint, which is exactly what this fixture has to catch.
     samples = (
@@ -113,20 +113,20 @@ def build_frame() -> bytes:
             # Only `combined` carries power; the legs report current and voltage.
             _instance_three_wire(
                 2,
-                an=dict(current_ma=31_280, voltage_mv=120_110),
-                bn=dict(current_ma=29_023, voltage_mv=119_988),
-                combined=dict(current_ma=31_280, voltage_mv=240_099, power_mw=6_872_000),
+                an={"current_ma": 31_280, "voltage_mv": 120_110},
+                bn={"current_ma": 29_023, "voltage_mv": 119_988},
+                combined={"current_ma": 31_280, "voltage_mv": 240_099, "power_mw": 6_872_000},
             ),
         )
         + pb.field_message(
             2,
             _instance_panel(
                 1,
-                an=dict(current_ma=9_133, voltage_mv=119_964),
-                bn=dict(current_ma=10_189, voltage_mv=119_856),
-                combined=dict(
-                    current_ma=10_189, voltage_mv=239_820, power_mw=2_033_284
-                ),
+                an={"current_ma": 9_133, "voltage_mv": 119_964},
+                bn={"current_ma": 10_189, "voltage_mv": 119_856},
+                combined={
+                    "current_ma": 10_189, "voltage_mv": 239_820, "power_mw": 2_033_284
+                },
                 freq_mhz=60_038,
             ),
         )

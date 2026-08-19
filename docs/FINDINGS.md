@@ -219,8 +219,9 @@ Only three properties are writable:
 - Relay `CLOSED` = circuit energized (on); `OPEN` = de-energized (off).
 
 Both unit quirks are compensated in the Homie schema parser,
-`src/span_bridge/homie.py`. That is local-path code: it is not vendored into
-the integration and does not run until SPAN enables the local API.
+`custom_components/span_ebus/span_client/local/homie.py`. That module is staged,
+not wired up: nothing under `local/` is imported until SPAN enables the local
+API.
 
 ## Conclusion
 
