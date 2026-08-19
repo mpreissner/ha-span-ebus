@@ -218,7 +218,9 @@ Only three properties are writable:
 - PV `nameplate-capacity` is declared `kW` but **reported in watts**.
 - Relay `CLOSED` = circuit energized (on); `OPEN` = de-energized (off).
 
-Both unit quirks are handled in `src/span_bridge/homie.py`.
+Both unit quirks are compensated in the Homie schema parser,
+`src/span_bridge/homie.py`. That is local-path code: it is not vendored into
+the integration and does not run until SPAN enables the local API.
 
 ## Conclusion
 
@@ -228,11 +230,11 @@ issues credentials is not running and the official app does not use the local
 path at all — it is cloud-only via Cognito + Ably. So there are two viable
 tracks:
 
-1. **Cloud bridge (works today).** Replicate the app's cloud flow — Cognito
+1. **Cloud path (works today).** Replicate the app's cloud flow — Cognito
    auth → `app-api.prod.span-csp.com` → Ably subscription — to pull live data
    now. Requires a decrypting MITM of the app to learn the API endpoints, the
    Ably token-issuance call, and the channel naming. Cloud-dependent.
-2. **Local bridge (blocked, ~H2 2026).** Keep the `ebus` backend ready and wait
+2. **Local path (blocked, ~H2 2026).** Keep the `ebus` backend ready and wait
    for SPAN to enable the MAIN 40 local API. Zero cloud dependency once live;
    no ETA under our control.
 

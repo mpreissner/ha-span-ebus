@@ -371,13 +371,15 @@ def load_tokens(path: Path) -> CloudTokens | None:
 def access_token_from_store(path: Path) -> str:
     """Return a currently-valid access token, refreshing and re-saving if needed.
 
-    Raises `CloudAuthError` if there is no store yet (run `cloud-login` first) or
-    if it holds no refresh token to renew with.
+    Raises `CloudAuthError` if the config entry never wrote a store, or if the
+    store holds no refresh token to renew with. Either way the entry needs to be
+    re-authenticated from Home Assistant.
     """
     tokens = load_tokens(path)
     if tokens is None:
         raise CloudAuthError(
-            f"no cloud credentials at {path}; run 'span-bridge cloud-login' first"
+            f"no cloud credentials at {path}; re-authenticate the SPAN Panel (eBus) "
+            "integration in Home Assistant"
         )
     if not tokens.expired:
         return tokens.access_token

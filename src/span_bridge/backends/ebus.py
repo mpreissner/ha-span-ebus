@@ -45,7 +45,7 @@ class EbusBackend:
         if not self._ca_cert.exists():
             raise FileNotFoundError(
                 f"panel CA certificate not found at {self._ca_cert}; "
-                "run 'span-bridge auth' first"
+                "run 'python -m span_bridge.cli auth' first"
             )
 
         client = mqtt.Client(
