@@ -60,8 +60,9 @@ def peer_chain_pem(host: str, port: int, timeout: int = CONNECT_TIMEOUT) -> list
         return [ssl.DER_cert_to_PEM_cert(der) for der in tls.get_unverified_chain() or []]
 
 
-def verifies_peer(ca_cert_path: Path | str, host: str, port: int,
-                  timeout: int = CONNECT_TIMEOUT) -> bool:
+def verifies_peer(
+    ca_cert_path: Path | str, host: str, port: int, timeout: int = CONNECT_TIMEOUT
+) -> bool:
     """Whether a full, verified handshake succeeds using this CA.
 
     This is the real test of a candidate CA: matching a subject string only

@@ -36,9 +36,7 @@ def _write_token_file(path: Path, tokens: dict) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
     token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
-    await hass.async_add_executor_job(
-        _write_token_file, token_path, entry.data[CONF_TOKENS]
-    )
+    await hass.async_add_executor_job(_write_token_file, token_path, entry.data[CONF_TOKENS])
 
     coordinator = SpanCloudCoordinator(
         hass,

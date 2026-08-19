@@ -5,6 +5,7 @@ of (field number, wire type, value) for every message. Length-delimited fields
 are heuristically re-parsed as nested messages when they look like valid
 protobuf, else shown as string/bytes. Used to reverse the SPAN telemetry frames.
 """
+
 from __future__ import annotations
 
 import struct
@@ -72,18 +73,18 @@ def walk(buf, depth=0, out=None):
             # show signed-zigzag interpretation too, cheaply
             out.append(f"{pad}#{fno} varint = {val}")
         elif wt == 1:
-            raw = buf[i:i + 8]
+            raw = buf[i : i + 8]
             i += 8
             d = struct.unpack("<d", raw)[0] if len(raw) == 8 else None
-            out.append(f"{pad}#{fno} fixed64 = {int.from_bytes(raw,'little')} (double {d})")
+            out.append(f"{pad}#{fno} fixed64 = {int.from_bytes(raw, 'little')} (double {d})")
         elif wt == 5:
-            raw = buf[i:i + 4]
+            raw = buf[i : i + 4]
             i += 4
             f = struct.unpack("<f", raw)[0] if len(raw) == 4 else None
-            out.append(f"{pad}#{fno} fixed32 = {int.from_bytes(raw,'little')} (float {f})")
+            out.append(f"{pad}#{fno} fixed32 = {int.from_bytes(raw, 'little')} (float {f})")
         elif wt == 2:
             ln, i = _read_varint(buf, i)
-            sub = buf[i:i + ln]
+            sub = buf[i : i + ln]
             i += ln
             if _looks_like_message(sub) and len(sub) > 1:
                 out.append(f"{pad}#{fno} msg ({ln}b) {{")

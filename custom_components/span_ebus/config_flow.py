@@ -42,9 +42,7 @@ PROBE_TIMEOUT = 45.0
 
 STEP_USER_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_EMAIL): TextSelector(
-            TextSelectorConfig(type=TextSelectorType.EMAIL)
-        ),
+        vol.Required(CONF_EMAIL): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL)),
         vol.Required(CONF_PASSWORD): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
@@ -75,9 +73,7 @@ def _new_device_uuid() -> str:
     return str(uuid.uuid4()).upper()
 
 
-def _probe(
-    tokens: cloud_auth.CloudTokens, device_uuid: str, user_id: str | None
-) -> str | None:
+def _probe(tokens: cloud_auth.CloudTokens, device_uuid: str, user_id: str | None) -> str | None:
     """Verify the channel actually carries telemetry; return the panel serial.
 
     Runs on an executor thread. This exercises the whole live path — topology
@@ -100,9 +96,7 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._reauth_entry_data: Mapping[str, Any] | None = None
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             email = user_input[CONF_EMAIL]
@@ -180,9 +174,7 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
             suggested[CONF_EMAIL] = user_input[CONF_EMAIL]
         return {k: v for k, v in suggested.items() if v is not None}
 
-    async def async_step_reauth(
-        self, entry_data: Mapping[str, Any]
-    ) -> ConfigFlowResult:
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
         self._reauth_entry_data = entry_data
         return await self.async_step_reauth_confirm()
 

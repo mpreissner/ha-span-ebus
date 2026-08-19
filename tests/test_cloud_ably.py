@@ -44,7 +44,7 @@ def test_iter_sse_events_groups_by_blank_line():
     lines = iter(
         [
             "event: message",
-            "data: {\"a\":1}",
+            'data: {"a":1}',
             "",
             "event: heartbeat",
             "data: keepalive",
