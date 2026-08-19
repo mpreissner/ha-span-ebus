@@ -15,11 +15,11 @@ from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
-from ..auth import Credentials
-from ..homie import parse_description, parse_value_topic
+from ..backend import ReadingCallback, SchemaCallback
 from ..models import Reading
-from ..tls import build_ssl_context
-from . import ReadingCallback, SchemaCallback
+from .auth import Credentials
+from .homie import parse_description, parse_value_topic
+from .tls import build_ssl_context
 
 log = logging.getLogger(__name__)
 
@@ -45,12 +45,12 @@ class EbusBackend:
         if not self._ca_cert.exists():
             raise FileNotFoundError(
                 f"panel CA certificate not found at {self._ca_cert}; "
-                "run 'python -m span_bridge.cli auth' first"
+                "the panel has not been registered yet"
             )
 
         client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
-            client_id=f"span-bridge-{self._creds.serial}",
+            client_id=f"span-ebus-{self._creds.serial}",
         )
         client.username_pw_set(self._creds.ebus_username, self._creds.ebus_password)
 
@@ -98,11 +98,9 @@ class EbusBackend:
             log.warning("unexpected disconnect from panel broker: %s", reason_code)
 
     def _on_message(self, client, userdata, msg):
-        try:
-            payload = msg.payload.decode("utf-8", errors="replace")
-        except Exception:
-            log.debug("undecodable payload on %s", msg.topic)
-            return
+        # errors="replace" means this cannot raise: undecodable bytes become
+        # replacement characters rather than an exception.
+        payload = msg.payload.decode("utf-8", errors="replace")
 
         if msg.topic.endswith("/$description"):
             self._handle_description(payload)

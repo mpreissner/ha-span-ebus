@@ -45,7 +45,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import cloud_ably, cloud_auth, cloud_commands, cloud_grpc
-from .cloud_pb import Message, field_message, field_string, field_varint, parse
+from .cloud_pb import Message, ProtoError, field_message, field_string, field_varint, parse
 from .cloud_telemetry import CircuitSample, Frame, decode_frame
 from .cloud_traits import CircuitInfo, parse_trait_snapshot
 from .models import DataType, NodeKind, PanelSchema, PropertySpec, Reading
@@ -406,7 +406,7 @@ def _parse_sites_serial(raw: bytes) -> str | None:
     root = parse(raw)
     # Serials in the captured schema look like "XC-####-#####"; scan strings.
     for value in _walk_strings(root):
-        if value.startswith("XC-") or value.startswith("xc-"):
+        if value.startswith(("XC-", "xc-")):
             return value
     return None
 
@@ -468,7 +468,7 @@ def _walk_strings(msg: Message, depth: int = 0):
     if depth > 8:
         return
     for values in msg.fields.values():
-        for wire, value in values:
+        for _wire, value in values:
             if not isinstance(value, bytes):
                 continue
             try:
@@ -479,7 +479,10 @@ def _walk_strings(msg: Message, depth: int = 0):
                 yield text
             try:
                 yield from _walk_strings(parse(value), depth + 1)
-            except Exception:
+            except ProtoError:
+                # Speculative descent: these bytes were simply not a nested
+                # message. Nothing to report — the caller wants the strings we
+                # did find, not a parse log for every leaf.
                 continue
 
 

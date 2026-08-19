@@ -18,7 +18,7 @@ The register call accepts one of three proofs:
 
 During a **proof-of-proximity** window — press the panel door switch 3×, which
 opens a 15-minute window — registration succeeds with none of these supplied.
-That is the easiest path and the one `python -m span_bridge.cli auth` tries first.
+That is the easiest path and the one `register()` tries first.
 
 Credentials are cached at ``~/.span-auth.json`` with mode 0600, matching the
 layout used by SPAN's own ``scripts/span-auth`` so the two interoperate.
@@ -38,12 +38,33 @@ from pathlib import Path
 import requests
 
 from . import tls
-from .config import PanelConfig
 
 log = logging.getLogger(__name__)
 
 REGISTER_TIMEOUT = 15
-DEFAULT_CLIENT_NAME = "span-bridge"
+DEFAULT_CLIENT_NAME = "span-ebus"
+
+
+@dataclass(frozen=True)
+class PanelConfig:
+    """How to reach the SPAN panel on the local network."""
+
+    host: str
+    serial: str | None = None
+    rest_port: int = 80
+    mqtt_port: int = 8883
+    auth_file: Path = Path.home() / ".span-auth.json"
+    ca_cert_dir: Path = Path.home() / ".span-ca-certs"
+
+    @property
+    def rest_base(self) -> str:
+        return f"http://{self.host}:{self.rest_port}"
+
+    @property
+    def ca_cert_path(self) -> Path:
+        if not self.serial:
+            raise ValueError("serial required to locate the CA certificate")
+        return self.ca_cert_dir / f"{self.serial}.crt"
 
 
 class AuthError(RuntimeError):
@@ -65,7 +86,7 @@ class Credentials:
     hop_passphrase: str | None = None
 
     @classmethod
-    def from_response(cls, body: dict) -> "Credentials":
+    def from_response(cls, body: dict) -> Credentials:
         try:
             return cls(
                 serial=body["serialNumber"],

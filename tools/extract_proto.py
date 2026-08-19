@@ -14,6 +14,7 @@ the ordered Object literals (the fields) and flush them when the type name appea
 from __future__ import annotations
 
 import ast
+import contextlib
 import re
 import sys
 
@@ -42,10 +43,8 @@ def parse(path: str) -> dict[str, list[dict]]:
                 continue
             m = OBJ_RE.search(line)
             if m:
-                try:
+                with contextlib.suppress(ValueError, SyntaxError):
                     fields.append(ast.literal_eval(m.group(1)))
-                except (ValueError, SyntaxError):
-                    pass
                 continue
             m = ARR_RE.search(line)
             if m:

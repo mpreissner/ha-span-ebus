@@ -16,7 +16,7 @@ Reference: https://protobuf.dev/programming-guides/encoding/
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 # Wire types (the low 3 bits of a field tag).
 WIRE_VARINT = 0
@@ -84,7 +84,7 @@ class Message:
         v = self._first(no)
         if v is None:
             return default
-        wire, value = v
+        _wire, value = v
         if not isinstance(value, int):
             raise ProtoError(f"field {no} is not numeric")
         return value
@@ -110,7 +110,7 @@ class Message:
         v = self._first(no)
         if v is None:
             return default
-        wire, value = v
+        _wire, value = v
         if not isinstance(value, bytes):
             raise ProtoError(f"field {no} is not length-delimited")
         return value
@@ -119,11 +119,11 @@ class Message:
         raw = self.get_bytes(no)
         return default if raw is None else raw.decode("utf-8", "replace")
 
-    def get_msg(self, no: int) -> "Message | None":
+    def get_msg(self, no: int) -> Message | None:
         raw = self.get_bytes(no)
         return None if raw is None else parse(raw)
 
-    def get_msgs(self, no: int) -> "list[Message]":
+    def get_msgs(self, no: int) -> list[Message]:
         return [parse(v) for v in self.values(no) if isinstance(v, bytes)]
 
     def __repr__(self) -> str:

@@ -119,7 +119,7 @@ always quoted `RequestMetadata`'s.
 
 So SPAN models the user as a resource, and a command is signed with it: the only
 thing that "contains" the user is the user. `cloud_auth.user_id_from_token`
-reads the claim, and `backends/cloud.py` calls it per command rather than
+reads the claim, and `span_client/backend.py` calls it per command rather than
 caching a configured value, so the requester always matches the token the same
 request authenticates with.
 
@@ -157,8 +157,8 @@ The trait snapshot from `SubscribeAndGetTraits` — already fetched on every
 `SwitchState { 0 UNSPECIFIED, 1 UNKNOWN, 2 OPEN, 3 CLOSED }`, recovered from the
 bundle's enum construction. **CLOSED = energized**, which matches the `relay`
 property the ebus/Homie path already publishes (`OPEN`/`CLOSED`), so the
-normalized model needs no new vocabulary and `discovery.component_for` already
-maps a settable `relay` to an HA switch with `payload_on = "CLOSED"`.
+normalized model needs no new vocabulary and `switch.py` turns a settable
+`relay` into an HA switch entity whose "on" is `CLOSED`.
 
 Telemetry frames never carry switch state, so state is refreshed by re-issuing
 `SubscribeAndGetTraits` (a ~22 KB call) on a timer, `SWITCH_REFRESH_SECONDS = 60`,
@@ -167,12 +167,10 @@ converges instead of lying.
 
 ## 4. Implementation
 
-| piece | file |
-|---|---|
-Paths are in the integration, which is what actually runs; `src/span_bridge/`
-carries a mirror of the client for the not-yet-shipped local path.
+Paths are relative to `custom_components/span_ebus/`, which is the whole of
+the code — there is no second copy.
 
-| piece | file (under `custom_components/span_ebus/`) |
+| piece | file |
 |---|---|
 | payload + `SendMessagesRequest` builders | `span_client/cloud_commands.py` (new) |
 | `SendMessages` RPC wrapper | `span_client/cloud_grpc.py` |

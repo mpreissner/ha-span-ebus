@@ -111,6 +111,6 @@ if __name__ == "__main__":
     data = sys.stdin.buffer.read().strip()
     try:
         raw = base64.b64decode(data)
-    except Exception:
+    except ValueError:
         raw = bytes.fromhex(data.decode())
     print("\n".join(walk(raw)))

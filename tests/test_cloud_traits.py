@@ -5,9 +5,9 @@ recovered from a live `SubscribeAndGetTraits` response (docs/CLOUD-PROTO.md).
 Labels are placeholders — no captured payload or real circuit name is committed.
 """
 
-from span_bridge import cloud_pb as pb
-from span_bridge.cloud_commands import SwitchTarget
-from span_bridge.cloud_traits import (
+from span_client import cloud_pb as pb
+from span_client.cloud_commands import SwitchTarget
+from span_client.cloud_traits import (
     SWITCH_STATE_CLOSED,
     SWITCH_STATE_OPEN,
     SWITCH_STATE_UNKNOWN,

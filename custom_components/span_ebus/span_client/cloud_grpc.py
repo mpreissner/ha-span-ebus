@@ -27,6 +27,7 @@ lets callers (`backends.cloud`) parse them with `cloud_pb`.
 from __future__ import annotations
 
 import logging
+from typing import Self
 
 import httpx
 
@@ -102,7 +103,7 @@ class CloudGrpcClient:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> "CloudGrpcClient":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:

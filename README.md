@@ -7,12 +7,14 @@ Assistant and streams live telemetry from SPAN's cloud (Cognito → gRPC → Abl
 SSE). This is the path that works **today**, while the panel's local API is not
 yet enabled. Live-validated end to end (see [docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md)).
 
-When SPAN enables the local MAIN 40 API (~H2 2026), the data source moves to the
-panel's own Electrification Bus (Homie 5 over MQTT) with no change to your
-entities. That stays inside Home Assistant — this remains a HACS integration, or
-possibly an add-on — so there is nothing new to deploy or host either way. The
-broker is already healthy on the panel, but its credential-issuing REST tier is
-still dormant (see [docs/FINDINGS.md](docs/FINDINGS.md)).
+When SPAN enables the local MAIN 40 API (~H2 2026), the integration will prefer
+it: talk to the panel's own Electrification Bus (Homie 5 over MQTT) directly on
+your LAN, and fall back to the cloud when local is unreachable or not yet
+provisioned. That is a change of transport, not of deployment — the integration
+still runs inside Home Assistant, still a HACS install, and your entities do not
+change either way. The panel's broker is already healthy on :8883; the REST tier
+that issues its credentials is still dormant (see
+[docs/FINDINGS.md](docs/FINDINGS.md)).
 
 Requires Home Assistant 2024.12.0 or newer.
 
@@ -83,7 +85,12 @@ custom_components/span_ebus/
   coordinator.py     stream lifecycle, entity discovery, state
   sensor.py          circuit / panel / site-flow sensors
   switch.py          circuit relay switches
-  span_client/       cloud client: Cognito auth, gRPC, Ably SSE, traits
+  span_client/       the panel data layer, and the only copy of it
+    backend.py       CloudBackend: stream lifecycle, traits, commands
+    cloud_*.py       Cognito auth, gRPC, protobuf, Ably SSE, telemetry
+    models.py        normalized panel / node / property / reading types
+    local/           staged for the local API; not imported yet
+tests/               run against span_client, i.e. against what ships
 docs/CLOUD-FLOW.md   the cloud path, end to end
 docs/CLOUD-PROTO.md  protobuf shapes for the gRPC calls
 docs/FINDINGS.md     empirical results from this panel

@@ -7,13 +7,12 @@ import time
 from dataclasses import replace
 
 import pytest
-
-from span_bridge import cloud_pb as pb
-from span_bridge.backends import cloud
-from span_bridge.cloud_commands import SwitchTarget
-from span_bridge.cloud_telemetry import Channel, CircuitSample, Frame
-from span_bridge.cloud_traits import CircuitInfo
-from span_bridge.models import DataType, NodeKind
+from span_client import backend as cloud
+from span_client import cloud_pb as pb
+from span_client.cloud_commands import SwitchTarget
+from span_client.cloud_telemetry import Channel, CircuitSample, Frame
+from span_client.cloud_traits import CircuitInfo
+from span_client.models import DataType, NodeKind
 
 
 def _frame() -> Frame:

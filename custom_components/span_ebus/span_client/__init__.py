@@ -1,7 +1,10 @@
-"""Vendored SPAN cloud data-layer for the Home Assistant integration.
+"""SPAN panel data layer for the Home Assistant integration.
 
-These modules are copied verbatim from the `span_bridge` daemon so the HACS
-integration is self-contained (HACS ships only what lives under
-`custom_components/span_ebus/`). Keep them in sync with `src/span_bridge` when
-the cloud path changes; the daemon's test suite is the source of truth.
+This package is the single source of truth for talking to the panel. It lives
+under `custom_components/` because HACS ships only what is there, and the
+integration is the only thing that consumes it.
+
+`backend.CloudBackend` and the `cloud_*` modules are the live path: Cognito
+auth → gRPC → Ably SSE. `local/` stages the panel's own Electrification Bus
+for when SPAN enables the MAIN 40 local API, and is not imported at runtime.
 """
