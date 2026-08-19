@@ -236,8 +236,10 @@ tracks:
    now. Requires a decrypting MITM of the app to learn the API endpoints, the
    Ably token-issuance call, and the channel naming. Cloud-dependent.
 2. **Local path (blocked, ~H2 2026).** Keep the `ebus` backend ready and wait
-   for SPAN to enable the MAIN 40 local API. Zero cloud dependency once live;
-   no ETA under our control.
+   for SPAN to enable the MAIN 40 local API. Once live it becomes the preferred
+   transport — LAN-direct, no cloud round trip — with the cloud path demoted to
+   a fallback rather than removed, since a panel may be unreachable or not yet
+   provisioned. No ETA under our control.
 
 The earlier flat "do not build a cloud scraper" is retracted: the pcap evidence
 shows the local button-press path is a dead end on this firmware, and the cloud

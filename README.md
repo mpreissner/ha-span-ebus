@@ -7,12 +7,14 @@ Assistant and streams live telemetry from SPAN's cloud (Cognito → gRPC → Abl
 SSE). This is the path that works **today**, while the panel's local API is not
 yet enabled. Live-validated end to end (see [docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md)).
 
-When SPAN enables the local MAIN 40 API (~H2 2026), the data source moves to the
-panel's own Electrification Bus (Homie 5 over MQTT) with no change to your
-entities. That stays inside Home Assistant — this remains a HACS integration, or
-possibly an add-on — so there is nothing new to deploy or host either way. The
-broker is already healthy on the panel, but its credential-issuing REST tier is
-still dormant (see [docs/FINDINGS.md](docs/FINDINGS.md)).
+When SPAN enables the local MAIN 40 API (~H2 2026), the integration will prefer
+it: talk to the panel's own Electrification Bus (Homie 5 over MQTT) directly on
+your LAN, and fall back to the cloud when local is unreachable or not yet
+provisioned. That is a change of transport, not of deployment — the integration
+still runs inside Home Assistant, still a HACS install, and your entities do not
+change either way. The panel's broker is already healthy on :8883; the REST tier
+that issues its credentials is still dormant (see
+[docs/FINDINGS.md](docs/FINDINGS.md)).
 
 Requires Home Assistant 2024.12.0 or newer.
 
