@@ -377,7 +377,7 @@ def access_token_from_store(path: Path) -> str:
     tokens = load_tokens(path)
     if tokens is None:
         raise CloudAuthError(
-            f"no cloud credentials at {path}; run 'span-bridge cloud-login' first"
+            f"no cloud credentials at {path}; run 'python -m span_bridge.cli cloud-login' first"
         )
     if not tokens.expired:
         return tokens.access_token

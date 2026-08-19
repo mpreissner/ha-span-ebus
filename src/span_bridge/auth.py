@@ -18,7 +18,7 @@ The register call accepts one of three proofs:
 
 During a **proof-of-proximity** window — press the panel door switch 3×, which
 opens a 15-minute window — registration succeeds with none of these supplied.
-That is the easiest path and the one `span-bridge auth` tries first.
+That is the easiest path and the one `python -m span_bridge.cli auth` tries first.
 
 Credentials are cached at ``~/.span-auth.json`` with mode 0600, matching the
 layout used by SPAN's own ``scripts/span-auth`` so the two interoperate.

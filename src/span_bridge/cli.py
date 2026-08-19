@@ -77,7 +77,7 @@ def cmd_probe(args) -> int:
 
     print()
     if rest_up:
-        print("REST API is responding. Run:  span-bridge auth --host " + host)
+        print("REST API is responding. Run:  python -m span_bridge.cli auth --host " + host)
     else:
         print(
             "REST API is not running (502 = nginx upstream refused).\n"
@@ -117,7 +117,7 @@ def cmd_auth(args) -> int:
     print(f"  broker      mqtts://{creds.ebus_host}:{creds.ebus_mqtts_port}")
     print(f"  CA cert     {cert_path}")
     print(f"  credentials {args.auth_file}")
-    print("\nNext:  span-bridge discover")
+    print("\nNext:  python -m span_bridge.cli discover")
     return 0
 
 
@@ -125,7 +125,9 @@ def cmd_discover(args) -> int:
     """Connect to the panel and dump its schema without publishing anything."""
     creds = auth_mod.load_credentials(args.auth_file, args.serial)
     if not creds:
-        print("error: no cached credentials; run 'span-bridge auth' first", file=sys.stderr)
+        print(
+            "error: no cached credentials; run 'python -m span_bridge.cli auth' first", file=sys.stderr
+        )
         return 1
 
     panel = PanelConfig(host=creds.hostname, serial=creds.serial, auth_file=args.auth_file)
@@ -201,7 +203,7 @@ def cmd_cloud_login(args) -> int:
     cloud_auth.save_tokens(args.token_store, tokens)
     print(f"Logged in as {username}")
     print(f"  tokens stored at {args.token_store}")
-    print("\nNext:  set SPAN_BACKEND=cloud and run 'span-bridge run'")
+    print("\nNext:  set SPAN_BACKEND=cloud and run 'python -m span_bridge.cli run'")
     return 0
 
 
@@ -227,7 +229,7 @@ def _build_backend(settings):
 
     creds = auth_mod.load_credentials(settings.panel.auth_file, settings.panel.serial)
     if not creds:
-        raise SystemExit("no cached credentials; run 'span-bridge auth' first")
+        raise SystemExit("no cached credentials; run 'python -m span_bridge.cli auth' first")
     panel = PanelConfig(
         host=settings.panel.host,
         serial=creds.serial,
@@ -261,7 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     from pathlib import Path
 
     parser = argparse.ArgumentParser(
-        prog="span-bridge",
+        prog="python -m span_bridge.cli",
         description="Bridge a SPAN MAIN 40 panel into Home Assistant over MQTT.",
     )
     parser.add_argument("--log-level", default="INFO")

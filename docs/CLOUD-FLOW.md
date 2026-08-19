@@ -141,7 +141,7 @@ POST rest.ably.io/keys/v8kFxw.VMjbuw/requestToken
 }
 ```
 
-Token TTL is ~1 hour → the bridge must re-run AblyToken + requestToken on expiry.
+Token TTL is ~1 hour → the client must re-run AblyToken + requestToken on expiry.
 
 ### 3c. Subscribe & receive — comet transport
 
@@ -171,7 +171,7 @@ Telemetry arrives as Ably protocol messages (`action: 15`) carrying:
 
 ### 3d. What the cloud backend actually uses — SSE, not comet (live-validated 2026-08-16)
 
-The bridge does **not** replicate the app's comet long-poll. It subscribes with a
+The client does **not** replicate the app's comet long-poll. It subscribes with a
 single long-lived Ably **SSE** GET, which is far simpler to consume:
 
 ```

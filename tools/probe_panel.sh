@@ -67,7 +67,7 @@ echo
 
 if [[ "$REST_UP" == "1" ]]; then
   echo "REST API is responding."
-  echo "Next:  span-bridge auth --host $HOST"
+  echo "This is the precondition for the local path — see docs/FINDINGS.md."
 else
   echo "REST API is not running (502 = nginx upstream refused)."
   echo "Press the panel door switch 3 times, then re-run this within 15 minutes."

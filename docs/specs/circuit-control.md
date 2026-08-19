@@ -169,12 +169,16 @@ converges instead of lying.
 
 | piece | file |
 |---|---|
-| payload + `SendMessagesRequest` builders | `src/span_bridge/cloud_commands.py` (new) |
-| `SendMessages` RPC wrapper | `src/span_bridge/cloud_grpc.py` |
-| `switch_state` + command addressing from the snapshot | `src/span_bridge/cloud_traits.py` |
-| `relay` property, state readings, `send_command`, refresh timer | `src/span_bridge/backends/cloud.py` |
-| HA switch entities | `custom_components/span_ebus/switch.py` (new) + `coordinator.py` |
-| vendored mirror | `custom_components/span_ebus/span_client/` |
+Paths are in the integration, which is what actually runs; `src/span_bridge/`
+carries a mirror of the client for the not-yet-shipped local path.
+
+| piece | file (under `custom_components/span_ebus/`) |
+|---|---|
+| payload + `SendMessagesRequest` builders | `span_client/cloud_commands.py` (new) |
+| `SendMessages` RPC wrapper | `span_client/cloud_grpc.py` |
+| `switch_state` + command addressing from the snapshot | `span_client/cloud_traits.py` |
+| `relay` property, state readings, `send_command`, refresh timer | `span_client/backend.py` |
+| HA switch entities | `switch.py` (new) + `coordinator.py` |
 
 `cloud_traits.CircuitInfo` gains `relay_closed: bool | None` and
 `switch: SwitchTarget | None` (resource id, instance id, trait metadata). That
@@ -187,7 +191,7 @@ read-only instead of exposing switches that would fail on use.
 
 `send_command("circuit-42/relay", "OPEN"|"CLOSED")` — also accepting
 `true/false/on/off/1/0` — builds and posts the message. It raises `GrpcError` on a
-transport-level rejection, which the bridge logs and HA surfaces as a failed
+transport-level rejection, which the client logs and HA surfaces as a failed
 service call.
 
 ## 5. Safety
