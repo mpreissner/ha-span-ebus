@@ -70,9 +70,7 @@ def test_the_requester_is_the_user_not_the_panel_that_owns_the_trait():
     # earns `PERMISSION_DENIED [Validation Error]: Requester <id>, does not
     # contain <userId>`. Only the caller's own user id passes, so the message
     # carries two different resource ids and they must not be crossed.
-    msg = pb.parse(
-        build_trait_message(TARGET, disconnect_payload(), requester_id=REQUESTER)
-    )
+    msg = pb.parse(build_trait_message(TARGET, disconnect_payload(), requester_id=REQUESTER))
     assert msg.get_msg(2).get_msg(1).get_str(1) == TARGET.resource_id
     assert msg.get_msg(14).get_msg(1).get_msg(2).get_str(1) == REQUESTER
     assert TARGET.resource_id != REQUESTER
@@ -132,9 +130,7 @@ def test_send_messages_wraps_each_message_in_field_one():
 
 def test_build_switch_request_is_one_message_ready_to_post():
     request = pb.parse(
-        build_switch_request(
-            TARGET, closed=False, requester_id=REQUESTER, request_id=REQUEST_ID
-        )
+        build_switch_request(TARGET, closed=False, requester_id=REQUESTER, request_id=REQUEST_ID)
     )
     messages = request.get_msgs(1)
     assert len(messages) == 1

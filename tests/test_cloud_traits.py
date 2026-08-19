@@ -35,11 +35,7 @@ def _entry(trait: int, instance: int, value: bytes, version: int = 1) -> bytes:
     The key carries no `product_id` (#2), matching real snapshots — which is why
     a command echoes the metadata back rather than reconstructing it.
     """
-    key = (
-        pb.field_varint(1, VENDOR_SPAN)
-        + pb.field_varint(3, trait)
-        + pb.field_varint(4, version)
-    )
+    key = pb.field_varint(1, VENDOR_SPAN) + pb.field_varint(3, trait) + pb.field_varint(4, version)
     return pb.field_message(
         2,
         pb.field_message(1, key)
@@ -73,7 +69,7 @@ def _space(number: int) -> bytes:
 def _switch(circuit_instance: int, state: int) -> bytes:
     """Trait 1/31's value: a back-ref to the circuit it switches, plus its state.
 
-        { 1: { 1: TraitRef -> 1/15 same instance, 2: config, 3: switch_state } }
+    { 1: { 1: TraitRef -> 1/15 same instance, 2: config, 3: switch_state } }
     """
     config = pb.field_varint(1, 2) + pb.field_varint(22, 32)
     inner = (
@@ -112,9 +108,7 @@ def test_resolves_labels_amps_and_spaces():
         spaces=(9,),
         breaker_amps=20,
         relay_closed=True,
-        switch=SwitchTarget(
-            resource_id=HARDWARE_ID, instance_id=30, metadata=(1, None, 31, 1)
-        ),
+        switch=SwitchTarget(resource_id=HARDWARE_ID, instance_id=30, metadata=(1, None, 31, 1)),
     )
 
     # A three-wire circuit's position block sits at #13 rather than #11, and it
@@ -164,9 +158,7 @@ def test_unknown_switch_state_is_not_reported_as_open():
     entries = _entry(TRAIT_CIRCUIT, 30, _circuit(11, 101, [9])) + _entry(
         TRAIT_SWITCH, 30, _switch(30, SWITCH_STATE_UNKNOWN)
     )
-    raw = pb.field_message(
-        1, pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + entries
-    )
+    raw = pb.field_message(1, pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + entries)
     info = parse_trait_snapshot(raw)[30]
     assert info.relay_closed is None
     # The circuit is still addressable, so the control exists and reads unknown.
@@ -180,9 +172,7 @@ def test_a_switch_trait_pointing_elsewhere_yields_no_control():
     entries = _entry(TRAIT_CIRCUIT, 30, _circuit(11, 101, [9])) + _entry(
         TRAIT_SWITCH, 30, _switch(31, SWITCH_STATE_CLOSED)
     )
-    raw = pb.field_message(
-        1, pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + entries
-    )
+    raw = pb.field_message(1, pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + entries)
     info = parse_trait_snapshot(raw)[30]
     assert info.switch is None
     assert info.relay_closed is None

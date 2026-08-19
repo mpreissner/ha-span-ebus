@@ -24,9 +24,7 @@ def test_pad_hex_prefixes_when_high_bit_set():
 def test_cognito_timestamp_is_c_locale_unpadded_day():
     import datetime
 
-    ts = ca._cognito_timestamp(
-        datetime.datetime(2026, 8, 6, 9, 4, 5, tzinfo=datetime.UTC)
-    )
+    ts = ca._cognito_timestamp(datetime.datetime(2026, 8, 6, 9, 4, 5, tzinfo=datetime.UTC))
     # Day-of-month must NOT be zero-padded; names are English regardless of locale.
     assert ts == "Thu Aug 6 09:04:05 UTC 2026"
 

@@ -124,9 +124,7 @@ def build_frame() -> bytes:
                 1,
                 an={"current_ma": 9_133, "voltage_mv": 119_964},
                 bn={"current_ma": 10_189, "voltage_mv": 119_856},
-                combined={
-                    "current_ma": 10_189, "voltage_mv": 239_820, "power_mw": 2_033_284
-                },
+                combined={"current_ma": 10_189, "voltage_mv": 239_820, "power_mw": 2_033_284},
                 freq_mhz=60_038,
             ),
         )

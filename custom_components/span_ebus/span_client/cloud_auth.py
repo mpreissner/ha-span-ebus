@@ -152,18 +152,23 @@ def _cognito_timestamp(now: datetime.datetime | None = None) -> str:
     now = now or datetime.datetime.now(datetime.UTC)
     days = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     months = (
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
     )
-    return (
-        f"{days[now.weekday()]} {months[now.month - 1]} {now.day} "
-        f"{now:%H:%M:%S} UTC {now.year}"
-    )
+    return f"{days[now.weekday()]} {months[now.month - 1]} {now.day} {now:%H:%M:%S} UTC {now.year}"
 
 
-def _process_challenge(
-    password: str, params: dict, a: int, big_a: int, timestamp: str
-) -> dict:
+def _process_challenge(password: str, params: dict, a: int, big_a: int, timestamp: str) -> dict:
     """Compute the PASSWORD_VERIFIER response from the SRP challenge."""
     user_id = params["USER_ID_FOR_SRP"]
     salt_hex = params["SALT"]
@@ -192,15 +197,8 @@ def _process_challenge(
     )
 
     secret_block = base64.b64decode(secret_block_b64)
-    msg = (
-        POOL_NAME.encode()
-        + user_id.encode()
-        + secret_block
-        + timestamp.encode()
-    )
-    signature = base64.b64encode(
-        hmac.new(hkdf, msg, hashlib.sha256).digest()
-    ).decode()
+    msg = POOL_NAME.encode() + user_id.encode() + secret_block + timestamp.encode()
+    signature = base64.b64encode(hmac.new(hkdf, msg, hashlib.sha256).digest()).decode()
 
     return {
         "USERNAME": user_id,
@@ -281,9 +279,7 @@ def authenticate(username: str, password: str) -> CloudTokens:
         )
 
     timestamp = _cognito_timestamp()
-    responses = _process_challenge(
-        password, challenge["ChallengeParameters"], a, big_a, timestamp
-    )
+    responses = _process_challenge(password, challenge["ChallengeParameters"], a, big_a, timestamp)
 
     result = _cognito_call(
         "RespondToAuthChallenge",
@@ -298,8 +294,7 @@ def authenticate(username: str, password: str) -> CloudTokens:
     if not auth:
         # A follow-up challenge (e.g. MFA) rather than tokens.
         raise CloudAuthError(
-            f"login did not complete; Cognito returned challenge "
-            f"{result.get('ChallengeName')!r}"
+            f"login did not complete; Cognito returned challenge {result.get('ChallengeName')!r}"
         )
     log.info("Cognito login succeeded for %s", username)
     return _tokens_from_result(auth)

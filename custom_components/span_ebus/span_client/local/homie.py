@@ -95,9 +95,7 @@ def parse_description(serial: str, doc: dict[str, Any]) -> PanelSchema:
 
             enum_values: tuple[str, ...] = ()
             if datatype is DataType.ENUM and prop.get("format"):
-                enum_values = tuple(
-                    v.strip() for v in str(prop["format"]).split(",") if v.strip()
-                )
+                enum_values = tuple(v.strip() for v in str(prop["format"]).split(",") if v.strip())
 
             schema.add(
                 PropertySpec(

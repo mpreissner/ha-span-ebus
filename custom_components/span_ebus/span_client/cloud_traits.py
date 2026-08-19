@@ -240,8 +240,7 @@ def _switch_for(
     back_ref = _trait_refs(inner)
     if (VENDOR_SPAN, TRAIT_CIRCUIT, instance) not in back_ref:
         log.debug(
-            "switch trait instance %d does not point back at circuit %d; "
-            "offering no relay control",
+            "switch trait instance %d does not point back at circuit %d; offering no relay control",
             instance,
             instance,
         )

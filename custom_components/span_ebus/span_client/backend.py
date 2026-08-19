@@ -74,10 +74,37 @@ SCHEMA_LABEL_WAIT_SECONDS = 5.0
 # arrives. Vendor 1 is SPAN's trait namespace, 5 the Weave-derived common one;
 # the trait ids are opaque and we carry them verbatim.
 SUBSCRIBE_TRAITS = (
-    (5, 1), (1, 36), (1, 17), (1, 15), (1, 16), (1, 2), (1, 33), (1, 47),
-    (1, 28), (1, 1), (1, 13), (1, 26), (1, 21), (1, 12), (1, 14), (1, 11),
-    (1, 31), (1, 32), (1, 35), (1, 18), (1, 38), (1, 41), (1, 19), (1, 39),
-    (1, 5), (1, 6), (1, 4), (1, 40), (1, 20), (5, 3), (1, 42),
+    (5, 1),
+    (1, 36),
+    (1, 17),
+    (1, 15),
+    (1, 16),
+    (1, 2),
+    (1, 33),
+    (1, 47),
+    (1, 28),
+    (1, 1),
+    (1, 13),
+    (1, 26),
+    (1, 21),
+    (1, 12),
+    (1, 14),
+    (1, 11),
+    (1, 31),
+    (1, 32),
+    (1, 35),
+    (1, 18),
+    (1, 38),
+    (1, 41),
+    (1, 19),
+    (1, 39),
+    (1, 5),
+    (1, 6),
+    (1, 4),
+    (1, 40),
+    (1, 20),
+    (5, 3),
+    (1, 42),
 )
 
 # Properties per sample kind, as (property_id, unit, CircuitSample attribute
@@ -196,9 +223,7 @@ def _switchable(sample: CircuitSample, circuits: dict[int, CircuitInfo]) -> Circ
     return info if info is not None and info.switch is not None else None
 
 
-def _node_for(
-    sample: CircuitSample, circuits: dict[int, CircuitInfo]
-) -> tuple[str, NodeKind]:
+def _node_for(sample: CircuitSample, circuits: dict[int, CircuitInfo]) -> tuple[str, NodeKind]:
     """Stable node id and kind for one telemetry sample.
 
     Node ids stay keyed on the instance id even once we know a circuit's label,
@@ -216,9 +241,7 @@ def _node_for(
     return _circuit_node(sample.instance_id), NodeKind.CIRCUIT
 
 
-def _node_names(
-    frame: Frame, circuits: dict[int, CircuitInfo]
-) -> dict[str, str]:
+def _node_names(frame: Frame, circuits: dict[int, CircuitInfo]) -> dict[str, str]:
     """Display name per node id, from the trait snapshot where we have one.
 
     Labels are the user's own and need not be unique — two 20 A circuits can
@@ -457,9 +480,7 @@ def build_subscribe_request(channel: str, hardware_ids: Iterable[str]) -> bytes:
     )
     body = field_message(1, field_string(1, channel))
     for hardware_id in hardware_ids:
-        body += field_message(
-            2, field_message(1, field_string(1, hardware_id)) + traits
-        )
+        body += field_message(2, field_message(1, field_string(1, hardware_id)) + traits)
     return body
 
 
@@ -536,9 +557,7 @@ class CloudBackend:
         self._stop.clear()
         self._schema_sent = False
         self._label_deadline = time.monotonic() + SCHEMA_LABEL_WAIT_SECONDS
-        self._thread = threading.Thread(
-            target=self._run, name="span-cloud", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name="span-cloud", daemon=True)
         self._thread.start()
 
     def stop(self, join_timeout: float = 10.0) -> None:
@@ -667,9 +686,7 @@ class CloudBackend:
                 return
             self._refresh_request.set()
 
-        threading.Thread(
-            target=worker, name="span-cloud-relay-refresh", daemon=True
-        ).start()
+        threading.Thread(target=worker, name="span-cloud-relay-refresh", daemon=True).start()
 
     # --- network loop ------------------------------------------------------
 
@@ -710,9 +727,7 @@ class CloudBackend:
                 if self._serial is None:
                     self._serial = _parse_sites_serial(sites)
                     if self._serial:
-                        log.info(
-                            "resolved panel serial %s from GetSitesForUser", self._serial
-                        )
+                        log.info("resolved panel serial %s from GetSitesForUser", self._serial)
                 if not self._hardware_ids:
                     self._hardware_ids = parse_sites_hardware_ids(sites)
                     log.debug("subscribable hardware ids: %s", self._hardware_ids)
@@ -731,9 +746,7 @@ class CloudBackend:
         if directive.token:
             return directive.token, channel
         if directive.token_request:
-            details = cloud_ably.request_token(
-                directive.token_request, key_name=self._key_name
-            )
+            details = cloud_ably.request_token(directive.token_request, key_name=self._key_name)
             return details.token, channel
         raise cloud_ably.AblyError("AblyToken response had neither a token nor a TokenRequest")
 
@@ -765,9 +778,7 @@ class CloudBackend:
                 if not self._wait_before_refresh(SWITCH_REFRESH_SECONDS):
                     return
 
-        threading.Thread(
-            target=worker, name="span-cloud-subscribe", daemon=True
-        ).start()
+        threading.Thread(target=worker, name="span-cloud-subscribe", daemon=True).start()
 
     def _refresh_circuits(self, channel: str, *, announce: bool = False) -> None:
         """Re-read the trait snapshot, updating circuit identities and relay state.

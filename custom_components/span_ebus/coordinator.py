@@ -61,9 +61,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         serial: str | None,
     ) -> None:
         # No update_interval: this is push, not poll.
-        super().__init__(
-            hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry
-        )
+        super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry)
         self.entry = entry
         self.schema: PanelSchema | None = None
 
@@ -85,9 +83,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         """Start the backend thread. Non-blocking; frames arrive shortly after."""
         self.data = {}
         self._backend.start(self._on_schema, self._on_reading)
-        self._cancel_grace = async_call_later(
-            self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent
-        )
+        self._cancel_grace = async_call_later(self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent)
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()

@@ -11,6 +11,7 @@ buffers into readable comments:
 The trailing Array holds the fully-qualified type name. So per function we collect
 the ordered Object literals (the fields) and flush them when the type name appears.
 """
+
 from __future__ import annotations
 
 import ast
@@ -24,10 +25,23 @@ ARR_RE = re.compile(r"# Array: (\[.*\])\s*$")
 
 # protobuf-es scalar type codes (ScalarType enum).
 SCALAR = {
-    1: "double", 2: "float", 3: "int64", 4: "uint64", 5: "int32",
-    6: "fixed64", 7: "fixed32", 8: "bool", 9: "string", 10: "group",
-    12: "bytes", 13: "uint32", 14: "enum", 15: "sfixed32", 16: "sfixed64",
-    17: "sint32", 18: "sint64",
+    1: "double",
+    2: "float",
+    3: "int64",
+    4: "uint64",
+    5: "int32",
+    6: "fixed64",
+    7: "fixed32",
+    8: "bool",
+    9: "string",
+    10: "group",
+    12: "bytes",
+    13: "uint32",
+    14: "enum",
+    15: "sfixed32",
+    16: "sfixed64",
+    17: "sint32",
+    18: "sint64",
 }
 
 
