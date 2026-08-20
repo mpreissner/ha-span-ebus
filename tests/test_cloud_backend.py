@@ -726,3 +726,81 @@ def test_probe_propagates_bootstrap_failure(monkeypatch, tmp_path):
 
     with pytest.raises(cloud.cloud_ably.AblyError):
         backend.probe(timeout=0.2)
+
+
+def test_the_watchdog_ends_a_stream_that_stopped_carrying_frames(monkeypatch, tmp_path):
+    # The failure this exists for: the socket is fine and Ably keeps sending
+    # keepalives, but SPAN has stopped publishing. Nothing raises, so without the
+    # watchdog the stream thread blocks forever and every entity freezes on its
+    # last value.
+    monkeypatch.setattr(cloud, "FRAME_SILENCE_SECONDS", 0.05)
+    monkeypatch.setattr(cloud, "SUBSCRIBE_DELAY_SECONDS", 0.01)
+
+    attaches: list[str] = []
+
+    def silent_stream(token, channel, on_frame, *, stop=None, **kw):
+        attaches.append(channel)
+        # Stand in for the keepalive traffic: connected, consulted, no frames.
+        while not stop():
+            time.sleep(0.005)
+
+    monkeypatch.setattr(cloud.cloud_ably, "stream_frames", silent_stream)
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", reconnect_seconds=0.01)
+    monkeypatch.setattr(backend, "bootstrap", lambda: ("tok", "c:u:d"))
+    monkeypatch.setattr(backend, "subscribe", lambda channel: b"")
+
+    try:
+        backend.start(lambda schema: None, lambda reading: None)
+        deadline = time.time() + 5.0
+        while len(attaches) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        backend.stop(join_timeout=1.0)
+
+    # It reattached rather than sitting on the dead stream.
+    assert len(attaches) >= 2
+
+
+def test_a_stream_still_delivering_frames_is_left_alone(monkeypatch, tmp_path):
+    # The watchdog must not cut a healthy stream: every frame is a reprieve.
+    monkeypatch.setattr(cloud, "FRAME_SILENCE_SECONDS", 0.2)
+    monkeypatch.setattr(cloud, "SUBSCRIBE_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(cloud, "decode_frame", lambda raw: _frame())
+
+    attaches: list[str] = []
+
+    def live_stream(token, channel, on_frame, *, stop=None, **kw):
+        attaches.append(channel)
+        while not stop():
+            on_frame(b"frame")
+            time.sleep(0.01)
+
+    monkeypatch.setattr(cloud.cloud_ably, "stream_frames", live_stream)
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", reconnect_seconds=0.01)
+    monkeypatch.setattr(backend, "bootstrap", lambda: ("tok", "c:u:d"))
+    monkeypatch.setattr(backend, "subscribe", lambda channel: b"")
+
+    try:
+        backend.start(lambda schema: None, lambda reading: None)
+        time.sleep(1.0)  # several watchdog intervals' worth of healthy stream
+    finally:
+        backend.stop(join_timeout=1.0)
+
+    assert len(attaches) == 1
+
+
+def test_a_decodable_frame_is_what_counts_as_liveness(monkeypatch, tmp_path):
+    # Bytes off the socket are not evidence SPAN is publishing anything we can
+    # use, so garbage must not hold the watchdog off.
+    def boom(raw):
+        raise ValueError("not a frame")
+
+    monkeypatch.setattr(cloud, "decode_frame", boom)
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid")
+    backend._last_frame = 0.0
+    backend._handle_frame(b"garbage")
+
+    assert backend._last_frame == 0.0
