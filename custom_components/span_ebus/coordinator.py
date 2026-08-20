@@ -14,11 +14,12 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
@@ -31,6 +32,18 @@ _LOGGER = logging.getLogger(__name__)
 # once a frame describes them, so a quiet stream otherwise looks like a broken
 # integration with an empty log.
 SCHEMA_GRACE_SECONDS = 60
+
+# A push integration has no natural notion of "stale": an entity keeps its last
+# value until something says otherwise, so a dead stream looks exactly like a
+# panel at constant load — and the recorder writes that flat line into history as
+# though it were measured. Past this much silence the entities stop claiming
+# their value is current and go unavailable, which is the honest reading and
+# leaves a visible gap instead of a plausible lie.
+#
+# Comfortably longer than the backend's own FRAME_SILENCE_SECONDS watchdog plus a
+# reconnect, so an ordinary reattach does not blink every entity in the panel.
+STALE_AFTER_SECONDS = 180.0
+STALE_CHECK_INTERVAL = timedelta(seconds=30)
 
 
 @dataclass
@@ -76,6 +89,12 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         self._flush_scheduled = False
         self._platforms: list[_Platform] = []
         self._cancel_grace: Callable[[], None] | None = None
+        self._cancel_stale_check: Callable[[], None] | None = None
+        # Monotonic time of the last batch of readings, and the liveness we last
+        # told the entities about, so a transition is logged and pushed once
+        # rather than on every check.
+        self._last_frame: float | None = None
+        self._reported_live = True
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -84,13 +103,51 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         self.data = {}
         self._backend.start(self._on_schema, self._on_reading)
         self._cancel_grace = async_call_later(self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent)
+        self._cancel_stale_check = async_track_time_interval(
+            self.hass, self._check_staleness, STALE_CHECK_INTERVAL
+        )
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
         if self._cancel_grace is not None:
             self._cancel_grace()
             self._cancel_grace = None
+        if self._cancel_stale_check is not None:
+            self._cancel_stale_check()
+            self._cancel_stale_check = None
         await self.hass.async_add_executor_job(self._backend.stop)
+
+    # --- liveness ----------------------------------------------------------
+
+    @property
+    def stream_is_live(self) -> bool:
+        """False once the stream has been silent long enough to distrust the data.
+
+        Entities consult this in `available`, so a stalled stream shows as
+        unavailable rather than as fresh-looking numbers that stopped moving.
+        """
+        if self._last_frame is None:
+            return False
+        return (time.monotonic() - self._last_frame) < STALE_AFTER_SECONDS
+
+    @callback
+    def _check_staleness(self, _now) -> None:
+        """Push a liveness change out to the entities.
+
+        Only a transition does anything: `available` is a pull, but nothing polls
+        it, so entities keep advertising the old answer until something writes
+        state. Readings arriving take the other edge (see `_flush`).
+        """
+        if self.stream_is_live or not self._reported_live:
+            return
+        self._reported_live = False
+        _LOGGER.warning(
+            "No SPAN telemetry for %.0fs; marking entities unavailable rather than "
+            "leaving them on their last values. The backend reattaches on its own — "
+            "look for a cloud stream error above if this persists.",
+            STALE_AFTER_SECONDS,
+        )
+        self.async_update_listeners()
 
     @callback
     def _warn_if_silent(self, _now) -> None:
@@ -182,6 +239,10 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
             batch = self._buffer
             self._buffer = {}
             self._flush_scheduled = False
+        self._last_frame = time.monotonic()
+        if not self._reported_live:
+            self._reported_live = True
+            _LOGGER.info("SPAN telemetry resumed; entities are live again")
         data = dict(self.data or {})
         data.update(batch)
         self.async_set_updated_data(data)

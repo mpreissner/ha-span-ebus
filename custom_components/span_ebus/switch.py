@@ -86,7 +86,13 @@ class SpanRelaySwitch(CoordinatorEntity[SpanCloudCoordinator], SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self._key in (self.coordinator.data or {})
+        # Liveness gates the switch too: commanding a breaker off the back of a
+        # frozen relay state is worse than refusing while the stream is down.
+        return (
+            super().available
+            and self.coordinator.stream_is_live
+            and self._key in (self.coordinator.data or {})
+        )
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.coordinator.async_send_command(self._key, STATE_CLOSED)

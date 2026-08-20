@@ -80,3 +80,64 @@ def test_decode_message_data_skips_non_telemetry():
     assert a.decode_message_data("not json") is None
     assert a.decode_message_data(json.dumps({"data": 123})) is None
     assert a.decode_message_data(json.dumps({"data": "x", "encoding": "json"})) is None
+
+
+def test_halt_when_is_consulted_on_keepalives_not_only_on_messages():
+    # On a channel that has gone quiet, Ably's keepalive comments are the only
+    # traffic left. A stop-check consulted once per telemetry event could never
+    # fire there, which is exactly the state a liveness watchdog must escape.
+    calls = []
+
+    def stop():
+        calls.append(1)
+        return len(calls) >= 2
+
+    lines = iter([":keepalive", ":keepalive", "data: x", ""])
+    assert list(a.halt_when(lines, stop)) == [":keepalive"]
+
+
+def test_halt_when_passes_everything_through_without_a_stop():
+    assert list(a.halt_when(iter(["a", "b"]), None)) == ["a", "b"]
+
+
+def test_stream_frames_stops_mid_stream_when_asked():
+    payload = base64.b64encode(b"frame").decode()
+    body = "".join(f"event: message\ndata: {json.dumps({'data': payload})}\n\n" for _ in range(5))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body)
+
+    frames = []
+    a.stream_frames(
+        "tok",
+        "c:u:d",
+        frames.append,
+        stop=lambda: len(frames) >= 2,
+        client=_client(handler),
+    )
+    assert len(frames) == 2
+
+
+def test_stream_frames_applies_a_read_timeout_by_default():
+    # The bug this guards: with no read timeout, a half-open socket that delivers
+    # nothing and never errors blocks the stream thread forever, so the caller's
+    # reconnect loop never runs and every entity freezes on its last value.
+    assert a.DEFAULT_STREAM_TIMEOUT.read is not None
+    assert a.DEFAULT_STREAM_TIMEOUT.connect is not None
+
+
+def test_stream_frames_hands_that_timeout_to_the_client_it_owns(monkeypatch):
+    real_client = httpx.Client
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="")
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real_client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(httpx, "Client", spy)
+    a.stream_frames("tok", "c:u:d", lambda raw: None)
+
+    assert captured["timeout"] is a.DEFAULT_STREAM_TIMEOUT

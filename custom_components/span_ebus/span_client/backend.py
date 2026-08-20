@@ -162,6 +162,16 @@ RELAY_STATES = ("OPEN", "CLOSED", "UNKNOWN")
 # app or by the panel's own load management.
 SWITCH_REFRESH_SECONDS = 60.0
 
+# How long the channel may go without a telemetry frame before we tear the
+# stream down and start over. Frames arrive at ~1-2/sec, so this is a very long
+# silence; it is not for a slow panel but for the failure where the socket stays
+# healthy and Ably keeps sending keepalives while SPAN has simply stopped
+# publishing — a lapsed SubscribeAndGetTraits registration, typically. Nothing
+# about that state resolves on its own, and without a watchdog the entities sit
+# on their last values indefinitely, which reads as a panel at constant load
+# rather than as an outage.
+FRAME_SILENCE_SECONDS = 90.0
+
 # And again this soon after we send a command, so a relay the panel refused
 # (ALWAYS_ON_CIRCUIT, MINIMUM_RECONNECT_TIME) converges back to the truth
 # instead of sitting on our optimistic guess for a full refresh interval.
@@ -543,6 +553,11 @@ class CloudBackend:
         self._stop = threading.Event()
         self._schema_sent = False
         self._label_deadline = 0.0
+        # Monotonic time of the last decodable frame, and whether the silence
+        # watchdog is what ended the current stream (as opposed to stop() or an
+        # error) — only used to explain the reconnect in the log.
+        self._last_frame = 0.0
+        self._watchdog_tripped = False
         # Set to wake the snapshot-refresh loop before its timer is up.
         self._refresh_request = threading.Event()
         # Bumped on every (re)attach so a refresh loop left over from a previous
@@ -690,11 +705,31 @@ class CloudBackend:
 
     # --- network loop ------------------------------------------------------
 
+    def _stream_should_stop(self) -> bool:
+        """Stop-check for `stream_frames`, consulted once per line off the wire.
+
+        Ends the stream on shutdown, or when the channel has been silent past
+        `FRAME_SILENCE_SECONDS`. Returning True unwinds `stream_frames` normally,
+        so `_run` falls through to its reconnect wait and re-bootstraps — a fresh
+        Ably token and a fresh SubscribeAndGetTraits, which is what a lapsed
+        registration actually needs.
+        """
+        if self._stop.is_set():
+            return True
+        if time.monotonic() - self._last_frame < FRAME_SILENCE_SECONDS:
+            return False
+        self._watchdog_tripped = True
+        return True
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
                 token, channel = self.bootstrap()
                 log.info("attaching to Ably channel %s", channel)
+                # The watchdog measures from the attach, not from the last frame
+                # of the previous connection, so the reconnect gets a full budget.
+                self._last_frame = time.monotonic()
+                self._watchdog_tripped = False
                 # Registration is per-connection as far as we can tell, so it is
                 # re-issued on every (re)attach, from a helper thread because
                 # stream_frames blocks for the life of the stream.
@@ -703,8 +738,15 @@ class CloudBackend:
                     token,
                     channel,
                     self._handle_frame,
-                    stop=self._stop.is_set,
+                    stop=self._stream_should_stop,
                 )
+                if self._watchdog_tripped and not self._stop.is_set():
+                    log.warning(
+                        "no telemetry for %.0fs on a connection that never dropped; "
+                        "reattaching in %.0fs",
+                        FRAME_SILENCE_SECONDS,
+                        self._reconnect_seconds,
+                    )
             except Exception as exc:  # noqa: BLE001 — keep the daemon alive
                 if self._stop.is_set():
                     return
@@ -850,6 +892,10 @@ class CloudBackend:
         except Exception as exc:  # noqa: BLE001 — a bad frame must not kill the stream
             log.debug("undecodable telemetry frame (%d bytes): %s", len(raw), exc)
             return
+
+        # Liveness is "SPAN is publishing frames we understand", so this is set
+        # from a decoded frame rather than from raw bytes off the socket.
+        self._last_frame = time.monotonic()
 
         # The stream interleaves power frames (with circuits) and lean energy/
         # interval frames (empty of resources+flows). Hold the schema until a
