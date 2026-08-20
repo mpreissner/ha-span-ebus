@@ -92,4 +92,8 @@ class SpanSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self._key in (self.coordinator.data or {})
+        return (
+            super().available
+            and self.coordinator.stream_is_live
+            and self._key in (self.coordinator.data or {})
+        )

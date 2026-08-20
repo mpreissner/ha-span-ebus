@@ -142,6 +142,11 @@ POST rest.ably.io/keys/v8kFxw.VMjbuw/requestToken
 ```
 
 Token TTL is ~1 hour → the client must re-run AblyToken + requestToken on expiry.
+It does this by reconnecting rather than by watching the clock: every reattach in
+`CloudBackend._run` re-enters `bootstrap()`, which mints a fresh token and a fresh
+`SubscribeAndGetTraits`. `expires` is therefore recorded but not acted on — what
+matters is that the stream reliably *ends* when it stops being useful, which is
+what the two liveness guards in §3d exist to guarantee.
 
 ### 3c. Subscribe & receive — comet transport
 
@@ -200,6 +205,29 @@ Two findings the live run pinned down, both easy to get wrong:
 
 Live decode confirmed real values: site grid ≈ 4.0 kW, 29 circuits with per-circuit
 power (e.g. instance 54 ≈ 660 W), `site_id=<siteId>`.
+
+**Liveness — the two ways this stream dies quietly** (added 2026-08-20, after a
+stall that ran ~24h unnoticed). The reconnect loop only runs when `stream_frames`
+returns or raises, and neither of these does so on its own:
+
+1. *Dead socket, no FIN.* NAT eviction or an Ably node move leaves a half-open
+   TCP that delivers nothing and never errors, so reading it blocks forever.
+   Guard: `DEFAULT_STREAM_TIMEOUT` puts a 45s read budget on the connection. A
+   healthy stream is never silent that long — the `:keepalive` comments alone
+   reset the clock — so this only trips on a socket that is genuinely gone.
+2. *Live socket, no publisher.* The connection is fine and keepalives keep
+   arriving, but SPAN has stopped publishing (a lapsed registration, §3e). No
+   timeout fires, because bytes are still flowing. Guard: `FRAME_SILENCE_SECONDS`
+   — if no *decodable frame* arrives for 90s, the backend ends the stream itself
+   and re-bootstraps. The stop-check is consulted per SSE *line* rather than per
+   telemetry event, because on a quiet channel the keepalives are the only thing
+   left to consult it on.
+
+Downstream, `SpanCloudCoordinator.stream_is_live` gates entity availability:
+after `STALE_AFTER_SECONDS` of silence the entities go unavailable instead of
+advertising their last value. Without that, a stalled stream is indistinguishable
+from a panel at constant load, and the recorder writes the flat line into history
+as though it had been measured.
 
 ### 3e. SubscribeAndGetTraits — what actually starts the stream (live-validated 2026-08-17)
 

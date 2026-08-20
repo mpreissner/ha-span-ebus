@@ -39,6 +39,14 @@ log = logging.getLogger(__name__)
 ABLY_REST = "https://rest.ably.io"
 ABLY_SSE = "https://realtime.ably.io/sse"
 
+# A live SSE connection is never silent for long: Ably interleaves `:keepalive`
+# comment lines with the telemetry, so bytes keep arriving even on an idle
+# channel. A read timeout therefore only trips on a genuinely dead socket — the
+# half-open TCP that no FIN ever closed, after a NAT eviction or a node move —
+# which is otherwise invisible, because reading such a socket blocks forever and
+# the caller's reconnect loop never gets the exception it waits for.
+DEFAULT_STREAM_TIMEOUT = httpx.Timeout(connect=15.0, read=45.0, write=15.0, pool=15.0)
+
 # The public Ably app key-name SPAN's TokenRequests are signed against
 # (docs/CLOUD-FLOW.md). Only the key *name* is public; requests are signed
 # server-side by the AblyToken RPC, so no secret lives here.
@@ -131,6 +139,20 @@ def iter_sse_events(lines: Iterator[str]) -> Iterator[tuple[str, str]]:
             data_lines.append(value)
 
 
+def halt_when(lines: Iterator[str], stop: Callable[[], bool] | None) -> Iterator[str]:
+    """Pass `lines` through, ending the stream once `stop()` goes True.
+
+    The check is per *line*, not per telemetry event, and that distinction is the
+    point: on a channel that has gone quiet the keepalive comments are the only
+    traffic left, so a caller consulted only when a frame arrives can never be
+    woken from precisely the state a liveness watchdog needs to break out of.
+    """
+    for line in lines:
+        if stop is not None and stop():
+            return
+        yield line
+
+
 def decode_message_data(sse_data: str) -> bytes | None:
     """Extract the telemetry payload from one SSE `message` event's data.
 
@@ -166,13 +188,18 @@ def stream_frames(
     *,
     stop: Callable[[], bool] | None = None,
     client: httpx.Client | None = None,
-    timeout: float | None = None,
+    timeout: httpx.Timeout | float | None = None,
 ) -> None:
     """Subscribe to `channel` and invoke `on_frame(raw_bytes)` per telemetry frame.
 
-    Blocks until the stream ends, an error occurs, or `stop()` returns True.
-    Intended to run on a background thread (see backends.cloud). `timeout=None`
-    keeps the connection open indefinitely (SSE is long-lived).
+    Blocks until the stream ends, an error occurs, or `stop()` returns True —
+    the latter checked once per line received, so a caller can pull the plug on a
+    channel that is still connected but no longer publishing. Intended to run on
+    a background thread (see backends.cloud).
+
+    `timeout=None` applies `DEFAULT_STREAM_TIMEOUT`, whose read budget is what
+    turns a silently dead socket into an exception the caller can reconnect from.
+    Pass an explicit `httpx.Timeout(None)` to wait forever instead.
     """
     # `enveloped=true` is required: in the un-enveloped mode Ably's SSE endpoint
     # delivered no telemetry for this app key (empirically — see the live smoke).
@@ -185,15 +212,15 @@ def stream_frames(
         "v": "1.2",
     }
     owns = client is None
+    if timeout is None:
+        timeout = DEFAULT_STREAM_TIMEOUT
     client = client or httpx.Client(http2=True, timeout=timeout)
     try:
         with client.stream("GET", ABLY_SSE, params=params) as resp:
             if resp.status_code != 200:
                 body = resp.read().decode("utf-8", "replace")[:200]
                 raise AblyError(f"SSE subscribe failed (HTTP {resp.status_code}): {body}")
-            for event, data in iter_sse_events(resp.iter_lines()):
-                if stop is not None and stop():
-                    return
+            for event, data in iter_sse_events(halt_when(resp.iter_lines(), stop)):
                 if event != "message":
                     continue
                 frame = decode_message_data(data)
