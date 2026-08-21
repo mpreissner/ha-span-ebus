@@ -804,3 +804,64 @@ def test_a_decodable_frame_is_what_counts_as_liveness(monkeypatch, tmp_path):
     backend._handle_frame(b"garbage")
 
     assert backend._last_frame == 0.0
+
+
+def test_a_drop_after_live_telemetry_is_retried_promptly_and_quietly(caplog, tmp_path):
+    # The failure this exists for: Ably resets a long-lived SSE socket every so
+    # often, and the old loop called each one an ERROR. Twenty-five hours of that
+    # is 314 identical ERROR lines for a stream that healed itself every time.
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", reconnect_seconds=5.0)
+    backend._dead_attaches = 4  # a rough patch, now over
+
+    with caplog.at_level("INFO", logger=cloud.log.name):
+        delay = backend._note_attach_ended(delivered=True, reason="cloud stream error (reset)")
+
+    assert 4.0 <= delay <= 6.0
+    assert backend._dead_attaches == 0
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "WARNING")]
+
+
+def test_attaches_that_deliver_nothing_back_off_and_are_loud_exactly_once(caplog, tmp_path):
+    # A cloud-side outage must not become a re-auth storm, and must not bury the
+    # log either: one ERROR says it is down, the rest is INFO.
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", reconnect_seconds=5.0)
+
+    with caplog.at_level("INFO", logger=cloud.log.name):
+        delays = [
+            backend._note_attach_ended(delivered=False, reason="cloud stream error (refused)")
+            for _ in range(12)
+        ]
+
+    assert backend._dead_attaches == 12
+    # Geometric until the ceiling, then pinned there.
+    assert delays[0] <= delays[1] <= delays[2]
+    assert delays[-1] >= cloud.RECONNECT_BACKOFF_MAX_SECONDS * 0.8
+    assert all(d <= cloud.RECONNECT_BACKOFF_MAX_SECONDS for d in delays)
+    assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 1
+
+
+def test_a_silent_attach_counts_as_dead_however_healthy_the_socket_was(monkeypatch, tmp_path):
+    # An attach whose channel never published is a failure even though nothing
+    # raised — otherwise a lapsed registration retries at full speed forever.
+    monkeypatch.setattr(cloud, "FRAME_SILENCE_SECONDS", 0.05)
+    monkeypatch.setattr(cloud, "SUBSCRIBE_DELAY_SECONDS", 0.01)
+
+    def silent_stream(token, channel, on_frame, *, stop=None, **kw):
+        while not stop():
+            time.sleep(0.005)
+
+    monkeypatch.setattr(cloud.cloud_ably, "stream_frames", silent_stream)
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", reconnect_seconds=0.01)
+    monkeypatch.setattr(backend, "bootstrap", lambda: ("tok", "c:u:d"))
+    monkeypatch.setattr(backend, "subscribe", lambda channel: b"")
+
+    try:
+        backend.start(lambda schema: None, lambda reading: None)
+        deadline = time.time() + 5.0
+        while backend._dead_attaches < 2 and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        backend.stop(join_timeout=1.0)
+
+    assert backend._dead_attaches >= 2
