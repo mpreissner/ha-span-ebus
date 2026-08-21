@@ -223,6 +223,16 @@ returns or raises, and neither of these does so on its own:
    telemetry event, because on a quiet channel the keepalives are the only thing
    left to consult it on.
 
+**Topology is re-resolved after a dead attach** (added 2026-08-21, after a stall
+only a reload could clear). `bootstrap` caches the serial and hardware ids from
+the first `GetSitesForUser` and never asks again, so every reattach re-registers
+the *same* resource ids. Once those ids stop being the ones SPAN publishes for,
+`SubscribeAndGetTraits` is still accepted, the channel still attaches, and it
+stays silent — reattaching cannot fix it, and reloading the integration (a fresh
+`CloudBackend` with empty caches) was the only thing that did. An attach that
+delivered no telemetry now drops the cache so the next bootstrap re-reads it, and
+a changed id set is logged at WARNING naming both sets.
+
 **Reconnect policy** (added 2026-08-21, after 314 identical ERROR lines in 25h).
 Ably resets a long-lived SSE socket periodically — `[Errno 104] Connection reset
 by peer` off `stream_frames` — and the very next attach fixes it. So the retry is
