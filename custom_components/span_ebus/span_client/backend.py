@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -171,6 +172,20 @@ SWITCH_REFRESH_SECONDS = 60.0
 # on their last values indefinitely, which reads as a panel at constant load
 # rather than as an outage.
 FRAME_SILENCE_SECONDS = 90.0
+
+# A reattach that carried no telemetry doubles the wait, up to this ceiling. The
+# drop we actually see in the field is Ably resetting a long-lived SSE socket,
+# which the very next attach fixes — so the base wait stays short and only a run
+# of dead attaches backs off. The ceiling is what a cloud-side outage needs: a
+# fixed 5s retry re-runs Cognito, three gRPC calls and a token exchange twelve
+# times a minute for as long as the outage lasts, against a service that is
+# already refusing us.
+RECONNECT_BACKOFF_MAX_SECONDS = 300.0
+
+# Consecutive dead attaches before the reconnect is worth an ERROR. Below this it
+# is an ordinary drop and logs at INFO: an outage should read as one loud line in
+# the Home Assistant log, not as several hundred identical ones.
+LOUD_AFTER_ATTEMPTS = 3
 
 # And again this soon after we send a command, so a relay the panel refused
 # (ALWAYS_ON_CIRCUIT, MINIMUM_RECONNECT_TIME) converges back to the truth
@@ -558,6 +573,9 @@ class CloudBackend:
         # error) — only used to explain the reconnect in the log.
         self._last_frame = 0.0
         self._watchdog_tripped = False
+        # Consecutive attaches that delivered no telemetry; drives the backoff
+        # and decides how loudly the reconnect is logged.
+        self._dead_attaches = 0
         # Set to wake the snapshot-refresh loop before its timer is up.
         self._refresh_request = threading.Event()
         # Bumped on every (re)attach so a refresh loop left over from a previous
@@ -571,6 +589,7 @@ class CloudBackend:
         self._on_reading = on_reading
         self._stop.clear()
         self._schema_sent = False
+        self._dead_attaches = 0
         self._label_deadline = time.monotonic() + SCHEMA_LABEL_WAIT_SECONDS
         self._thread = threading.Thread(target=self._run, name="span-cloud", daemon=True)
         self._thread.start()
@@ -723,12 +742,13 @@ class CloudBackend:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            attached_at = time.monotonic()
             try:
                 token, channel = self.bootstrap()
                 log.info("attaching to Ably channel %s", channel)
                 # The watchdog measures from the attach, not from the last frame
                 # of the previous connection, so the reconnect gets a full budget.
-                self._last_frame = time.monotonic()
+                self._last_frame = attached_at = time.monotonic()
                 self._watchdog_tripped = False
                 # Registration is per-connection as far as we can tell, so it is
                 # re-issued on every (re)attach, from a helper thread because
@@ -740,25 +760,54 @@ class CloudBackend:
                     self._handle_frame,
                     stop=self._stream_should_stop,
                 )
-                if self._watchdog_tripped and not self._stop.is_set():
-                    log.warning(
-                        "no telemetry for %.0fs on a connection that never dropped; "
-                        "reattaching in %.0fs",
-                        FRAME_SILENCE_SECONDS,
-                        self._reconnect_seconds,
+                if self._watchdog_tripped:
+                    reason = (
+                        f"no telemetry for {FRAME_SILENCE_SECONDS:.0f}s on a "
+                        "connection that never dropped"
                     )
+                else:
+                    reason = "cloud stream closed"
             except Exception as exc:  # noqa: BLE001 — keep the daemon alive
-                if self._stop.is_set():
-                    return
-                log.error(
-                    "cloud stream error (%s); reconnecting in %.0fs",
-                    exc,
-                    self._reconnect_seconds,
-                )
+                reason = f"cloud stream error ({exc})"
             if self._stop.is_set():
                 return
+            # Frames arriving after the attach are the only proof the attempt was
+            # worth anything: bootstrap can succeed and the channel attach with a
+            # registration SPAN never honours.
+            delay = self._note_attach_ended(delivered=self._last_frame > attached_at, reason=reason)
             # Wait, but wake immediately on stop.
-            self._stop.wait(self._reconnect_seconds)
+            self._stop.wait(delay)
+
+    def _note_attach_ended(self, *, delivered: bool, reason: str) -> float:
+        """Log how the stream ended and return how long to wait before retrying.
+
+        A stream that carried telemetry clears the failure count however badly it
+        ended, so the common case — Ably resetting a long-lived SSE socket — is
+        still retried in `reconnect_seconds` and logged as the routine event it
+        is. Only a run of attaches that delivered nothing backs off and gets
+        loud, and it gets loud exactly once per outage rather than once per try.
+        """
+        self._dead_attaches = 0 if delivered else self._dead_attaches + 1
+        delay = self._reconnect_delay()
+        if self._dead_attaches == LOUD_AFTER_ATTEMPTS:
+            log.error(
+                "%s; %d attaches in a row carried no telemetry, retrying in %.0fs",
+                reason,
+                self._dead_attaches,
+                delay,
+            )
+        else:
+            log.info("%s; reattaching in %.0fs", reason, delay)
+        return delay
+
+    def _reconnect_delay(self) -> float:
+        """Seconds to wait before the next attach: geometric in the number of
+        consecutive dead attaches, jittered so a cloud-wide outage does not bring
+        every panel back in lockstep."""
+        steps = min(max(self._dead_attaches - 1, 0), 8)
+        delay = min(self._reconnect_seconds * 2.0**steps, RECONNECT_BACKOFF_MAX_SECONDS)
+        jitter = random.uniform(0.8, 1.2)  # noqa: S311 — spreading retries, not a secret
+        return min(delay * jitter, RECONNECT_BACKOFF_MAX_SECONDS)
 
     def bootstrap(self) -> tuple[str, str]:
         """Authenticate, resolve topology, and obtain an Ably token + channel."""
