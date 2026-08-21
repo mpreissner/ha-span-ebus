@@ -82,6 +82,31 @@ class CloudAuthError(RuntimeError):
     """Cognito authentication failed."""
 
 
+class CloudCredentialsRejected(CloudAuthError):
+    """The credentials themselves are no longer good, and retrying will not help.
+
+    Distinct from its parent because the two demand opposite responses. A plain
+    `CloudAuthError` can be a Cognito hiccup or a 5xx, and the right answer is to
+    wait and try again. This one means the stored refresh token has been revoked
+    or expired, or was never written — no amount of retrying produces a working
+    token, and the only cure is the user signing in again. Home Assistant has a
+    reauth flow for exactly that, so this is the exception that starts it.
+    """
+
+
+# Cognito `__type` values that mean the credential is dead rather than the
+# service being unhappy. Anything outside this set is treated as transient, so a
+# Cognito outage does not nag the user with a login prompt they cannot satisfy.
+TERMINAL_COGNITO_ERRORS = frozenset(
+    {
+        "NotAuthorizedException",
+        "UserNotFoundException",
+        "UserNotConfirmedException",
+        "PasswordResetRequiredException",
+    }
+)
+
+
 @dataclass(frozen=True)
 class CloudTokens:
     """JWTs returned by Cognito. `access_token` is the data-plane credential."""
@@ -224,13 +249,32 @@ def _cognito_call(target: str, body: dict) -> dict:
     if resp.status_code != 200:
         # Cognito reports failures as JSON with a __type; surface it plainly.
         detail = resp.text[:300]
+        kind = None
         try:
             err = resp.json()
+            kind = _error_type(err)
             detail = f"{err.get('__type', '?')}: {err.get('message', detail)}"
         except ValueError:
             pass
-        raise CloudAuthError(f"{target} failed ({resp.status_code}): {detail}")
+        message = f"{target} failed ({resp.status_code}): {detail}"
+        if kind in TERMINAL_COGNITO_ERRORS:
+            raise CloudCredentialsRejected(message)
+        raise CloudAuthError(message)
     return resp.json()
+
+
+def _error_type(err: dict) -> str | None:
+    """The bare exception name from Cognito's `__type`.
+
+    Cognito sometimes qualifies the name with a service prefix and sometimes does
+    not — `com.amazon.coral.service#NotAuthorizedException` and
+    `NotAuthorizedException` both occur — so the prefix is stripped before the
+    name is matched.
+    """
+    raw = err.get("__type")
+    if not isinstance(raw, str):
+        return None
+    return raw.rpartition("#")[2] or raw
 
 
 def _tokens_from_result(result: dict, refresh_token: str | None = None) -> CloudTokens:
@@ -366,20 +410,22 @@ def load_tokens(path: Path) -> CloudTokens | None:
 def access_token_from_store(path: Path) -> str:
     """Return a currently-valid access token, refreshing and re-saving if needed.
 
-    Raises `CloudAuthError` if the config entry never wrote a store, or if the
-    store holds no refresh token to renew with. Either way the entry needs to be
-    re-authenticated from Home Assistant.
+    Raises `CloudCredentialsRejected` if the config entry never wrote a store, if
+    the store holds no refresh token to renew with, or if Cognito refuses the one
+    it holds. Each of those needs the user to sign in again, and nothing else.
+    Transient failures raise `CloudAuthError` (or a `requests` error) instead, so
+    a caller can tell "try later" from "this will never work".
     """
     tokens = load_tokens(path)
     if tokens is None:
-        raise CloudAuthError(
+        raise CloudCredentialsRejected(
             f"no cloud credentials at {path}; re-authenticate the SPAN Panel (eBus) "
             "integration in Home Assistant"
         )
     if not tokens.expired:
         return tokens.access_token
     if not tokens.refresh_token:
-        raise CloudAuthError("cached access token expired and no refresh token is stored")
+        raise CloudCredentialsRejected("cached access token expired and no refresh token is stored")
     tokens = refresh(tokens.refresh_token)
     save_tokens(path, tokens)
     return tokens.access_token

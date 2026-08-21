@@ -83,6 +83,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
             device_uuid,
             user_id=user_id,
             serial=serial,
+            on_auth_failed=self._on_auth_failed,
         )
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
@@ -116,6 +117,25 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
             self._cancel_stale_check()
             self._cancel_stale_check = None
         await self.hass.async_add_executor_job(self._backend.stop)
+
+    # --- authentication ----------------------------------------------------
+
+    def _on_auth_failed(self, reason: str) -> None:
+        """Backend thread: the stored credentials are dead. Ask for new ones."""
+        self.hass.loop.call_soon_threadsafe(self._start_reauth, reason)
+
+    @callback
+    def _start_reauth(self, reason: str) -> None:
+        """Raise Home Assistant's "Reconfigure" prompt for this entry.
+
+        The backend keeps retrying in the background, so without this a revoked
+        refresh token is an integration that quietly never works again: the log
+        fills with auth errors and the UI shows nothing amiss. `async_start_reauth`
+        is a no-op when a flow is already open for the entry, so the latch in the
+        backend and this together mean exactly one prompt.
+        """
+        _LOGGER.debug("starting reauth flow for %s: %s", self.entry.title, reason)
+        self.entry.async_start_reauth(self.hass)
 
     # --- liveness ----------------------------------------------------------
 

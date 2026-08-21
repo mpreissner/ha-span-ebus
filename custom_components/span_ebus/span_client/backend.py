@@ -54,6 +54,9 @@ from .models import DataType, NodeKind, PanelSchema, PropertySpec, Reading
 # Backend callbacks (previously defined on the daemon's backend Protocol).
 ReadingCallback = Callable[[Reading], None]
 SchemaCallback = Callable[[PanelSchema], None]
+# Called, at most once per backend, when the stored credentials are rejected and
+# only the user can fix it. The argument is the reason, for the host to show.
+AuthFailedCallback = Callable[[str], None]
 
 log = logging.getLogger(__name__)
 
@@ -550,6 +553,7 @@ class CloudBackend:
         host: str = cloud_grpc.DEFAULT_HOST,
         key_name: str = cloud_ably.DEFAULT_KEY_NAME,
         reconnect_seconds: float = 5.0,
+        on_auth_failed: AuthFailedCallback | None = None,
     ) -> None:
         self._token_store = Path(token_store)
         self._device_uuid = device_uuid
@@ -558,6 +562,10 @@ class CloudBackend:
         self._host = host
         self._key_name = key_name
         self._reconnect_seconds = reconnect_seconds
+        self._on_auth_failed = on_auth_failed
+        # Latched once the credentials have been reported dead, so a retry loop
+        # that keeps hitting the same rejection asks the user exactly once.
+        self._auth_failure_reported = False
         self._hardware_ids: list[str] = []
         # What the last GetSitesForUser actually returned, kept past a cache drop
         # so a re-resolve can say whether the topology moved under us.
@@ -664,7 +672,7 @@ class CloudBackend:
             log.warning("unrecognized relay command %r for %s; ignoring", value, key)
             return
 
-        access_token = cloud_auth.access_token_from_store(self._token_store)
+        access_token = self._access_token()
         request = cloud_commands.build_switch_request(
             info.switch, closed, requester_id=self._requester_id(access_token)
         )
@@ -830,9 +838,41 @@ class CloudBackend:
         jitter = random.uniform(0.8, 1.2)  # noqa: S311 — spreading retries, not a secret
         return min(delay * jitter, RECONNECT_BACKOFF_MAX_SECONDS)
 
+    def _access_token(self) -> str:
+        """The current access token, reporting a dead credential on the way out.
+
+        Every network path goes through here so that a revoked refresh token is
+        announced wherever it is first noticed — the stream loop usually, but a
+        relay command just as well — instead of only from whichever one happens
+        to run first.
+        """
+        try:
+            return cloud_auth.access_token_from_store(self._token_store)
+        except cloud_auth.CloudCredentialsRejected as exc:
+            self._report_auth_failure(str(exc))
+            raise
+
+    def _report_auth_failure(self, reason: str) -> None:
+        """Tell the host once that only the user can fix this.
+
+        Latched: the stream loop keeps retrying afterwards (a revoked token is
+        indistinguishable from a revoked-then-restored one, and the retry costs
+        nothing at the backoff ceiling), but it must not raise a fresh prompt on
+        every attempt.
+        """
+        if self._auth_failure_reported:
+            return
+        self._auth_failure_reported = True
+        log.error("SPAN cloud credentials rejected (%s); re-authentication needed", reason)
+        if self._on_auth_failed is not None:
+            try:
+                self._on_auth_failed(reason)
+            except Exception:  # a bad host callback must not kill the stream thread
+                log.exception("on_auth_failed callback raised")
+
     def bootstrap(self) -> tuple[str, str]:
         """Authenticate, resolve topology, and obtain an Ably token + channel."""
-        access_token = cloud_auth.access_token_from_store(self._token_store)
+        access_token = self._access_token()
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
             if self._serial is None or not self._hardware_ids:
                 sites = grpc.get_sites_for_user()
@@ -952,7 +992,7 @@ class CloudBackend:
                 "GetSitesForUser returned no subscribable hardware ids",
                 "SubscribeAndGetTraits",
             )
-        access_token = cloud_auth.access_token_from_store(self._token_store)
+        access_token = self._access_token()
         request = build_subscribe_request(channel, self._hardware_ids)
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
             snapshot = grpc.subscribe_and_get_traits(request)

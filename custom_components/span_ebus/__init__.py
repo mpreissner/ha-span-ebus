@@ -10,6 +10,7 @@ from pathlib import Path
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from .const import (
     CONF_DEVICE_UUID,
@@ -37,6 +38,20 @@ def _write_token_file(path: Path, tokens: dict) -> None:
 async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
     token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
     await hass.async_add_executor_job(_write_token_file, token_path, entry.data[CONF_TOKENS])
+
+    # Prove the credentials before starting anything. Setup used to return True
+    # unconditionally, which meant a revoked refresh token looked like a healthy
+    # integration whose entities happened never to appear. This is free while the
+    # cached access token is still valid and one Cognito round-trip when it is
+    # not — the backend would have made that same call moments later anyway.
+    try:
+        await hass.async_add_executor_job(cloud_auth.access_token_from_store, token_path)
+    except cloud_auth.CloudCredentialsRejected as err:
+        raise ConfigEntryAuthFailed(str(err)) from err
+    except Exception as err:
+        # Cognito being unreachable or unhappy is not the user's problem to fix;
+        # let Home Assistant retry setup on its own schedule.
+        raise ConfigEntryNotReady(f"cannot reach SPAN cloud: {err}") from err
 
     coordinator = SpanCloudCoordinator(
         hass,
