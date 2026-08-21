@@ -223,6 +223,26 @@ returns or raises, and neither of these does so on its own:
    telemetry event, because on a quiet channel the keepalives are the only thing
    left to consult it on.
 
+**Reconnect policy** (added 2026-08-21, after 314 identical ERROR lines in 25h).
+Ably resets a long-lived SSE socket periodically — `[Errno 104] Connection reset
+by peer` off `stream_frames` — and the very next attach fixes it. So the retry is
+graded by whether the attach that just ended ever *delivered a frame*:
+
+- **Delivered telemetry** → routine drop. Retried after `reconnect_seconds` (5s)
+  and logged at INFO, however it ended.
+- **Delivered nothing** → counted. The wait doubles per consecutive dead attach
+  up to `RECONNECT_BACKOFF_MAX_SECONDS` (300s), jittered ±20% so a cloud-wide
+  outage doesn't bring every panel back in lockstep. Each attempt re-runs
+  Cognito, `GetSitesForUser`, `AblyToken`, the token exchange and
+  `SubscribeAndGetTraits`; at a fixed 5s that is twelve full re-auths a minute
+  against a service already refusing us. One ERROR is logged on the
+  `LOUD_AFTER_ATTEMPTS`th (3rd) consecutive dead attach and none after, so an
+  outage reads as one loud line rather than several hundred.
+
+Both liveness guards above end the stream by *returning* rather than raising, and
+a watchdog trip is a dead attach like any other — a channel that attaches but
+never publishes must back off too.
+
 Downstream, `SpanCloudCoordinator.stream_is_live` gates entity availability:
 after `STALE_AFTER_SECONDS` of silence the entities go unavailable instead of
 advertising their last value. Without that, a stalled stream is indistinguishable
