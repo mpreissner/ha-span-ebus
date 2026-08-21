@@ -176,11 +176,11 @@ FRAME_SILENCE_SECONDS = 90.0
 # A reattach that carried no telemetry doubles the wait, up to this ceiling. The
 # drop we actually see in the field is Ably resetting a long-lived SSE socket,
 # which the very next attach fixes — so the base wait stays short and only a run
-# of dead attaches backs off. The ceiling is what a cloud-side outage needs: a
-# fixed 5s retry re-runs Cognito, three gRPC calls and a token exchange twelve
-# times a minute for as long as the outage lasts, against a service that is
-# already refusing us.
-RECONNECT_BACKOFF_MAX_SECONDS = 300.0
+# of dead attaches backs off. The ceiling still cuts a cloud-side outage from
+# twelve full re-bootstraps a minute to one, but it has to stay *under* the
+# coordinator's STALE_AFTER_SECONDS: a ceiling longer than that means the panel
+# can be back while the entities are still unavailable, waiting on a timer.
+RECONNECT_BACKOFF_MAX_SECONDS = 60.0
 
 # Consecutive dead attaches before the reconnect is worth an ERROR. Below this it
 # is an ordinary drop and logs at INFO: an outage should read as one loud line in
@@ -559,6 +559,9 @@ class CloudBackend:
         self._key_name = key_name
         self._reconnect_seconds = reconnect_seconds
         self._hardware_ids: list[str] = []
+        # What the last GetSitesForUser actually returned, kept past a cache drop
+        # so a re-resolve can say whether the topology moved under us.
+        self._resolved_hardware_ids: list[str] = []
         # instance id -> circuit identity, from the subscribe snapshot.
         self._circuits: dict[int, CircuitInfo] = {}
 
@@ -787,7 +790,11 @@ class CloudBackend:
         is. Only a run of attaches that delivered nothing backs off and gets
         loud, and it gets loud exactly once per outage rather than once per try.
         """
-        self._dead_attaches = 0 if delivered else self._dead_attaches + 1
+        if delivered:
+            self._dead_attaches = 0
+        else:
+            self._dead_attaches += 1
+            self._forget_topology()
         delay = self._reconnect_delay()
         if self._dead_attaches == LOUD_AFTER_ATTEMPTS:
             log.error(
@@ -799,6 +806,20 @@ class CloudBackend:
         else:
             log.info("%s; reattaching in %.0fs", reason, delay)
         return delay
+
+    def _forget_topology(self) -> None:
+        """Drop the cached GetSitesForUser answer so the next bootstrap re-reads it.
+
+        `bootstrap` resolves the serial and hardware ids once and then keeps them
+        for the life of the backend, so every reattach re-registers the *same*
+        resource ids however stale they have become. When they stop being the ids
+        SPAN publishes for, `SubscribeAndGetTraits` is still accepted and the
+        channel is still silent, and no amount of reattaching fixes it — reloading
+        the integration was the only thing that did, because that builds a fresh
+        backend with empty caches. An attach that delivered nothing is exactly the
+        symptom, so re-resolve on one rather than making the user notice.
+        """
+        self._hardware_ids = []
 
     def _reconnect_delay(self) -> float:
         """Seconds to wait before the next attach: geometric in the number of
@@ -821,6 +842,19 @@ class CloudBackend:
                         log.info("resolved panel serial %s from GetSitesForUser", self._serial)
                 if not self._hardware_ids:
                     self._hardware_ids = parse_sites_hardware_ids(sites)
+                    if (
+                        self._resolved_hardware_ids
+                        and self._hardware_ids != self._resolved_hardware_ids
+                    ):
+                        # Worth a WARNING: this is the silent-channel cause, and
+                        # a line naming both sets is what proves it in the field.
+                        log.warning(
+                            "subscribable hardware ids changed (%s -> %s); the "
+                            "previous set is why the channel went quiet",
+                            self._resolved_hardware_ids,
+                            self._hardware_ids,
+                        )
+                    self._resolved_hardware_ids = self._hardware_ids
                     log.debug("subscribable hardware ids: %s", self._hardware_ids)
 
             request = field_string(1, self._device_uuid)

@@ -865,3 +865,79 @@ def test_a_silent_attach_counts_as_dead_however_healthy_the_socket_was(monkeypat
         backend.stop(join_timeout=1.0)
 
     assert backend._dead_attaches >= 2
+
+
+def test_an_attach_that_delivered_nothing_re_resolves_the_topology(tmp_path):
+    # The failure this exists for: bootstrap caches the hardware ids from the
+    # first GetSitesForUser and every later reattach re-subscribes those same
+    # ids. Once they go stale, SubscribeAndGetTraits keeps being accepted and the
+    # channel keeps being silent — reloading the integration was the only cure.
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid")
+    backend._hardware_ids = ["hw-old"]
+
+    backend._note_attach_ended(delivered=False, reason="no telemetry for 90s")
+
+    assert backend._hardware_ids == []
+
+
+def test_a_stream_that_carried_telemetry_keeps_its_topology(tmp_path):
+    # Re-resolving costs a gRPC round-trip on every reconnect; a stream that was
+    # working has no reason to pay it.
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid")
+    backend._hardware_ids = ["hw-1"]
+
+    backend._note_attach_ended(delivered=True, reason="cloud stream error (reset)")
+
+    assert backend._hardware_ids == ["hw-1"]
+
+
+def test_a_changed_hardware_id_set_is_reported(monkeypatch, caplog, tmp_path):
+    # The line that proves the diagnosis next time it happens.
+    ids = iter([["hw-old"], ["hw-new"]])
+
+    class FakeGrpc:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_sites_for_user(self):
+            return b"sites"
+
+        def ably_token(self, request):
+            return b"token"
+
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", lambda path: "at")
+    monkeypatch.setattr(cloud.cloud_grpc, "CloudGrpcClient", lambda *a, **kw: FakeGrpc())
+    monkeypatch.setattr(cloud, "parse_sites_hardware_ids", lambda sites: next(ids))
+    monkeypatch.setattr(cloud, "_parse_sites_serial", lambda sites: "SN-1")
+    monkeypatch.setattr(
+        cloud,
+        "parse_ably_token",
+        lambda raw, fallback_channel=None: cloud.AblyDirective(
+            token="tok", token_request=None, channel="c:u:d"
+        ),
+    )
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", user_id="u")
+    backend.bootstrap()
+    assert backend._hardware_ids == ["hw-old"]
+
+    # A dead attach drops the cache; the next bootstrap sees a different set.
+    backend._note_attach_ended(delivered=False, reason="no telemetry for 90s")
+    with caplog.at_level("WARNING", logger=cloud.log.name):
+        backend.bootstrap()
+
+    assert backend._hardware_ids == ["hw-new"]
+    assert "subscribable hardware ids changed" in caplog.text
+
+
+def test_the_backoff_ceiling_stays_under_the_staleness_threshold():
+    # A ceiling longer than the coordinator's STALE_AFTER_SECONDS means the panel
+    # can be back while the entities are still unavailable, waiting on our timer.
+    # Hard-coded rather than imported: the suite covers span_client, which does
+    # not depend on homeassistant. Keep in step with coordinator.py.
+    coordinator_stale_after_seconds = 180.0
+
+    assert coordinator_stale_after_seconds > cloud.RECONNECT_BACKOFF_MAX_SECONDS
