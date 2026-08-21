@@ -423,6 +423,18 @@ returns `buildings: null`; ignore it.
    (§4) — targeting the panel, signed with the **user id** from the token;
    state comes from re-reading the snapshot, not from the reply.
 5. **History**: `GetHistoryAggregation` for backfill / long-term stats.
+   Until that is wired, **energy is integrated locally** — the realtime channel
+   carries instantaneous power only, and HA's Energy dashboard measures in kWh,
+   so each watt property gets a trapezoidal Riemann sum alongside it
+   (`energy.EnergyAccumulator`). It sums only the positive part, so a signed flow
+   like site `grid` cannot run a `total_increasing` sensor backwards, and it
+   refuses to bridge a gap longer than the coordinator's staleness threshold
+   rather than invent energy for a window with no readings in it. The panel does
+   report real lifetime accumulators — `EnergyAccumulators`, 10⁻⁴ Wh, see
+   `CLOUD-PROTO.md` — inside the lean `EnergyMetric` frames the stream
+   interleaves (§3d); decoding those would replace the derivation with measured
+   totals, but needs a captured energy frame to pin the layout, which we do not
+   have.
 6. ~~**Blocker**: recover the telemetry `.proto`~~ — **resolved.** Schema recovered
    from the APK (see `docs/CLOUD-PROTO.md`) and live-confirmed; the cloud backend
    decodes circuits + site flows end-to-end.
