@@ -46,6 +46,25 @@ Returns a Cognito **access token** (JWT). That token is the `Bearer` credential
 for every `mobilefrontend.prd.span.io` gRPC call. No separate SPAN session token
 is minted for the data plane.
 
+**Which failures the user has to fix.** Cognito reports errors as JSON carrying a
+`__type`, sometimes bare and sometimes qualified
+(`com.amazon.coral.service#NotAuthorizedException`). Four of those mean the
+credential itself is finished — `NotAuthorizedException`,
+`UserNotFoundException`, `UserNotConfirmedException`,
+`PasswordResetRequiredException` — and `cloud_auth` raises
+`CloudCredentialsRejected` for them, as it does when the token store is missing
+or holds no refresh token. Everything else (5xx, throttling, an unreachable host)
+is a plain `CloudAuthError` and means *wait and retry*.
+
+The split exists because the two need opposite handling. The integration turns
+`CloudCredentialsRejected` into Home Assistant's reauth prompt — at setup by
+raising `ConfigEntryAuthFailed`, and at runtime through the backend's
+`on_auth_failed` callback into `entry.async_start_reauth`. A transient error must
+*not* do that: a Cognito outage would otherwise ask every install for a password
+that changes nothing. The backend latches the report so a retry loop hitting the
+same rejection raises exactly one prompt, and it keeps retrying underneath, since
+a revoked token and a revoked-then-restored one look identical until you try.
+
 ## 2. Data plane — gRPC over HTTP/2
 
 - Host: `mobilefrontend.prd.span.io` (resolves to the same ALB IPs as app-api)
@@ -407,7 +426,8 @@ returns `buildings: null`; ignore it.
 ## Implications for the cloud backend
 
 1. **Auth**: Cognito SRP (user logs in; we never store the password) → cache the
-   access token, refresh via Cognito refresh token.
+   access token, refresh via Cognito refresh token. A refusal that a new password
+   would fix (§1) starts HA's reauth flow instead of retrying forever.
 2. **Bootstrap**: `GetSitesForUser` once → siteId, panel resource UUID, serial,
    and the **hardware ids** needed to subscribe.
 3. **Realtime**: generate a device UUID locally (§3a) → `AblyToken` →
@@ -423,6 +443,18 @@ returns `buildings: null`; ignore it.
    (§4) — targeting the panel, signed with the **user id** from the token;
    state comes from re-reading the snapshot, not from the reply.
 5. **History**: `GetHistoryAggregation` for backfill / long-term stats.
+   Until that is wired, **energy is integrated locally** — the realtime channel
+   carries instantaneous power only, and HA's Energy dashboard measures in kWh,
+   so each watt property gets a trapezoidal Riemann sum alongside it
+   (`energy.EnergyAccumulator`). It sums only the positive part, so a signed flow
+   like site `grid` cannot run a `total_increasing` sensor backwards, and it
+   refuses to bridge a gap longer than the coordinator's staleness threshold
+   rather than invent energy for a window with no readings in it. The panel does
+   report real lifetime accumulators — `EnergyAccumulators`, 10⁻⁴ Wh, see
+   `CLOUD-PROTO.md` — inside the lean `EnergyMetric` frames the stream
+   interleaves (§3d); decoding those would replace the derivation with measured
+   totals, but needs a captured energy frame to pin the layout, which we do not
+   have.
 6. ~~**Blocker**: recover the telemetry `.proto`~~ — **resolved.** Schema recovered
    from the APK (see `docs/CLOUD-PROTO.md`) and live-confirmed; the cloud backend
    decodes circuits + site flows end-to-end.

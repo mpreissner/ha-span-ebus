@@ -941,3 +941,52 @@ def test_the_backoff_ceiling_stays_under_the_staleness_threshold():
     coordinator_stale_after_seconds = 180.0
 
     assert coordinator_stale_after_seconds > cloud.RECONNECT_BACKOFF_MAX_SECONDS
+
+
+def test_a_dead_credential_is_announced_once_however_often_it_is_hit(monkeypatch, tmp_path):
+    # The backend keeps retrying a rejected credential — a revoked token is
+    # indistinguishable from a restored one until you try — so the host must be
+    # told exactly once, or every retry raises another login prompt.
+    asked: list[str] = []
+
+    def reject(path):
+        raise cloud.cloud_auth.CloudCredentialsRejected("refresh token revoked")
+
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", reject)
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", on_auth_failed=asked.append)
+
+    for _ in range(3):
+        with pytest.raises(cloud.cloud_auth.CloudCredentialsRejected):
+            backend.bootstrap()
+
+    assert asked == ["refresh token revoked"]
+
+
+def test_a_transient_auth_failure_does_not_ask_the_user_to_log_in(monkeypatch, tmp_path):
+    # Cognito being unreachable or unhappy is not something a new password fixes.
+    def wobble(path):
+        raise cloud.cloud_auth.CloudAuthError("InitiateAuth failed (500): oops")
+
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", wobble)
+    asked: list[str] = []
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", on_auth_failed=asked.append)
+
+    with pytest.raises(cloud.cloud_auth.CloudAuthError):
+        backend.bootstrap()
+
+    assert asked == []
+
+
+def test_a_host_callback_that_raises_does_not_kill_the_stream_thread(monkeypatch, tmp_path):
+    def reject(path):
+        raise cloud.cloud_auth.CloudCredentialsRejected("gone")
+
+    def explode(reason):
+        raise RuntimeError("host is having a day")
+
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", reject)
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", on_auth_failed=explode)
+
+    # The credential error propagates; the callback's own failure does not.
+    with pytest.raises(cloud.cloud_auth.CloudCredentialsRejected):
+        backend.bootstrap()

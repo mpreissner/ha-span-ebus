@@ -8,7 +8,9 @@ without a real server.
 
 import base64
 import json
+import time
 
+import pytest
 from span_client import cloud_auth as ca
 
 
@@ -135,3 +137,64 @@ def test_a_token_without_a_usable_username_yields_none():
     # Malformed tokens must not raise on a path that runs during setup.
     assert ca.user_id_from_token(_access_token(None)) is None
     assert ca.user_id_from_token("") is None
+
+
+def _response(status: int, payload: dict):
+    class Fake:
+        status_code = status
+        text = json.dumps(payload)
+
+        def json(self):
+            return payload
+
+    return Fake()
+
+
+def test_a_revoked_credential_is_distinguished_from_a_sulking_cognito(monkeypatch):
+    # The whole point of the split: one of these needs the user, the other needs
+    # patience, and treating them alike means either a login prompt nobody can
+    # satisfy or an integration that silently never works again.
+    monkeypatch.setattr(
+        ca.requests,
+        "post",
+        lambda *a, **kw: _response(
+            400, {"__type": "NotAuthorizedException", "message": "Refresh Token has expired"}
+        ),
+    )
+    with pytest.raises(ca.CloudCredentialsRejected):
+        ca._cognito_call("InitiateAuth", {})
+
+    monkeypatch.setattr(
+        ca.requests,
+        "post",
+        lambda *a, **kw: _response(500, {"__type": "InternalErrorException", "message": "oops"}),
+    )
+    with pytest.raises(ca.CloudAuthError) as caught:
+        ca._cognito_call("InitiateAuth", {})
+    assert not isinstance(caught.value, ca.CloudCredentialsRejected)
+
+
+def test_a_service_qualified_error_type_still_matches():
+    # Cognito spells it both ways depending on the operation.
+    assert ca._error_type({"__type": "com.amazon.coral.service#NotAuthorizedException"}) in (
+        ca.TERMINAL_COGNITO_ERRORS
+    )
+    assert ca._error_type({"__type": "NotAuthorizedException"}) in ca.TERMINAL_COGNITO_ERRORS
+    assert ca._error_type({}) is None
+
+
+def test_a_store_that_cannot_produce_a_token_asks_for_the_user(tmp_path):
+    # No store at all, and a store whose refresh token is gone: both are dead
+    # ends that only a fresh sign-in clears.
+    with pytest.raises(ca.CloudCredentialsRejected):
+        ca.access_token_from_store(tmp_path / "absent.json")
+
+    path = tmp_path / "tokens.json"
+    ca.save_tokens(
+        path,
+        ca.CloudTokens(
+            access_token="at", id_token="it", refresh_token=None, expires_at=time.time() - 10
+        ),
+    )
+    with pytest.raises(ca.CloudCredentialsRejected):
+        ca.access_token_from_store(path)
