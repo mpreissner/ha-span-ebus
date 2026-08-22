@@ -310,9 +310,17 @@ The outermost frame is Ably-side push framing, decoded positionally:
 
 ```
 #1  header      { 1:ver 2:? 3:seq 4:? 5:? }
-#2  site block  { 1:{1: siteId "<siteId>"}  2:{1: revision} }
+#2  site block  { 1:{1: siteId "<siteId>"}  2:{1: site metric instance id} }
 #16 payload     { 3:{ 1:kind 2:{1: epoch_millis}  3: <resource-keyed trait tree> } }
 ```
 
 Inside the trait tree, each entry is `{ 1:{1: resourceId}  … metric messages … }`
 — decode the metric messages with the tables above.
+
+The site block's `2:{1: …}` was read as a revision counter at first. It is the
+**metric instance id the site's aggregate flows are metered under** (401 on the
+validated panel), and the envelope is the only place it appears — nothing else
+names it, and `GetHistoryAggregation` cannot be asked for the site's energy
+without it. Note that the lean `EnergyMetric` frames (§ above) carry a
+placeholder `1` here rather than the real instance, so it is only to be trusted
+from a frame that actually carries content.

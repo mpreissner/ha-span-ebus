@@ -9,6 +9,11 @@ build/
 .pytest_cache/
 .ruff_cache/
 
+# uv writes this on first `uv run`. CI installs with pip from pyproject.toml and
+# never reads it, and nothing here is published as a package, so a committed
+# lockfile would pin nothing that actually runs.
+uv.lock
+
 # Never commit panel credentials or certificates.
 .span-auth.json
 *.crt

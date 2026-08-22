@@ -45,11 +45,11 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import cloud_ably, cloud_auth, cloud_commands, cloud_grpc
+from . import cloud_ably, cloud_auth, cloud_commands, cloud_grpc, cloud_history
 from .cloud_pb import Message, ProtoError, field_message, field_string, field_varint, parse
 from .cloud_telemetry import CircuitSample, Frame, decode_frame
 from .cloud_traits import CircuitInfo, parse_trait_snapshot
-from .models import DataType, NodeKind, PanelSchema, PropertySpec, Reading
+from .models import DataType, EnergySample, NodeKind, PanelSchema, PropertySpec, Reading
 
 # Backend callbacks (previously defined on the daemon's backend Protocol).
 ReadingCallback = Callable[[Reading], None]
@@ -161,6 +161,9 @@ _SITE_HZ_FLOWS = {"frequency"}
 RELAY_PROPERTY = "relay"
 RELAY_STATES = ("OPEN", "CLOSED", "UNKNOWN")
 
+# The property a node's energy is the energy *of* — see `energy_samples`.
+POWER_PROPERTY = "power"
+
 # Relay state is absent from telemetry frames, so it is only as fresh as the last
 # trait snapshot. Re-read it on this cadence to pick up changes made in the SPAN
 # app or by the panel's own load management.
@@ -209,6 +212,12 @@ class AblyDirective:
     token_request: dict | None  # a signed Ably TokenRequest to exchange
     token: str | None  # or a ready-to-use token, if the RPC returned one
     channel: str | None
+
+
+# The node the site's aggregate flows are published under. Not a circuit and not
+# a resource of the panel's: one node carrying the whole site's directional
+# power, and — via GetHistoryAggregation — the whole site's energy.
+SITE_NODE = "site"
 
 
 # --- pure mapping -------------------------------------------------------------
@@ -360,7 +369,7 @@ def schema_from_frame(
         unit = "V" if flow in _SITE_VOLT_FLOWS else "Hz" if flow in _SITE_HZ_FLOWS else "W"
         schema.add(
             PropertySpec(
-                node_id="site",
+                node_id=SITE_NODE,
                 node_kind=NodeKind.POWER_FLOWS,
                 property_id=flow,
                 name=flow,
@@ -410,8 +419,89 @@ def readings_from_frame(
                 )
 
     for flow, value in frame.site_flows.items():
-        out.append(Reading(key=f"site/{flow}", value=_fmt(value), timestamp=ts))
+        out.append(Reading(key=f"{SITE_NODE}/{flow}", value=_fmt(value), timestamp=ts))
 
+    return out
+
+
+def energy_targets(
+    frame: Frame, circuits: dict[int, CircuitInfo] | None = None
+) -> dict[str, dict[int, str]]:
+    """Which metric instances to ask SPAN for energy on: resource -> instance -> node.
+
+    Built from a realtime frame because that is where the identifiers are: the
+    metering instance ids are the same ones the frame publishes power under, and
+    the site's own instance is named in the frame envelope and nowhere else.
+
+    Only nodes SPAN actually meters are listed. The panel's own metering block
+    and the main feed publish power but return nothing from the history RPC — an
+    unmetered instance is silently absent from the response rather than an error
+    — so they are left out here instead of asked for and quietly dropped.
+    """
+    circuits = circuits or {}
+    targets: dict[str, dict[int, str]] = {}
+    for resource_id, samples in frame.resources.items():
+        for sample in samples:
+            node_id, kind = _node_for(sample, circuits)
+            if kind is NodeKind.CIRCUIT:
+                targets.setdefault(resource_id, {})[sample.instance_id] = node_id
+    if frame.site_id and frame.site_instance_id and frame.site_flows:
+        targets.setdefault(frame.site_id, {})[frame.site_instance_id] = SITE_NODE
+    return targets
+
+
+def energy_samples(
+    series: Iterable[cloud_history.Series],
+    targets: dict[str, dict[int, str]],
+    flows: Iterable[str] = (),
+) -> list[EnergySample]:
+    """Turn history buckets into per-property energy, keyed like the power readings.
+
+    A circuit reports `import` and `export`; the sample carries the import,
+    which is what a consumption sensor means. The site reports eleven
+    directional components, mapped back onto the flow names the realtime channel
+    uses by `SITE_FLOW_ENERGY`, and narrowed to `flows` — the flows this panel
+    actually publishes — so a battery-less site does not accumulate a ledger of
+    zeroes.
+
+    A bucket carrying none of the components asked for yields nothing at all: an
+    idle circuit is simply absent from the response, and inventing a zero for it
+    would be inventing a measurement.
+    """
+    wanted = {
+        flow: components
+        for flow, components in cloud_history.SITE_FLOW_ENERGY.items()
+        if flow in set(flows)
+    }
+    out: list[EnergySample] = []
+    for one in series:
+        node_id = targets.get(one.resource_id, {}).get(one.instance_id)
+        if node_id is None:
+            continue
+        for bucket in one.buckets:
+            if node_id == SITE_NODE:
+                for flow, components in wanted.items():
+                    value = bucket.total(components)
+                    if value is not None:
+                        out.append(
+                            EnergySample(
+                                key=f"{SITE_NODE}/{flow}",
+                                start_ms=bucket.start_ms,
+                                end_ms=bucket.end_ms,
+                                kwh=value,
+                            )
+                        )
+                continue
+            value = bucket.total((cloud_history.IMPORT,))
+            if value is not None:
+                out.append(
+                    EnergySample(
+                        key=f"{node_id}/{POWER_PROPERTY}",
+                        start_ms=bucket.start_ms,
+                        end_ms=bucket.end_ms,
+                        kwh=value,
+                    )
+                )
     return out
 
 
@@ -572,6 +662,10 @@ class CloudBackend:
         self._resolved_hardware_ids: list[str] = []
         # instance id -> circuit identity, from the subscribe snapshot.
         self._circuits: dict[int, CircuitInfo] = {}
+        # What `fetch_energy` asks about, learned from the frames: resource ->
+        # instance -> node id, and the site flows this panel publishes.
+        self._energy_targets: dict[str, dict[int, str]] = {}
+        self._energy_flows: tuple[str, ...] = ()
 
         self._on_schema: SchemaCallback | None = None
         self._on_reading: ReadingCallback | None = None
@@ -685,6 +779,50 @@ class CloudBackend:
         self._circuits[info.instance_id] = replace(info, relay_closed=closed)
         self._emit_relay_reading(self._circuits[info.instance_id])
         self._request_refresh(POST_COMMAND_REFRESH_SECONDS)
+
+    def fetch_energy(
+        self, covered_through_ms: int = 0, *, time_zone: str = "UTC"
+    ) -> list[EnergySample]:
+        """Read SPAN's metered energy for everything this panel meters.
+
+        Blocking — one or two gRPC calls, ~18 kB and under a second for the live
+        window on a 40-space panel. `covered_through_ms` is the end of the last
+        interval the caller counted; a gap wider than the live window puts an
+        hourly backfill pass in front, and the results come back in the order
+        they must be applied (see `cloud_history.plan_windows`).
+
+        Returns nothing at all until a frame has named the metric instances,
+        which is the same condition that gates the entities existing.
+        """
+        targets = self._energy_targets
+        if not targets:
+            return []
+
+        now_ms = int(time.time() * 1000)
+        instances = {resource: list(nodes) for resource, nodes in targets.items()}
+        samples: list[EnergySample] = []
+        with cloud_grpc.CloudGrpcClient(self._access_token(), host=self._host) as grpc:
+            for resolution, start_ms, end_ms in cloud_history.plan_windows(
+                now_ms=now_ms, covered_through_ms=covered_through_ms
+            ):
+                request = cloud_history.build_request(
+                    instances,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    resolution=resolution,
+                    time_zone=time_zone,
+                )
+                raw = grpc.call(cloud_history.METHOD, request)
+                series = cloud_history.parse_response(raw)
+                log.debug(
+                    "energy: %s over %dm returned %d series (%d bytes)",
+                    resolution.name.lower(),
+                    (end_ms - start_ms) // 60_000,
+                    len(series),
+                    len(raw),
+                )
+                samples.extend(energy_samples(series, targets, self._energy_flows))
+        return samples
 
     def _requester_id(self, access_token: str) -> str:
         """Who a write says it is: this user's SPAN id.
@@ -1033,6 +1171,20 @@ class CloudBackend:
             serial = self._serial or "span-cloud"
             self._on_schema(schema_from_frame(serial, frame, self._circuits))
             self._schema_sent = True
+
+        # Only a content-bearing frame names the metering instances: the lean
+        # interval frames carry a different site instance and no circuits at all,
+        # so taking the identifiers from one would ask about the wrong things.
+        if frame.resources or frame.site_flows:
+            targets = energy_targets(frame, self._circuits)
+            if targets != self._energy_targets:
+                self._energy_targets = targets
+                log.debug(
+                    "energy targets: %s",
+                    {res: sorted(nodes) for res, nodes in targets.items()},
+                )
+            if frame.site_flows:
+                self._energy_flows = tuple(frame.site_flows)
 
         if self._on_reading is not None:
             ts = frame.epoch_millis / 1000.0 if frame.epoch_millis else None

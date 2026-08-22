@@ -19,7 +19,7 @@ from .const import (
     CONF_USER_ID,
     TOKEN_DIR,
 )
-from .coordinator import SpanCloudCoordinator
+from .coordinator import SpanCloudCoordinator, energy_store
 from .span_client import cloud_auth
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,6 +75,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> boo
         token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
         await hass.async_add_executor_job(_remove_quietly, token_path)
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> None:
+    """Drop the energy totals along with the entry that earned them.
+
+    Unloading keeps the store — that is a restart, and the totals are the point.
+    Deleting the entry means the panel is gone, and leaving the file behind would
+    resurrect stale kilowatt-hours if the same panel were ever set up again.
+    """
+    await energy_store(hass, entry.entry_id).async_remove()
 
 
 def _remove_quietly(path: Path) -> None:
