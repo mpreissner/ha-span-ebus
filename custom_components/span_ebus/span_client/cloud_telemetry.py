@@ -9,7 +9,7 @@ Frame layout (positional — the outer wrapper is Ably push framing, the inner
 tree is `io.span` metering traits):
 
     #1  header
-    #2  site block { 1:{1: siteId}  2:{1: revision} }
+    #2  site block { 1:{1: siteId}  2:{1: site metric instance id} }
     #16 push       { 3: { 1: kind  2:{1: epoch_millis}  3: <body> } }
 
     body { 2: site metric  { 2: SiteInstantPower }
@@ -150,6 +150,10 @@ class Frame:
 
     epoch_millis: int | None = None
     site_id: str | None = None
+    # The metric instance the site's aggregate flows are published under. Not
+    # needed to read the frame — the flows are right here — but it is the only
+    # place it is named, and asking SPAN for the site's *energy* requires it.
+    site_instance_id: int | None = None
     # resourceId -> per-circuit samples
     resources: dict[str, list[CircuitSample]] = field(default_factory=dict)
     # directional site flows, in watts (SiteInstantPower), keyed by flow name
@@ -291,6 +295,9 @@ def decode_frame(raw: bytes) -> Frame:
         inner = site_block.get_msg(1)
         if inner is not None:
             frame.site_id = inner.get_str(1)
+        instance = site_block.get_msg(2)
+        if instance is not None:
+            frame.site_instance_id = instance.get_uint(1)
 
     push = root.get_msg(16)
     if push is None:

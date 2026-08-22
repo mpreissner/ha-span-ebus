@@ -8,6 +8,7 @@ from dataclasses import replace
 
 import pytest
 from span_client import backend as cloud
+from span_client import cloud_history as history
 from span_client import cloud_pb as pb
 from span_client.cloud_commands import SwitchTarget
 from span_client.cloud_telemetry import Channel, CircuitSample, Frame
@@ -990,3 +991,91 @@ def test_a_host_callback_that_raises_does_not_kill_the_stream_thread(monkeypatch
     # The credential error propagates; the callback's own failure does not.
     with pytest.raises(cloud.cloud_auth.CloudCredentialsRejected):
         backend.bootstrap()
+
+
+# --- metered energy -----------------------------------------------------------
+
+
+def _series(resource_id, instance_id, buckets):
+    return history.Series(resource_id=resource_id, instance_id=instance_id, buckets=tuple(buckets))
+
+
+def _bucket(start_ms, end_ms, **values):
+    return history.Bucket(start_ms=start_ms, end_ms=end_ms, values=values, count=1)
+
+
+def test_energy_is_asked_for_only_where_span_meters_it():
+    # The panel block (instance 1) and the main feed (instance 2) publish power
+    # but are not metered; asking for them returns nothing at all, so they are
+    # left out rather than requested and silently dropped.
+    frame = replace(_frame(), site_instance_id=401)
+
+    targets = cloud.energy_targets(frame, _circuits())
+
+    assert targets == {"res1": {54: "circuit-54"}, "site1": {401: "site"}}
+
+
+def test_without_a_trait_snapshot_every_sample_is_taken_as_a_circuit():
+    # Same fallback as the schema: unlabelled instances are still branch
+    # circuits, and the unmetered ones just come back empty.
+    targets = cloud.energy_targets(_frame())
+
+    assert targets["res1"] == {54: "circuit-54", 2: "circuit-2"}
+
+
+def test_the_site_is_skipped_until_its_instance_id_is_known():
+    # Lean interval frames carry a placeholder site instance and no flows.
+    assert "site1" not in cloud.energy_targets(_frame(), _circuits())
+
+
+def test_circuit_buckets_become_energy_keyed_like_the_power_reading():
+    targets = {"res1": {54: "circuit-54"}}
+    series = [
+        _series("res1", 54, [_bucket(1000, 1900, **{"import": 0.25, "export": 0.0})]),
+    ]
+
+    (sample,) = cloud.energy_samples(series, targets)
+
+    assert (sample.key, sample.start_ms, sample.end_ms) == ("circuit-54/power", 1000, 1900)
+    assert sample.kwh == pytest.approx(0.25)
+
+
+def test_a_series_for_something_we_did_not_ask_about_is_ignored():
+    series = [_series("res1", 99, [_bucket(1000, 1900, **{"import": 0.25})])]
+
+    assert cloud.energy_samples(series, {"res1": {54: "circuit-54"}}) == []
+
+
+def test_site_buckets_become_one_sample_per_flow_the_panel_publishes():
+    targets = {"site1": {401: "site"}}
+    series = [
+        _series(
+            "site1",
+            401,
+            [_bucket(1000, 1900, grid_import=3.5, grid_export=0.1, home_import=3.2)],
+        )
+    ]
+
+    samples = cloud.energy_samples(series, targets, flows=("grid", "home"))
+
+    assert {s.key: s.kwh for s in samples} == {
+        "site/grid": pytest.approx(3.5),
+        "site/home": pytest.approx(3.2),
+    }
+
+
+def test_a_flow_the_panel_does_not_publish_gets_no_ledger_of_zeroes():
+    targets = {"site1": {401: "site"}}
+    series = [_series("site1", 401, [_bucket(1000, 1900, grid_import=3.5, battery_import=0.0)])]
+
+    samples = cloud.energy_samples(series, targets, flows=("grid",))
+
+    assert [s.key for s in samples] == ["site/grid"]
+
+
+def test_an_idle_interval_yields_no_sample_rather_than_a_zero():
+    # A circuit that drew nothing is simply absent from the response. Inventing
+    # a zero for it would be inventing a measurement.
+    series = [_series("res1", 54, [_bucket(1000, 1900, export=0.0)])]
+
+    assert cloud.energy_samples(series, {"res1": {54: "circuit-54"}}) == []

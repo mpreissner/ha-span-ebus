@@ -63,6 +63,23 @@ class PropertySpec:
 
 
 @dataclass(frozen=True)
+class EnergySample:
+    """Energy the panel metered over one interval, in kWh.
+
+    `key` is the power property this is the energy for (`circuit-36/power`,
+    `site/grid`), so the two travel together; `[start_ms, end_ms)` is the
+    interval SPAN aggregated over. The most recent interval is normally still
+    open, so the same bounds can come back with a larger `kwh` — see
+    `energy.EnergyLedger`, which is what turns these into a running total.
+    """
+
+    key: str
+    start_ms: int
+    end_ms: int
+    kwh: float
+
+
+@dataclass(frozen=True)
 class Reading:
     """A single property value observed at a point in time."""
 

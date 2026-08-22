@@ -1,16 +1,15 @@
 """Sensor platform — one entity per SPAN property, created as the schema arrives.
 
-Alongside each power reading sits a kWh **energy** sensor, integrated here rather
-than reported by the panel. SPAN's realtime channel carries instantaneous power
-only, and Home Assistant's Energy dashboard measures in kWh — so a panel full of
-working power sensors shows up under "Device power consumption" and is invisible
-under "Device energy consumption", which is what these close. See
-`SpanEnergySensor` for what that costs in accuracy.
+Alongside each metered power reading sits a kWh **energy** sensor. SPAN's
+realtime channel carries instantaneous power only, and Home Assistant's Energy
+dashboard measures in kWh — so a panel full of working power sensors shows up
+under "Device power consumption" and is invisible under "Device energy
+consumption", which is what these close. The kilowatt-hours are the panel's own,
+read back from SPAN's meters by the coordinator; see `SpanEnergySensor`.
 """
 
 from __future__ import annotations
 
-import contextlib
 import logging
 
 from homeassistant.components.sensor import (
@@ -33,22 +32,34 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SpanConfigEntry
 from .const import DOMAIN, MANUFACTURER, MODEL
-from .coordinator import STALE_AFTER_SECONDS, SpanCloudCoordinator
-from .energy import EnergyAccumulator
-from .span_client.models import PropertySpec
+from .coordinator import SpanCloudCoordinator
+from .span_client.backend import POWER_PROPERTY, SITE_NODE
+from .span_client.cloud_history import SITE_FLOW_ENERGY
+from .span_client.models import NodeKind, PropertySpec
 
 _LOGGER = logging.getLogger(__name__)
 
-# How long a gap in the stream may be before the energy sensors refuse to bridge
-# it. Tied to the coordinator's staleness threshold on purpose: past that the
-# entities went unavailable, and inventing energy for a window we have no
-# readings from would put a fabricated step into long-term statistics.
-MAX_INTEGRATION_GAP_SECONDS = STALE_AFTER_SECONDS
-
-# Decimal places an energy total is shown to, and — see
-# `SpanEnergySensor._handle_coordinator_update` — the granularity at which it is
-# written to the state machine at all. 0.001 kWh is one watt-hour.
+# Decimal places an energy total is shown to. 0.001 kWh is one watt-hour, which
+# is finer than SPAN's own app reports and about the granularity at which a
+# quarter-hour bucket moves on a lightly loaded circuit.
 ENERGY_PRECISION = 3
+
+
+def _is_metered(spec: PropertySpec) -> bool:
+    """Whether SPAN meters the energy behind this power reading.
+
+    Not everything that reports watts is metered. Branch circuits are, and the
+    site's directional flows are; the panel's own metering block and the main
+    feed are not — they publish power and return nothing at all from the history
+    RPC. Building energy entities for them would mean two permanently unknown
+    sensors on every panel, so they are left out. Their energy is the site's,
+    which is metered and does get an entity.
+    """
+    if spec.unit != "W":
+        return False
+    if spec.node_kind is NodeKind.CIRCUIT:
+        return spec.property_id == POWER_PROPERTY
+    return spec.node_id == SITE_NODE and spec.property_id in SITE_FLOW_ENERGY
 
 
 def _device_info(serial: str) -> DeviceInfo:
@@ -83,9 +94,9 @@ async def async_setup_entry(
         entities: list[SensorEntity] = []
         for spec in specs:
             entities.append(SpanSensor(coordinator, spec))
-            # Every watt reading earns a kWh companion, so anything that shows on
-            # a power graph can also be put on the Energy dashboard.
-            if spec.unit == "W":
+            # Everything SPAN meters earns a kWh companion, so what shows on a
+            # power graph can also go on the Energy dashboard.
+            if _is_metered(spec):
                 entities.append(SpanEnergySensor(coordinator, spec))
         async_add_entities(entities)
 
@@ -137,16 +148,19 @@ class SpanSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
         )
 
 
-class SpanEnergySensor(CoordinatorEntity[SpanCloudCoordinator], RestoreSensor):
-    """Energy consumed by one node, integrated from its power reading.
+class SpanEnergySensor(RestoreSensor):
+    """Energy metered by SPAN for one node, as a running total.
 
-    A Riemann sum over the frames as they arrive — see `EnergyAccumulator` for
-    the arithmetic and the two rules that keep it publishable as a
-    `total_increasing` sensor. At the ~1-2 Hz the stream runs at the granularity
-    is fine for a quantity that moves as slowly as a house's load, but it is
-    still a derived figure: it will not agree to the last watt-hour with SPAN's
-    own app, and it starts from zero on a fresh install rather than from the
-    panel's lifetime total.
+    The panel meters energy itself; the coordinator reads it back in intervals
+    and keeps the running total (see `energy.EnergyLedger`). This entity is the
+    view onto one key of that ledger, which is why it is not a
+    `CoordinatorEntity`: the readings it would be woken for arrive twice a
+    second and have nothing to do with a figure that moves once a minute.
+
+    Availability is simply "there is a total". A cumulative reading that has
+    stopped advancing is still true — unlike a power reading, which is why the
+    stream-liveness rule exists for those — and blinking these unavailable
+    during a cloud hiccup would tear a hole in long-term statistics.
     """
 
     _attr_has_entity_name = True
@@ -157,75 +171,44 @@ class SpanEnergySensor(CoordinatorEntity[SpanCloudCoordinator], RestoreSensor):
     _attr_suggested_display_precision = ENERGY_PRECISION
 
     def __init__(self, coordinator: SpanCloudCoordinator, spec: PropertySpec) -> None:
-        super().__init__(coordinator)
+        self._coordinator = coordinator
         self._key = spec.key
         serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
 
         node_label = spec.node_name or spec.node_id
         # "power" is the node's own reading, so "Kitchen energy" rather than
         # "Kitchen power energy"; the site's directional flows keep their name.
-        qualifier = "" if spec.property_id == "power" else f" {spec.property_id}"
+        qualifier = "" if spec.property_id == POWER_PROPERTY else f" {spec.property_id}"
         self._attr_name = f"{node_label}{qualifier} energy".replace("_", " ")
         self._attr_unique_id = f"{serial}_{spec.key}_energy"
         self._attr_device_info = _device_info(serial)
 
-        self._accumulator = EnergyAccumulator(MAX_INTEGRATION_GAP_SECONDS)
-        # What the state machine was last told, so an unchanged total is not
-        # rewritten. `None`/`False` guarantee the first update goes out.
-        self._written_value: float | None = None
-        self._written_available = False
-
     async def async_added_to_hass(self) -> None:
-        """Pick the total back up where the last run left it.
+        """Offer the ledger whatever total this entity was carrying, then follow it.
 
-        Without this every restart resets the meter, and a `total_increasing`
-        sensor dropping to zero is read as a meter reset — so the dashboard would
-        keep the history but start the daily total over mid-day, every time.
+        Before 0.1.13 the total lived here, integrated from the power stream.
+        Handing it over means an upgrade continues the same counter with measured
+        numbers instead of restarting it at zero; the ledger ignores the offer
+        once it has a total of its own, so this is a one-time handover and not a
+        rewind on every restart.
         """
         await super().async_added_to_hass()
         last = await self.async_get_last_sensor_data()
-        if last is None or last.native_value is None:
-            return
-        try:
-            self._accumulator.total_kwh = float(last.native_value)
-        except (TypeError, ValueError):
-            _LOGGER.debug(
-                "%s: ignoring unrestorable stored total %r", self.entity_id, last.native_value
-            )
-
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        reading = (self.coordinator.data or {}).get(self._key)
-        if reading is not None:
-            # A non-numeric reading on a watt property should not stop the entity
-            # writing state; it just contributes nothing to the total.
-            with contextlib.suppress(TypeError, ValueError):
-                self._accumulator.add(float(reading.value), reading.timestamp)
-
-        # The stream pushes one to two frames a second, and there are as many
-        # energy entities as power ones. Writing state on every frame would
-        # double the recorder's load in order to report that a total moved by a
-        # third of a milliwatt-hour, so state goes out when the figure actually
-        # changes at the precision it is shown to — roughly every two seconds on
-        # a 1 kW circuit, and almost never on an idle one. Availability is pushed
-        # the moment it flips, either way, since that is what takes the entity
-        # in and out of the dashboard.
-        value = round(self._accumulator.total_kwh, ENERGY_PRECISION)
-        available = self.available
-        if value == self._written_value and available == self._written_available:
-            return
-        self._written_value = value
-        self._written_available = available
-        super()._handle_coordinator_update()
+        if last is not None and last.native_value is not None:
+            try:
+                self._coordinator.adopt_energy_total(self._key, float(last.native_value))
+            except (TypeError, ValueError):
+                _LOGGER.debug(
+                    "%s: ignoring unrestorable stored total %r",
+                    self.entity_id,
+                    last.native_value,
+                )
+        self.async_on_remove(self._coordinator.async_add_energy_listener(self.async_write_ha_state))
 
     @property
-    def native_value(self) -> float:
-        return self._accumulator.total_kwh
+    def native_value(self) -> float | None:
+        return self._coordinator.energy_total(self._key)
 
     @property
     def available(self) -> bool:
-        return (
-            super().available
-            and self.coordinator.stream_is_live
-            and self._key in (self.coordinator.data or {})
-        )
+        return self.native_value is not None

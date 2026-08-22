@@ -95,8 +95,10 @@ def _site_flow(no, milliwatts):
 
 
 def build_frame() -> bytes:
-    # site block: #2 { #1 { #1 siteId } }
-    site_block = pb.field_message(1, pb.field_string(1, "site1234"))
+    # site block: #2 { #1 { #1 siteId }  #2 { #1 site metric instance id } }
+    site_block = pb.field_message(1, pb.field_string(1, "site1234")) + pb.field_message(
+        2, pb.field_varint(1, 401)
+    )
 
     # site metric: { #2: SiteInstantPower{ 1 grid, 2 home, 11 grid_to_home } }
     site_power = _site_flow(1, 2_033_284) + _site_flow(2, 1_980_500) + _site_flow(11, 2_033_284)
@@ -154,6 +156,13 @@ def test_decode_frame_top_level():
     assert f.site_id == "site1234"
     assert f.epoch_millis == 1786904129000
     assert set(f.resources) == {"res5678"}
+
+
+def test_the_site_metric_instance_is_read_from_the_envelope():
+    # The site's aggregate flows are metered under an instance of their own, and
+    # the envelope is the only place it is named — without it there is no way to
+    # ask the history RPC for the site's energy.
+    assert decode_frame(build_frame()).site_instance_id == 401
 
 
 def test_site_flows_scaled_to_watts():
@@ -248,3 +257,4 @@ def test_missing_subtrees_are_tolerated():
     assert f.site_id is None
     assert f.resources == {}
     assert f.site_flows == {}
+    assert f.site_instance_id is None
