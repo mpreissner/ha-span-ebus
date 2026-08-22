@@ -16,6 +16,7 @@ Reference: https://protobuf.dev/programming-guides/encoding/
 
 from __future__ import annotations
 
+import struct
 from collections.abc import Iterator
 
 # Wire types (the low 3 bits of a field tag).
@@ -100,6 +101,21 @@ class Message:
         if v is None or not isinstance(v[1], int):
             return None
         return v[1]
+
+    def get_double(self, no: int, default: float | None = None) -> float | None:
+        """A 64-bit field read as an IEEE-754 double.
+
+        Energy arrives this way: every kilowatt-hour figure in a
+        `BasicMeasurement` or `SiteMeasurement` is a `double`, which is the one
+        place SPAN's schema does not use scaled integers.
+        """
+        v = self._first(no)
+        if v is None:
+            return default
+        wire, value = v
+        if wire != WIRE_I64 or not isinstance(value, int):
+            raise ProtoError(f"field {no} is not a 64-bit value")
+        return struct.unpack("<d", value.to_bytes(8, "little"))[0]
 
     def get_sint(self, no: int, default: int | None = None) -> int | None:
         """A varint field carrying a zig-zag-encoded signed value (sint32/64)."""

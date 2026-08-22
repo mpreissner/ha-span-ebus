@@ -9,6 +9,7 @@ coalesce into a single `async_set_updated_data` per loop iteration.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -20,11 +21,13 @@ from pathlib import Path
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
+from .energy import EnergyLedger
 from .span_client.backend import CloudBackend
-from .span_client.models import PanelSchema, PropertySpec, Reading
+from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +47,22 @@ SCHEMA_GRACE_SECONDS = 60
 # reconnect, so an ordinary reattach does not blink every entity in the panel.
 STALE_AFTER_SECONDS = 180.0
 STALE_CHECK_INTERVAL = timedelta(seconds=30)
+
+# Energy is not pushed — it is read back from SPAN's own meters on a timer (see
+# `span_client.cloud_history`). A minute is fast enough that the Energy
+# dashboard moves while you watch it, and one poll costs ~18 kB against the
+# megabytes the realtime stream carries in the same minute.
+ENERGY_POLL_INTERVAL = timedelta(seconds=60)
+
+# The ledger is the entities' memory, so it has to survive a restart; it is also
+# rewritten every poll, so it is not written straight through to disk.
+ENERGY_STORE_VERSION = 1
+ENERGY_SAVE_DELAY_SECONDS = 30
+
+
+def energy_store(hass: HomeAssistant, entry_id: str) -> Store:
+    """The per-entry store holding the energy totals."""
+    return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{entry_id}.energy")
 
 
 @dataclass
@@ -97,15 +116,31 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         self._last_frame: float | None = None
         self._reported_live = True
 
+        # Measured energy: a running total per property key, its store, and the
+        # entities watching it. Energy has its own listener list because it moves
+        # once a minute while readings move twice a second — waking every power
+        # sensor in the panel to announce a kilowatt-hour would be pure noise.
+        self._ledger = EnergyLedger()
+        self._energy_store = energy_store(hass, entry.entry_id)
+        self._energy_listeners: list[Callable[[], None]] = []
+        self._cancel_energy_poll: Callable[[], None] | None = None
+        self._energy_failures = 0
+
     # --- lifecycle ---------------------------------------------------------
 
     async def async_start(self) -> None:
         """Start the backend thread. Non-blocking; frames arrive shortly after."""
         self.data = {}
+        self._ledger.load(await self._energy_store.async_load())
         self._backend.start(self._on_schema, self._on_reading)
         self._cancel_grace = async_call_later(self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent)
         self._cancel_stale_check = async_track_time_interval(
             self.hass, self._check_staleness, STALE_CHECK_INTERVAL
+        )
+        # The first poll only marks where the meters stand; it is the second one
+        # that adds anything, which is why nothing here polls immediately.
+        self._cancel_energy_poll = async_track_time_interval(
+            self.hass, self._poll_energy, ENERGY_POLL_INTERVAL
         )
 
     async def async_shutdown(self) -> None:
@@ -116,6 +151,13 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         if self._cancel_stale_check is not None:
             self._cancel_stale_check()
             self._cancel_stale_check = None
+        if self._cancel_energy_poll is not None:
+            self._cancel_energy_poll()
+            self._cancel_energy_poll = None
+        # Force the delayed save out: unloading an entry is not a Home Assistant
+        # stop, so nothing else will flush it, and a lost write means the totals
+        # restart from an old mark and re-count what came after it.
+        await self._energy_store.async_save(self._ledger.as_dict())
         await self.hass.async_add_executor_job(self._backend.stop)
 
     # --- authentication ----------------------------------------------------
@@ -201,6 +243,72 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         self._platforms.append(platform)
         if self.schema is not None:
             self._emit_to(platform, self.schema)
+
+    # --- measured energy ---------------------------------------------------
+
+    def energy_total(self, key: str) -> float | None:
+        """The running kWh for a power property, or None if never metered."""
+        return self._ledger.total(key)
+
+    @callback
+    def async_add_energy_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Subscribe to energy updates. Returns the unsubscribe callable."""
+        self._energy_listeners.append(listener)
+
+        @callback
+        def unsubscribe() -> None:
+            with contextlib.suppress(ValueError):
+                self._energy_listeners.remove(listener)
+
+        return unsubscribe
+
+    @callback
+    def adopt_energy_total(self, key: str, total_kwh: float) -> None:
+        """Carry a pre-measurement total forward, if the ledger has none.
+
+        Versions before 0.1.13 integrated energy from the power stream, and that
+        total lives in the entity's restored state rather than in the ledger.
+        Adopting it means the upgrade is invisible on the dashboard; ignoring it
+        would restart every meter at zero, and replacing it with SPAN's lifetime
+        figure would book the difference as one hour's consumption.
+        """
+        self._ledger.adopt(key, total_kwh)
+
+    async def _poll_energy(self, _now) -> None:
+        """Read the meters and advance the totals.
+
+        A failure here is a cloud hiccup, not a reason to disturb the entities:
+        they keep their last totals, which are still true — a cumulative figure
+        that has stopped advancing is not a lie the way a stale power reading is
+        — and the next poll picks the window back up from the same cursor.
+        """
+        try:
+            samples = await self.hass.async_add_executor_job(
+                self._fetch_energy, self._ledger.covered_through_ms
+            )
+        except Exception as err:  # noqa: BLE001 — one bad poll must not stop the timer
+            self._energy_failures += 1
+            # Once loudly, then quietly: a cloud outage should not fill the log
+            # with a line a minute.
+            log = _LOGGER.warning if self._energy_failures == 1 else _LOGGER.debug
+            log("could not read SPAN energy (attempt %d): %s", self._energy_failures, err)
+            return
+
+        if self._energy_failures:
+            _LOGGER.info("SPAN energy readings resumed after %d failures", self._energy_failures)
+            self._energy_failures = 0
+        if not samples or not self._ledger.apply(samples):
+            return
+
+        self._energy_store.async_delay_save(self._ledger.as_dict, ENERGY_SAVE_DELAY_SECONDS)
+        for listener in list(self._energy_listeners):
+            listener()
+
+    def _fetch_energy(self, covered_through_ms: int) -> list[EnergySample]:
+        """Executor thread: the blocking half of `_poll_energy`."""
+        return self._backend.fetch_energy(
+            covered_through_ms, time_zone=self.hass.config.time_zone or "UTC"
+        )
 
     # --- commands ----------------------------------------------------------
 
