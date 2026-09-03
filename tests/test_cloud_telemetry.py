@@ -94,7 +94,9 @@ def _site_flow(no, milliwatts):
     return pb.field_message(no, inner)
 
 
-def build_frame() -> bytes:
+def build_frame(extra_body: bytes = b"") -> bytes:
+    """The reference power frame. `extra_body` is spliced into the envelope body
+    ahead of the site metric, for tests that mix in a foreign frame shape."""
     # site block: #2 { #1 { #1 siteId }  #2 { #1 site metric instance id } }
     site_block = pb.field_message(1, pb.field_string(1, "site1234")) + pb.field_message(
         2, pb.field_varint(1, 401)
@@ -136,7 +138,7 @@ def build_frame() -> bytes:
     )
     resource_block = pb.field_message(1, pb.field_string(1, "res5678")) + samples
 
-    body = pb.field_message(2, site_metric) + pb.field_message(3, resource_block)
+    body = extra_body + pb.field_message(2, site_metric) + pb.field_message(3, resource_block)
     env = (
         pb.field_varint(1, 5)
         + pb.field_message(2, pb.field_varint(1, 1786904129000))
@@ -258,3 +260,39 @@ def test_missing_subtrees_are_tolerated():
     assert f.resources == {}
     assert f.site_flows == {}
     assert f.site_instance_id is None
+
+
+def test_an_interval_frame_subtree_does_not_discard_the_readings():
+    """SPAN interleaves other frame shapes on the same channel.
+
+    Live 76-byte interval frames put a bare varint in body slot #2 — the slot a
+    power frame fills with a `SiteInstantPower` — and another in slot #3. The
+    decoder probes those slots positionally, so before `get_msg_opt` the type
+    mismatch raised and `_handle_frame` dropped the *whole* frame. Here that
+    subtree rides along with a normal power frame: every reading must survive.
+    """
+    interval_metric = (
+        pb.field_varint(1, 8_806_198)
+        + pb.field_varint(2, 38_398)  # not a message — this is what used to raise
+        + pb.field_varint(5, 3_534_669)
+    )
+    good = decode_frame(build_frame())
+    spliced = decode_frame(build_frame(pb.field_message(2, interval_metric)))
+    assert spliced.resources == good.resources
+    assert spliced.site_flows == good.site_flows
+
+
+def test_a_frame_that_is_only_an_interval_subtree_decodes_empty():
+    """The standalone shape: no readings, but no exception either."""
+    body = pb.field_message(2, pb.field_varint(1, 8_806_198) + pb.field_varint(2, 38_398))
+    body += pb.field_varint(3, 59)  # slot #3 is a varint here, not a resource block
+    env = pb.field_varint(1, 1) + pb.field_message(2, pb.field_varint(1, 1788441492566))
+    env += pb.field_message(3, body)
+    raw = pb.field_message(
+        2, pb.field_message(1, pb.field_string(1, "site1234"))
+    ) + pb.field_message(16, pb.field_message(3, env))
+    f = decode_frame(raw)
+    assert f.site_id == "site1234"
+    assert f.resources == {}
+    assert f.site_flows == {}
+    assert f.epoch_millis == 1788441492566
