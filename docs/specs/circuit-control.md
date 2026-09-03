@@ -1,9 +1,12 @@
 # Spec — circuit control (relay on/off) over the SPAN cloud
 
-**Status:** implemented; the write path is accepted by the live service, and a
-toggle of a real breaker is the remaining check. Commands were validated against
-production by addressing trait instance 999 — an id no panel has — so the
-envelope, the auth and the requester are all proven without moving a relay.
+**Status:** implemented and **confirmed end-to-end**. The envelope, the auth and
+the requester were first proven against production by addressing trait instance
+999 — an id no panel has — so nothing could move a relay. On 2026-09-03 a real
+breaker was toggled from the SPAN app while capturing, which gave us both halves
+of the exchange for real: the request the app sends (§6) and the *response* it
+gets back (§7). Re-validated against SPAN's new React Native app; no change to
+what we send is required.
 **Scope:** turn a detected breaker on or off from Home Assistant, and report the
 relay's current state, using the same cloud path the mobile app uses.
 
@@ -134,12 +137,13 @@ status enum, and a `ticket_number` that `GetSwitchEventRequest` can poll:
 - `ReleaseDisconnectStatus`: 1 RECONNECTED, 2 ALREADY_RECONNECTED,
   3 OTHER_DISCONNECT_REASONS, 4 MINIMUM_DISCONNECT_TIME, 5 GRANTED_PENDING
 
-These arrive on the Ably **trait** channel keyed by `request_id`. Our reader only
-decodes telemetry push frames, so we do not see them. That is acceptable because
-the same information is observable in the trait snapshot (§3) — but it is why a
-rejected command (`ALWAYS_ON_CIRCUIT`, `MINIMUM_RECONNECT_TIME`) surfaces to the
-user as "the state snapped back" rather than as an error. Decoding the trait
-channel is future work.
+Recovered statically, this section assumed responses arrived on a separate Ably
+"trait" channel we do not subscribe to. **That was wrong** — see §7: they arrive
+on `c:<userId>:<deviceUUID>`, the same channel our telemetry reader is already
+attached to, keyed by `request_id`. We still do not *decode* them, so a rejected
+command (`ALWAYS_ON_CIRCUIT`, `MINIMUM_RECONNECT_TIME`) still surfaces to the user
+as "the state snapped back" rather than as an error — but the cost of fixing that
+is now a decoder branch, not a second subscription.
 
 ## 3. Where relay state comes from
 
@@ -204,3 +208,133 @@ Circuit control writes to a live electrical panel. Constraints held throughout:
   (never a feeder or a critical load), toggled off and back on.
 - No captured payload, resource id, serial, or real circuit label is committed;
   fixtures are synthesized with the protobuf writer.
+
+## 6. Live request, captured (2026-09-03)
+
+The 2026-09 SPAN app toggling a real breaker, decoded from the wire. This is the
+first capture of an actual relay command; everything before it was reconstructed
+from the app bundle and probed at instance 999. The shape in §2 holds exactly —
+`TraitMessage{1 trait_metadata, 2 instance_metadata, 14 command_request}`, 174
+bytes on the wire, `SendMessages` answering with a 5-byte empty frame (a bare
+gRPC length prefix and nothing else), which settles that the HTTP reply really is
+an ack with no `SendMessagesResponse` behind it.
+
+```
+#1  trait_metadata    { 1 vendor=1, 3 trait=31 }          ← 1/31, no product_id, NO VERSION
+#2  instance_metadata { 1 resource{1 "<panel-hardware-id>"}, 2 instance{1 33} }
+#14 command_request {
+      1 request_metadata { 2 resource{1 "c:<userId>:<deviceUUID>"}   ← requester
+                           3 request_id{1 "<uuid-v4>"}
+                           4 client_timeout_duration_msec = 43000 }
+      2 payload { 1 <6 bytes> }                            ← off: 0a 04 0a 02 18 05
+    }
+```
+
+Three cosmetic deltas from what we build, all confirmed immaterial by the probe
+below:
+
+| field | we send | new app sends |
+|---|---|---|
+| `TraitMetadata.version` (#4) | `1` | omitted |
+| `client_timeout_duration_msec` | `30000` | `43000` |
+| requester `resource_id` | bare `<userId>` | `c:<userId>:<deviceUUID>` |
+
+The third one is the interesting one, because it explains the error message. §2
+records the rejection as *"Requester X, does not contain `<userId>`"*, and reads
+it as "the resource you named does not contain the calling user". The app's form
+passes that check for the most literal reason available: the channel name
+**contains the user id as a substring**. A bare user id contains itself, so both
+forms pass. That is a containment test, not an identity test.
+
+### The re-run probe (2026-09-03)
+
+Same instance-999 technique, so no relay could move, now with negative controls —
+without them a run where everything passes proves only that the check is gone.
+
+| | requester | version / timeout | result |
+|---|---|---|---|
+| **A** | bare `<userId>` — *what we send today* | 1 / 30000 | `grpc-status=0` **accepted** |
+| **B** | `c:<userId>:<deviceUUID>` — *what the new app sends* | — / 43000 | `grpc-status=0` **accepted** |
+| **C** | bare `<userId>` | — / 43000 | `grpc-status=0` **accepted** |
+| **D** | panel hardware id — *negative control* | — / 43000 | `grpc-status=7` PERMISSION_DENIED |
+| **E** | the token's `sub` claim — *negative control* | — / 43000 | `grpc-status=7` PERMISSION_DENIED |
+
+Both controls were refused with the identical message shape recorded in August,
+so the check is still live and still discriminating; it simply accepts both
+forms, and neither the version field nor the timeout value affects acceptance.
+**`cloud_commands.py` needs no change.** E is worth keeping as a control
+specifically because `sub` is the plausible wrong answer — it is a real claim in
+the same token, and it fails.
+
+> **Methodology note, or you will misread your own results.** On **rejection**
+> the server sends a trailers-only response, putting `grpc-status` in the
+> *initial* headers where httpx can see it. On **success** the status arrives in
+> genuine HTTP/2 trailers, which httpx does not surface at all — so a passing
+> probe looks like an uninformative HTTP 200 with an empty body, exactly like a
+> probe that did nothing. The first run of this was read wrong for that reason.
+> Route probes through the local proxy (mitmproxy records trailers) or use a raw
+> h2 client. Failures need neither.
+
+## 7. Live response, captured (2026-09-03)
+
+The reply to each command arrives as another `TraitMessage` **on the telemetry
+channel** — `c:<userId>:<deviceUUID>`, the one our reader is already attached to
+— correcting the assumption in §2 that it needed a separate trait channel. It is
+distinguished from a request by the field number: **`#15 command_response`**
+where the request carried `#14 command_request`. `request_metadata` is echoed
+verbatim, so `request_id` is the correlation key, as the app's own table implies.
+
+```
+#1  trait_metadata    { 1 vendor=1, 3 trait=31 }
+#2  instance_metadata { 1 resource{1 "<panel-hardware-id>"}, 2 instance{1 33} }
+#15 command_response {
+      1 request_metadata { … echoed: requester, request_id, timeout … }
+      4 payload { 1 SwitchLoadManagementCommandResponses }
+    }
+```
+
+The payload is the `SwitchLoadManagementCommandResponses` from §2, and the two
+observed variants line up with its recovered field numbering:
+
+```
+off → 1 disconnect { 1 disconnect_reasons{3 control_source=5}
+                     2 switch_state=3 (CLOSED)
+                     3 status=5 (GRANTED_PENDING)
+                     4 ticket_number }
+
+on  → 2 release   { 2 switch_state=2 (OPEN)
+                    3 status=5 (GRANTED_PENDING)
+                    4 ticket_number }
+```
+
+Read that as: *request granted, relay has not moved yet* — `switch_state` is the
+state at the moment of the reply, which is still the pre-command one, and
+`GRANTED_PENDING` is the status in both enums' slot 5. `disconnect_reasons` is
+present on the disconnect and absent on the release, which is what "release the
+disconnect" should mean. It also confirms that a command is genuinely
+asynchronous: the ack, the response, and the relay actually moving are three
+separate events, which is why §3's snapshot re-read after a command exists.
+
+Caveats worth carrying: this is **one sample of each direction**, from a single
+successful toggle. The enum readings come from the bundle-recovered numbering,
+not from having seen a rejection — no `ALWAYS_ON_CIRCUIT` or
+`MINIMUM_RECONNECT_TIME` response has ever been captured, and the field
+assignment `2 = switch_state, 3 = status` is inference from exactly these two
+frames. Do not build error handling on it without capturing a real refusal.
+
+**Why we still do not consume it.** State comes from re-reading the snapshot
+(§3), which is a coarser but strictly more trustworthy source: it reports where
+the relay *is*, not where it was promised to go. Decoding `#15` would buy a
+faster and more specific failure message, and is now cheap enough to be worth
+doing — but it should wait for a capture of a rejected command, because a
+decoder written against two GRANTED_PENDING samples would be guessing at the
+exact cases it exists to report.
+
+## 8. Safety — as exercised
+
+The 2026-09 live toggle followed §5: a single benign circuit, agreed in advance,
+switched off and back on from SPAN's own app rather than by our code, with the
+capture running. The instance-999 probes carry no risk by construction — the
+panel has no instance 999, so the relay layer is never reached whatever the
+requester check decides. No captured payload, resource id, serial, or real
+circuit label is committed; every id above is a placeholder.
