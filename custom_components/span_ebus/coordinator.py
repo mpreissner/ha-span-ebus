@@ -2,9 +2,13 @@
 
 The backend streams telemetry on its own daemon thread and invokes our
 callbacks from there. Home Assistant is single-threaded asyncio, so every
-callback is marshaled onto the event loop with `call_soon_threadsafe`. Readings
-arrive at ~1-2 frames/sec with ~90 readings per frame, so we buffer them and
-coalesce into a single `async_set_updated_data` per loop iteration.
+callback is marshaled onto the event loop with `call_soon_threadsafe`. A frame
+carrying readings brings ~90 of them at once, so we buffer and coalesce into a
+single `async_set_updated_data` per loop iteration rather than waking HA ninety
+times. How often such a frame arrives is the panel's uplink talking — ~1-2/sec on
+ethernet, 1/min on cellular backup (CLOUD-FLOW.md §6) — so nothing here assumes a
+rate; the coalescing earns its place at the fast end and costs nothing at the
+slow one.
 """
 
 from __future__ import annotations
@@ -45,7 +49,18 @@ SCHEMA_GRACE_SECONDS = 60
 #
 # Comfortably longer than the backend's own FRAME_SILENCE_SECONDS watchdog plus a
 # reconnect, so an ordinary reattach does not blink every entity in the panel.
-STALE_AFTER_SECONDS = 180.0
+#
+# Sized against the *slowest* cadence we have measured, not the typical one. Only
+# frames carrying readings refresh this clock, and how often those arrive is set
+# by the panel's own uplink: ~1-2/sec on ethernet, but 1/min when the panel fails
+# over to cellular backup (measured 2026-09 — CLOUD-FLOW.md §6). At 60s intervals
+# the previous 180s was thinner than it looks, because the worst ordinary case is
+# a frame, then a dead socket (FRAME_SILENCE_SECONDS, 90s), then a reattach
+# (RECONNECT_BACKOFF_MAX_SECONDS, 60s), then a wait for the next publish (60s) —
+# 210s of honest silence, which would have blinked every entity in the panel. A
+# cellular failover is when the panel is most worth reading, so it is the last
+# moment to mark it unavailable.
+STALE_AFTER_SECONDS = 300.0
 STALE_CHECK_INTERVAL = timedelta(seconds=30)
 
 # Energy is not pushed — it is read back from SPAN's own meters on a timer (see

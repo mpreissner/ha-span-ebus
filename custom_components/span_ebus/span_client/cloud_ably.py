@@ -13,12 +13,17 @@ path is plain Ably REST/SSE (see docs/CLOUD-FLOW.md):
      understands.
 
 We use SSE (`enveloped=true`, so each event `data` is a JSON Ably Message envelope)
-rather than the app's comet long-poll: it is a single long-lived HTTP/2 GET, trivial
-to consume with `httpx.stream`, and needs no client-side connection state machine.
+rather than the transport the app happens to run: it is a single long-lived HTTP/2
+GET, trivial to consume with `httpx.stream`, and needs no client-side connection
+state machine. That independence has already paid off once — the app moved from
+comet long-poll to a v6 WebSocket on a different host in 2026-09 and the SSE
+endpoint we use was untouched.
 
 Attaching is not enough to get data: SPAN publishes to a channel only once the
 `SubscribeAndGetTraits` RPC has named it as a subscriber (see backends.cloud).
-After that, frames arrive at ~1-2/sec.
+After that, frames arrive every few seconds, but most are lean interval frames.
+How often one carries actual readings is set by the panel's uplink: ~1-2/sec on
+ethernet, about 1/min when it fails over to cellular (CLOUD-FLOW.md §6).
 
 The SSE *parsing* here is pure and unit-tested; the network calls are thin
 wrappers around it.
