@@ -60,3 +60,17 @@ def test_truncated_varint_raises():
     except pb.ProtoError:
         return
     raise AssertionError("expected ProtoError on truncated varint")
+
+
+def test_get_msg_opt_is_tolerant():
+    body = pb.field_varint(2, 38398) + pb.field_string(3, "plain text")
+    msg = pb.parse(body)
+    # A slot holding a varint, not a submessage: strict `get_msg` raises.
+    assert msg.get_msg_opt(2) is None
+    # A LEN slot whose bytes are a string, not a nested message.
+    assert msg.get_msg_opt(3) is None
+    assert msg.get_msg_opt(9) is None  # absent field
+    # A real submessage still comes back parsed.
+    nested = pb.parse(pb.field_message(1, pb.field_varint(4, 7))).get_msg_opt(1)
+    assert nested is not None
+    assert nested.get_uint(4) == 7

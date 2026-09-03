@@ -139,6 +139,27 @@ class Message:
         raw = self.get_bytes(no)
         return None if raw is None else parse(raw)
 
+    def get_msg_opt(self, no: int) -> Message | None:
+        """Return field `no` as a message only if it plausibly *is* one.
+
+        The tolerant sibling of `get_msg`, standing to it as `get_int_opt` does
+        to `get_uint`. A decoder walking a heuristic layout probes positional
+        slots it has not proven the type of, and SPAN publishes several frame
+        shapes through the same channel: the telemetry decoder's slot #2 holds a
+        nested `SiteInstantPower` in a power frame and a bare varint in the
+        interval frames interleaved with them. Raising there would discard the
+        whole frame — every circuit reading in it — over one unfamiliar subtree,
+        so a slot that is not length-delimited, or whose bytes are not valid
+        protobuf (a string field probed as a message), reads as absent instead.
+        """
+        v = self._first(no)
+        if v is None or not isinstance(v[1], bytes):
+            return None
+        try:
+            return parse(v[1])
+        except ProtoError:
+            return None
+
     def get_msgs(self, no: int) -> list[Message]:
         return [parse(v) for v in self.values(no) if isinstance(v, bytes)]
 

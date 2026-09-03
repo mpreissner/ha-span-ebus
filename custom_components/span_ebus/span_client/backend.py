@@ -170,8 +170,12 @@ POWER_PROPERTY = "power"
 SWITCH_REFRESH_SECONDS = 60.0
 
 # How long the channel may go without a telemetry frame before we tear the
-# stream down and start over. Frames arrive at ~1-2/sec, so this is a very long
-# silence; it is not for a slow panel but for the failure where the socket stays
+# stream down and start over. This counts *any* decodable frame, not just the
+# ones carrying readings, and that distinction is what keeps the budget honest: a
+# panel on cellular backup publishes readings only once a minute (CLOUD-FLOW.md
+# §6), but its lean interval frames still arrive every few seconds — longest gap
+# observed in that degraded state was ~40s, comfortably inside this window. So
+# this is not for a slow panel but for the failure where the socket stays
 # healthy and Ably keeps sending keepalives while SPAN has simply stopped
 # publishing — a lapsed SubscribeAndGetTraits registration, typically. Nothing
 # about that state resolves on its own, and without a watchdog the entities sit

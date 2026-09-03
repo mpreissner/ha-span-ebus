@@ -187,7 +187,7 @@ def _leaf_value(msg: Message | None, *, signed: bool = False) -> int | None:
         return None
     raw = msg.get_int_opt(3)
     if raw is None:
-        inner = msg.get_msg(2)
+        inner = msg.get_msg_opt(2)
         if inner is None:
             return 0
         raw = inner.get_int_opt(3) or 0
@@ -197,10 +197,10 @@ def _leaf_value(msg: Message | None, *, signed: bool = False) -> int | None:
 def _decode_single_channel(msg: Message) -> Channel:
     """SingleChannelMeterPower: 1 current, 2 voltage, 3 power, 4 frequency."""
     return Channel(
-        current_ma=_leaf_value(msg.get_msg(1)),
-        voltage_mv=_leaf_value(msg.get_msg(2)),
-        power_mw=_leaf_value(msg.get_msg(3), signed=True),
-        freq_mhz=_leaf_value(msg.get_msg(4)),
+        current_ma=_leaf_value(msg.get_msg_opt(1)),
+        voltage_mv=_leaf_value(msg.get_msg_opt(2)),
+        power_mw=_leaf_value(msg.get_msg_opt(3), signed=True),
+        freq_mhz=_leaf_value(msg.get_msg_opt(4)),
     )
 
 
@@ -208,7 +208,7 @@ def _decode_double_channel(
     msg: Message,
 ) -> tuple[Channel | None, Channel | None, Channel | None]:
     """DoubleChannelMeterPower: 1 line_an, 2 line_bn, 3 combined."""
-    an, bn, combined = msg.get_msg(1), msg.get_msg(2), msg.get_msg(3)
+    an, bn, combined = msg.get_msg_opt(1), msg.get_msg_opt(2), msg.get_msg_opt(3)
     return (
         _decode_single_channel(an) if an is not None else None,
         _decode_single_channel(bn) if bn is not None else None,
@@ -235,12 +235,12 @@ def _decode_panel(
     power value (~4 000 000) into the frequency slot and left panel current and
     voltage empty.
     """
-    meter = msg.get_msg(1)
+    meter = msg.get_msg_opt(1)
     if meter is None:
         return None, None, None
     an, bn, combined = _decode_double_channel(meter)
     if combined is not None:
-        combined.freq_mhz = _leaf_value(meter.get_msg(4))
+        combined.freq_mhz = _leaf_value(meter.get_msg_opt(4))
     return an, bn, combined
 
 
@@ -252,7 +252,7 @@ def _decode_instance(sample: Message) -> CircuitSample | None:
     quality = sample.get_uint(4)
 
     for tag, kind in _KIND_BY_TAG.items():
-        body = sample.get_msg(tag)
+        body = sample.get_msg_opt(tag)
         if body is None:
             continue
         cs = CircuitSample(instance_id=instance_id, kind=kind, quality_pct=quality)
@@ -268,7 +268,7 @@ def _decode_instance(sample: Message) -> CircuitSample | None:
 
 def _decode_site(site_metric: Message) -> dict[str, float]:
     """SiteInstantPower directional flows -> watts, keyed by flow name."""
-    power = site_metric.get_msg(2)
+    power = site_metric.get_msg_opt(2)
     if power is None:
         return {}
     flows: dict[str, float] = {}
@@ -276,7 +276,7 @@ def _decode_site(site_metric: Message) -> dict[str, float]:
         # 51/52 are millivolts, 53 is millihertz — unsigned. Every other flow is
         # a power in milliwatts, and so a zig-zagged sint32: `grid` in particular
         # goes negative whenever the site exports.
-        val = _leaf_value(power.get_msg(no), signed=no not in _UNSIGNED_SITE_FLOWS)
+        val = _leaf_value(power.get_msg_opt(no), signed=no not in _UNSIGNED_SITE_FLOWS)
         if val is not None:
             flows[name] = val / 1000.0
     return flows
@@ -290,27 +290,27 @@ def decode_frame(raw: bytes) -> Frame:
     frame = Frame()
     root = parse(raw)
 
-    site_block = root.get_msg(2)
+    site_block = root.get_msg_opt(2)
     if site_block is not None:
-        inner = site_block.get_msg(1)
+        inner = site_block.get_msg_opt(1)
         if inner is not None:
             frame.site_id = inner.get_str(1)
-        instance = site_block.get_msg(2)
+        instance = site_block.get_msg_opt(2)
         if instance is not None:
             frame.site_instance_id = instance.get_uint(1)
 
-    push = root.get_msg(16)
+    push = root.get_msg_opt(16)
     if push is None:
         return frame
-    env = push.get_msg(3)
+    env = push.get_msg_opt(3)
     if env is None:
         return frame
 
-    ts = env.get_msg(2)
+    ts = env.get_msg_opt(2)
     if ts is not None:
         frame.epoch_millis = ts.get_uint(1)
 
-    body = env.get_msg(3)
+    body = env.get_msg_opt(3)
     if body is None:
         return frame
 
@@ -320,7 +320,7 @@ def decode_frame(raw: bytes) -> Frame:
 
     # body #3: resource block(s), each { 1:{1: resourceId}, 2*: sample }
     for block in body.get_msgs(3):
-        rid_msg = block.get_msg(1)
+        rid_msg = block.get_msg_opt(1)
         resource_id = rid_msg.get_str(1) if rid_msg else None
         if not resource_id:
             resource_id = ""
