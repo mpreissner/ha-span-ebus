@@ -5,6 +5,16 @@ Recorded 2026-08-16 by decrypting the **live iOS SPAN app** through mitmproxy
 needed, unlike Android). These are empirical results captured from real traffic,
 with all live tokens redacted.
 
+**Re-validated 2026-09-03** against SPAN's *new* iOS app — a React Native/Expo
+rewrite shipped for Gen3 panels — captured the same way. Everything below still
+holds; the deltas are marked **(2026-09)** and summarized in §6. The short version
+is that the app changed a great deal and the service barely changed at all: same
+gRPC data plane, same RPC names, same wire shapes, same Ably channel. One thing
+that does matter to us: a **second Cognito app client** (§1). The capture also
+turned up something unrelated to the app — the reading cadence is set by the
+**panel's own uplink**, and varies by ~100× between ethernet and cellular backup
+(§6) — plus a decoder bug that the degraded cadence made visible.
+
 This is the cloud data plane the HACS integration's **cloud backend** will target
 until SPAN ships the local MAIN 40 API (~H2 2026), at which point the ebus/local
 backend takes over.
@@ -12,7 +22,7 @@ backend takes over.
 ## TL;DR — the whole path
 
 ```
-cognito-idp-fips.us-west-2.amazonaws.com        → auth (Cognito SRP) → access token
+cognito-idp[-fips].us-west-2.amazonaws.com      → auth (Cognito SRP) → access token
 app-api.prod.span-csp.com/graphql               → app config / 3rd-party keys only (NOT panel data)
 mobilefrontend.prd.span.io                      → gRPC data plane (Bearer = Cognito access token)
     io.span.services.mobilefrontend.MobileFrontendService/
@@ -22,9 +32,12 @@ mobilefrontend.prd.span.io                      → gRPC data plane (Bearer = Co
         ├─ SubscribeAndGetTraits      → REQUIRED: registers the channel; + trait snapshot
         ├─ GetHistoryAggregation      → historical energy
         ├─ ListDispatches             → schedules / dispatches
-        └─ SendMessages               → the ONLY write: trait commands, e.g. a breaker toggle
+        ├─ SendMessages               → the ONLY write: trait commands, e.g. a breaker toggle
+        └─ (2026-09, app-only, unused by us) GetMonthlyCostAggregation,
+           GetRatePlanForResource, ListDismissedOnboardingInsights
 rest.ably.io/keys/v8kFxw.VMjbuw/requestToken    → exchange TokenRequest → real Ably token
-rest.ably.io/comet/connect + /{conn}/recv       → LIVE realtime power stream (base64 protobuf)
+realtime.ably.io/sse?enveloped=true             → LIVE realtime power stream (base64 protobuf)
+    (the app's own transport is comet, now a WebSocket — §3c; ours has always been SSE — §3d)
 ```
 
 > **`omni.prod.span-csp.com` is a red herring.** It appears only in static
@@ -37,10 +50,19 @@ rest.ably.io/comet/connect + /{conn}/recv       → LIVE realtime power stream (
 
 | Field | Value |
 |---|---|
-| Host | `cognito-idp-fips.us-west-2.amazonaws.com` |
-| User Pool | `us-west-2_xqz9y67ID` |
-| App Client | `21vd907gimk5ctc0pop94l2lip` |
+| Host | `cognito-idp-fips.us-west-2.amazonaws.com` (old app) · `cognito-idp.us-west-2.amazonaws.com` (new app, 2026-09) |
+| User Pool | `us-west-2_xqz9y67ID` (unchanged) |
+| App Client | `21vd907gimk5ctc0pop94l2lip` (old app) · `2jg9o27sqem86195bjg6qsshts` (new app, 2026-09) |
 | Flow | SRP (`USER_SRP_AUTH` → `PASSWORD_VERIFIER`) |
+
+**All four host × client-id combinations still authenticate** (probed 2026-09-03),
+so the integration's existing `CLIENT_ID`/`COGNITO_HOST` need no change. That probe
+is only meaningful because of how this pool is configured: it has
+prevent-user-existence-errors **on**, so a bogus username against a *valid* client
+id still returns a `PASSWORD_VERIFIER` challenge, while an *invalid* client id
+returns `ResourceNotFoundException` regardless of the username. Four challenges
+back therefore means four working client ids, not four unknown usernames — and the
+FIPS and non-FIPS Cognito endpoints front the same pool.
 
 Returns a Cognito **access token** (JWT). That token is the `Bearer` credential
 for every `mobilefrontend.prd.span.io` gRPC call. No separate SPAN session token
@@ -167,15 +189,33 @@ It does this by reconnecting rather than by watching the clock: every reattach i
 matters is that the stream reliably *ends* when it stops being useful, which is
 what the two liveness guards in §3d exist to guarantee.
 
-### 3c. Subscribe & receive — comet transport
+### 3c. Subscribe & receive — the app's transport (historical)
 
-The iOS app uses Ably's **comet** (HTTP long-poll) transport, not websockets:
+*This section describes what the **app** does, and is kept because it is what the
+original recon found. It is not what we do — see §3d. The app changed transports
+in 2026-09 and it cost us nothing, which is the point.*
+
+The 2026-08 iOS app used Ably's **comet** (HTTP long-poll) transport:
 
 ```
 rest.ably.io/comet/connect              → open connection, get {connId}
 rest.ably.io/comet/{connId}/recv        → long-poll for messages
 rest.ably.io/comet/{connId}/send        → outbound (subscribe/heartbeat)
 ```
+
+**(2026-09)** The rewritten app dropped comet for a **WebSocket**, on a different
+host and a newer protocol version:
+
+```
+wss://main.realtime.ably.net/?v=6&...       ← new app
+rest.ably.io/comet/...                      ← old app
+```
+
+What did *not* change: the channel name, the Ably app key the token is signed
+against, and the `action: 15` message envelope carrying base64 protobuf. The frames
+on the WebSocket decode with our existing decoder, unmodified. Because we never
+implemented comet — we use Ably's SSE endpoint (§3d), a third transport onto the
+same channel — this migration required no work on our side at all.
 
 Subscribed channel: `c:<userId>:<deviceUUID>`.
 
@@ -189,7 +229,8 @@ Telemetry arrives as Ably protocol messages (`action: 15`) carrying:
 }
 ```
 
-- ~1–2 frames/sec.
+- ~1–2 frames/sec **as recorded in 2026-08**; readings now arrive once a minute
+  (§6).
 - `data` is base64 → **protobuf**. Frames are keyed by siteId
   (`<siteId>` observed inside decoded payloads).
 
@@ -208,7 +249,7 @@ Two findings the live run pinned down, both easy to get wrong:
   endpoint delivered *no* telemetry (only `:keepalive` + an `id:` line, then
   idle). With `enveloped=true`, each SSE `message` event's `data` is a JSON Ably
   Message (`{action:0, name:"message", encoding:"base64", data:"<b64 protobuf>", …}`)
-  and frames flow immediately at ~1–2/sec.
+  and frames flow immediately (at the cadence §6 describes).
 - **Attaching alone gets you nothing** — `SubscribeAndGetTraits` (§3e) is
   required. An earlier revision of this document claimed the stream was
   "occupancy-triggered", i.e. that merely attaching made SPAN start publishing.
@@ -423,6 +464,116 @@ configuration and third-party integration keys** (Customer.io, Zendesk, Segment)
 It does **not** return panel/energy data. The deprecated `GetUserBuildings` query
 returns `buildings: null`; ignore it.
 
+## 6. The 2026-09 app rewrite — what changed, and what it cost us
+
+SPAN shipped a new iOS app, reportedly aimed at the newer panel generations.
+Re-run of the same mitmproxy method (still no certificate pinning) against a
+MAIN 40 / Gen3 account. Captured from a whole-phone proxy, so only hosts that
+interleave with SPAN's own calls are attributed to the app below.
+
+**The app is a React Native / Expo rewrite.** The Ably WebSocket announces itself
+as `agent=ably-js/2.26.0 reactnative`, and the old app's Hermes-bundle layout —
+what `tools/extract_proto.py` mines for message schemas — is gone. That tool
+still describes how the *old* bundle stored protobuf-es descriptors; nothing in
+this document was re-derived from a new bundle, because nothing needed to be.
+
+| Surface | 2026-08 (old app) | 2026-09 (new app) | Affects us? |
+|---|---|---|---|
+| Cognito host | `cognito-idp-fips.…` | `cognito-idp.…` (non-FIPS) | No — both work (§1) |
+| Cognito app client | `21vd907gimk5ctc0pop94l2lip` | `2jg9o27sqem86195bjg6qsshts` | No — both work (§1) |
+| gRPC data plane | `mobilefrontend.prd.span.io` | unchanged | No |
+| RPC names / wire shapes | see TL;DR | unchanged, plus three new (below) | No |
+| Ably channel | `c:<userId>:<deviceUUID>` | unchanged | No |
+| Ably transport | comet long-poll on `rest.ably.io` | WebSocket on `main.realtime.ably.net`, `v=6`, `format=json`, `heartbeats=true`, with `resume=` for session continuation | No — we use SSE (§3d) |
+| Telemetry envelope | `action:15`, base64 protobuf | unchanged — decodes with our existing decoder | No |
+| Side traffic | — | `events.launchdarkly.com` / `mobile.launchdarkly.com` (feature flags), `app-api.prod.span-csp.com/monitor/ping` | No |
+
+Three RPCs appear that the 2026-08 capture did not show:
+`GetMonthlyCostAggregation`, `GetRatePlanForResource`, and
+`ListDismissedOnboardingInsights`. The first two are the app's new cost/tariff
+screens — a rate plan and a monthly cost roll-up, not panel measurements. We do
+not need any of them: energy already comes from `GetHistoryAggregation` in the
+panel's own metered kWh, and tariff maths belongs in Home Assistant's energy
+dashboard, not in this integration.
+
+### Reading cadence is the panel's uplink, not a SPAN backend setting
+
+During this capture the panel was reading **once a minute** rather than the
+~1–2 times a second recorded in 2026-08. Counted over the **app's own** WebSocket
+messages, so the rate is what SPAN publishes and not an artifact of how we
+subscribe:
+
+```
+telemetry messages (action:15) the app received : 130
+  carrying readings (power frames)              :  16
+  lean interval/energy frames (no readings)     : 114
+span of the capture                             : 4740 s
+median gap between successive power frames      :  60.00 s
+```
+
+Our own 4-minute soak through the SSE path agreed exactly — 4 power frames in
+240s.
+
+**Cause: the panel had failed over to its cellular backup** instead of using the
+connected ethernet. That is the explanation for the whole delta; it is not a
+backend change, and a healthy wired panel should still report at the 2026-08
+rate. Worth writing down, because the wire evidence alone cannot tell these two
+apart: the app-vs-us comparison rules out *our subscribe* as the cause, and
+nothing beyond it distinguishes "SPAN throttled everyone" from "this panel's
+uplink is degraded". Both look like a slower publisher from every client.
+
+The useful conclusion is not the number but its **range**. Reading cadence is a
+property of the panel's link, it changes underneath us with no notification, and
+it spans about two orders of magnitude:
+
+| uplink | observed reading cadence |
+|---|---|
+| ethernet | ~1–2 / sec |
+| cellular backup | 1 / min |
+
+So nothing in the integration may assume a rate. Two things followed:
+
+1. **Liveness re-tuned for the slow end.** `STALE_AFTER_SECONDS` gates entity
+   availability off the last frame *with readings*, so it is really measured in
+   publish intervals — and at 60s intervals the old 180s was three of them, which
+   is not the margin it looks like. A frame, then a dead socket
+   (`FRAME_SILENCE_SECONDS`, 90s), then a reattach
+   (`RECONNECT_BACKOFF_MAX_SECONDS`, 60s), then the wait for the next publish
+   (60s) is 210s of entirely ordinary silence, and every entity in the panel
+   would have gone unavailable. Now **300s**. A cellular failover is exactly when
+   a user most wants their panel readable, so degrading to "unavailable" there
+   would be the worst possible time to do it.
+   `FRAME_SILENCE_SECONDS` (90s) needed no change: it counts *any* decodable
+   frame, and even on cellular the lean frames kept coming, longest observed gap
+   ~40s. That budget is now validated against the degraded case, which is the
+   right way round — but its comment claimed "~1-2/sec", which is how a stale
+   comment becomes a bad decision later.
+2. **Energy sensors are unaffected**, and would not have been before 0.1.13.
+   They read the panel's own metered kWh via `GetHistoryAggregation`. The
+   integrated-power approach retired in 0.1.13 was a Riemann sum over this
+   stream: a sum that assumed ~2 Hz and silently got 1/60 Hz would have
+   under-read badly during exactly this failover, with nothing in the logs to say
+   so. Metered energy is indifferent to how often it is sampled.
+
+### Decoder: interleaved frames were being dropped whole
+
+Found in the soak, not in the capture: ~7% of live frames raised
+`ProtoError: field 2 is not length-delimited` out of `_decode_site` and were
+discarded entirely. The interval frames SPAN interleaves put a bare varint in
+body slot #2 — the slot a power frame fills with a nested `SiteInstantPower` —
+and the decoder probes that slot positionally, because it walks a layout
+reverse-engineered without a `.proto`. `_handle_frame` caught the exception, so
+the stream survived and this was never visible as a fault; it just quietly threw
+away whatever the frame held.
+
+The fix is `cloud_pb.Message.get_msg_opt`, the tolerant sibling of `get_msg` —
+standing to it exactly as the existing `get_int_opt` stands to `get_uint`. A slot
+that is not length-delimited, or whose bytes are not valid protobuf (a string
+probed as a message), now reads as *absent* rather than raising. Every positional
+probe in `cloud_telemetry` uses it. The rule that makes this safe rather than
+merely quiet: tolerate a type mismatch in a slot whose type we never proved, and
+keep raising everywhere the schema is known.
+
 ## Implications for the cloud backend
 
 1. **Auth**: Cognito SRP (user logs in; we never store the password) → cache the
@@ -438,7 +589,9 @@ returns `buildings: null`; ignore it.
    implemented in `cloud_ably`/`backends.cloud`.)
    **Keep the subscribe response** — it is what names the circuits (§3f). The
    schema is held back a couple of seconds waiting for it, since HA fixes entity
-   names at creation.
+   names at creation. **Budget for one reading per minute** (§6), not for a
+   stream: anything timed against frame arrivals — staleness, setup's wait for a
+   first frame, a rate calculation — has to be sized in minutes.
 4. **Control**: `SendMessages` with a 1/31 `TraitMessage` to open/close a relay
    (§4) — targeting the panel, signed with the **user id** from the token;
    state comes from re-reading the snapshot, not from the reply.
@@ -463,6 +616,17 @@ returns `buildings: null`; ignore it.
 
 ## Reproduce
 
-The decrypted capture and per-flow dumps live in the session scratchpad
-(`mitm/iphone_capture.mitm`, `mitm/decoded/*.txt`) and contain **live tokens** —
-they are intentionally kept out of the repo and must never be committed.
+Point the phone at mitmproxy with its CA trusted (the iOS app is not
+certificate-pinned, in either version), drive the app, and dump the gRPC bodies
+per flow. The 2026-09 run adds one step: the app's telemetry is a WebSocket, so
+the frames must be pulled from the WS message stream rather than from response
+bodies.
+
+The decrypted captures and per-flow dumps live in the session scratchpad
+(2026-08: `mitm/iphone_capture.mitm`, `mitm/decoded/*.txt`; 2026-09:
+`mitm/span_app_v2.mitm`, `mitm/bodies/`, `mitm/ws/`, `mitm/frames/`,
+`mitm/soak/`, `mitm/auth.json`). They contain **live tokens**, and the 2026-09
+set additionally contains the site's street address and coordinates — they are
+intentionally kept out of the repo and must never be committed. Everything in
+this document uses the placeholder ids (`<userId>`, `<siteId>`, `<deviceUUID>`,
+`<hardware-id>`, `<panel-resource-uuid>`, `<cloud-serial>`); keep it that way.

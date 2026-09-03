@@ -33,7 +33,9 @@ obtain access tokens; it is never stored. Only the resulting tokens are kept
 
 Setup takes up to a minute: it registers this install as a telemetry client and
 waits for a real frame before finishing, rather than completing and leaving you
-with zero entities. You then get one device per panel, updated at ~1–2 Hz, with:
+with zero entities. You then get one device per panel, updated as fast as the
+panel reports — once or twice a second over ethernet, dropping to about once a
+minute if it falls back to its cellular connection — with:
 
 - **each circuit** named as you named it in the SPAN app, reporting power and
   current (a 120 V branch does not meter its own voltage, so none is offered);
