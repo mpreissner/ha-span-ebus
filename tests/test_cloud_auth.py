@@ -123,7 +123,9 @@ def test_user_id_comes_from_the_username_claim_not_the_subject():
     # rejected — so reading the wrong claim would be a silent, live-only failure.
     token = _access_token(
         {
-            "sub": "f8015330-8011-7055-244b-9b7fd7f18135",
+            # Synthetic, and deliberately unlike `username`: a real Cognito
+            # `sub` is a dashed UUID, the SPAN user id a stripped one.
+            "sub": "1d5c53fc-cad7-4d9a-9c8b-2e0f6a4b8d13",
             "username": "00112233445566778899aabbccddeeff",
         }
     )
