@@ -41,7 +41,7 @@ import logging
 import random
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -222,6 +222,12 @@ class AblyDirective:
 # a resource of the panel's: one node carrying the whole site's directional
 # power, and — via GetHistoryAggregation — the whole site's energy.
 SITE_NODE = "site"
+
+# The panel's feeder meter: everything through the main lugs, equal to the site
+# `grid` flow frame for frame (CLOUD-PROTO.md). The `feed-*` node reports the
+# same quantity from a second meter, lagging it by up to one sampling window, so
+# this one is what derived figures are taken against.
+PANEL_POWER_KEY = f"panel/{POWER_PROPERTY}"
 
 
 # --- pure mapping -------------------------------------------------------------
@@ -452,6 +458,37 @@ def energy_targets(
     if frame.site_id and frame.site_instance_id and frame.site_flows:
         targets.setdefault(frame.site_id, {})[frame.site_instance_id] = SITE_NODE
     return targets
+
+
+def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> float | None:
+    """Watts entering the panel that no branch circuit accounts for.
+
+    The feeder meter (`panel/power`) is everything through the main lugs; the
+    branch meters are everything leaving on a breaker. What separates them is the
+    panel's own draw — its electronics and relays — which is a steady load and
+    never negative.
+
+    The two sets of meters are not reconciled with each other, though, so at
+    light load their disagreement can outweigh that draw and push the raw
+    difference below zero. That is meter error, not the panel returning power, so
+    the result is floored at zero.
+
+    None until the feeder and *every* circuit has reported, so a circuit that has
+    not landed yet cannot masquerade as overhead of its whole draw.
+    """
+    keys = [
+        spec.key
+        for spec in schema.properties.values()
+        if spec.node_kind is NodeKind.CIRCUIT and spec.property_id == POWER_PROPERTY
+    ]
+    if not keys:
+        return None
+    try:
+        total = float(readings[PANEL_POWER_KEY].value)
+        branches = sum(float(readings[key].value) for key in keys)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return max(0.0, total - branches)
 
 
 def energy_samples(
