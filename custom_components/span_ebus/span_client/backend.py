@@ -223,12 +223,6 @@ class AblyDirective:
 # power, and — via GetHistoryAggregation — the whole site's energy.
 SITE_NODE = "site"
 
-# The panel's feeder meter: everything through the main lugs, equal to the site
-# `grid` flow frame for frame (CLOUD-PROTO.md). The `feed-*` node reports the
-# same quantity from a second meter, lagging it by up to one sampling window, so
-# this one is what derived figures are taken against.
-PANEL_POWER_KEY = f"panel/{POWER_PROPERTY}"
-
 
 # --- pure mapping -------------------------------------------------------------
 
@@ -460,31 +454,40 @@ def energy_targets(
     return targets
 
 
+def is_main_feed_power(spec: PropertySpec) -> bool:
+    """Whether this is the main feed's power reading, the total overhead is taken from."""
+    return spec.node_kind is NodeKind.LUGS and spec.property_id == POWER_PROPERTY
+
+
 def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> float | None:
     """Watts entering the panel that no branch circuit accounts for.
 
-    The feeder meter (`panel/power`) is everything through the main lugs; the
+    The main feed (`feed-*/power`) is everything through the main lugs; the
     branch meters are everything leaving on a breaker. What separates them is the
     panel's own draw — its electronics and relays — which is a steady load and
     never negative.
 
-    The two sets of meters are not reconciled with each other, though, so at
-    light load their disagreement can outweigh that draw and push the raw
-    difference below zero. That is meter error, not the panel returning power, so
-    the result is floored at zero.
+    `panel/power` meters the same intake, but it is sampled a frame ahead of the
+    branch meters, so against them it swings by hundreds of watts whenever a load
+    changes. The main feed is sampled alongside the circuits: on a live MAIN 40
+    the difference held at about 12 W (σ ≈ 4 W) where the panel meter's ranged
+    from −420 to +320 W. The result is still floored at zero, since the meters
+    are not reconciled and a negative figure could only be their disagreement.
 
-    None until the feeder and *every* circuit has reported, so a circuit that has
-    not landed yet cannot masquerade as overhead of its whole draw.
+    None until the main feed and *every* circuit has reported, so a circuit that
+    has not landed yet cannot masquerade as overhead of its whole draw — and None
+    on a panel that does not report exactly one main feed.
     """
+    feeds = [spec.key for spec in schema.properties.values() if is_main_feed_power(spec)]
     keys = [
         spec.key
         for spec in schema.properties.values()
         if spec.node_kind is NodeKind.CIRCUIT and spec.property_id == POWER_PROPERTY
     ]
-    if not keys:
+    if len(feeds) != 1 or not keys:
         return None
     try:
-        total = float(readings[PANEL_POWER_KEY].value)
+        total = float(readings[feeds[0]].value)
         branches = sum(float(readings[key].value) for key in keys)
     except (KeyError, TypeError, ValueError):
         return None

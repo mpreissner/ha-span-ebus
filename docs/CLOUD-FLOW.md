@@ -401,8 +401,14 @@ Entity **node ids stay keyed on the instance id** (`circuit-30`) so renaming a
 circuit in the SPAN app does not orphan its history; the label rides along as the
 node's display name. Duplicate labels — two circuits can both be "Outlets" — are
 qualified with their panel spaces. A non-panel instance *absent* from a non-empty
-snapshot is the main feed (instance 2 here; its power tracks the panel total to
-within one sampling window), published as `feed-<id>`.
+snapshot is the main feed (instance 2 here), published as `feed-<id>`. Its power
+tracks the panel total to within one sampling window, but the two are not sampled
+together: the panel meter (`panel/power`, equal to the site `grid` flow) runs one
+frame ahead of the branch meters, while the feed is sampled with them — over 236
+live frames (2026-09-26) the feed equalled the *previous* frame's panel figure in
+167, and feed − Σcircuits held at 12 W (σ 4 W, never negative) against panel −
+Σcircuits' σ 55 W and −422…+324 W range. Anything derived against the circuits
+(the Panel overhead sensor) is taken from the feed. Site `home` equals Σcircuits.
 
 ### 3g. The same snapshot carries relay state — and the command address
 

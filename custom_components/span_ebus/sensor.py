@@ -33,7 +33,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import SpanConfigEntry
 from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import SpanCloudCoordinator
-from .span_client.backend import PANEL_POWER_KEY, POWER_PROPERTY, SITE_NODE, panel_overhead
+from .span_client.backend import POWER_PROPERTY, SITE_NODE, is_main_feed_power, panel_overhead
 from .span_client.cloud_history import SITE_FLOW_ENERGY
 from .span_client.models import NodeKind, PropertySpec
 
@@ -98,9 +98,9 @@ async def async_setup_entry(
             # power graph can also go on the Energy dashboard.
             if _is_metered(spec):
                 entities.append(SpanEnergySensor(coordinator, spec))
-            # The feeder meter arrives once per panel, so it is what gates the
-            # one derived sensor built on it.
-            if spec.key == PANEL_POWER_KEY:
+            # The main feed arrives once per panel, so it is what gates the one
+            # derived sensor built on it; a panel without one gets no overhead.
+            if is_main_feed_power(spec):
                 entities.append(SpanPanelOverheadSensor(coordinator))
         async_add_entities(entities)
 
@@ -221,7 +221,7 @@ class SpanEnergySensor(RestoreSensor):
 class SpanPanelOverheadSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
     """Power the panel takes in that its branch circuits do not account for.
 
-    Derived rather than reported: the feeder meter less the sum of every branch
+    Derived rather than reported: the main feed less the sum of every branch
     meter (see `backend.panel_overhead`). The circuits are read from the schema
     at each update, so a circuit that appears later is subtracted from then on.
     """
