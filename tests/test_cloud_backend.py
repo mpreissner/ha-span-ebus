@@ -1079,3 +1079,48 @@ def test_an_idle_interval_yields_no_sample_rather_than_a_zero():
     series = [_series("res1", 54, [_bucket(1000, 1900, export=0.0)])]
 
     assert cloud.energy_samples(series, {"res1": {54: "circuit-54"}}) == []
+
+
+# --- panel overhead -----------------------------------------------------------
+
+
+def _overhead_inputs():
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits())
+    readings = {r.key: r for r in cloud.readings_from_frame(_frame(), 0.0, _circuits())}
+    return schema, readings
+
+
+def test_panel_overhead_is_feeder_less_branches():
+    # Feeder 2033.284 W less the one branch circuit's 341.980 W. The main feed
+    # (instance 2) meters the incoming power too, so it must not be subtracted.
+    schema, readings = _overhead_inputs()
+    assert round(cloud.panel_overhead(schema, readings), 3) == 1691.304
+
+
+def test_panel_overhead_waits_for_every_circuit():
+    # A circuit that has not reported yet would count its whole draw as overhead.
+    schema, readings = _overhead_inputs()
+    del readings["circuit-54/power"]
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_panel_overhead_needs_the_feeder():
+    schema, readings = _overhead_inputs()
+    del readings[cloud.PANEL_POWER_KEY]
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_panel_overhead_is_undefined_without_circuits():
+    schema, readings = _overhead_inputs()
+    schema.properties = {
+        k: s for k, s in schema.properties.items() if s.node_kind is not NodeKind.CIRCUIT
+    }
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_panel_overhead_is_never_negative():
+    # Branch meters reading above the feeder is meter disagreement; the panel
+    # cannot draw less than nothing, so the figure floors at zero.
+    schema, readings = _overhead_inputs()
+    readings["circuit-54/power"] = replace(readings["circuit-54/power"], value="2100.000")
+    assert cloud.panel_overhead(schema, readings) == 0.0

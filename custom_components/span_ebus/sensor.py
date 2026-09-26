@@ -33,7 +33,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import SpanConfigEntry
 from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import SpanCloudCoordinator
-from .span_client.backend import POWER_PROPERTY, SITE_NODE
+from .span_client.backend import PANEL_POWER_KEY, POWER_PROPERTY, SITE_NODE, panel_overhead
 from .span_client.cloud_history import SITE_FLOW_ENERGY
 from .span_client.models import NodeKind, PropertySpec
 
@@ -98,6 +98,10 @@ async def async_setup_entry(
             # power graph can also go on the Energy dashboard.
             if _is_metered(spec):
                 entities.append(SpanEnergySensor(coordinator, spec))
+            # The feeder meter arrives once per panel, so it is what gates the
+            # one derived sensor built on it.
+            if spec.key == PANEL_POWER_KEY:
+                entities.append(SpanPanelOverheadSensor(coordinator))
         async_add_entities(entities)
 
     # Settable properties belong to a control platform (the relay is a switch);
@@ -212,3 +216,38 @@ class SpanEnergySensor(RestoreSensor):
     @property
     def available(self) -> bool:
         return self.native_value is not None
+
+
+class SpanPanelOverheadSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
+    """Power the panel takes in that its branch circuits do not account for.
+
+    Derived rather than reported: the feeder meter less the sum of every branch
+    meter (see `backend.panel_overhead`). The circuits are read from the schema
+    at each update, so a circuit that appears later is subtracted from then on.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_name = "Panel overhead"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: SpanCloudCoordinator) -> None:
+        super().__init__(coordinator)
+        serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
+        self._attr_unique_id = f"{serial}_panel/overhead"
+        self._attr_device_info = _device_info(serial)
+
+    @property
+    def native_value(self) -> float | None:
+        schema = self.coordinator.schema
+        if schema is None:
+            return None
+        return panel_overhead(schema, self.coordinator.data or {})
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available and self.coordinator.stream_is_live and self.native_value is not None
+        )
