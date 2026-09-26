@@ -1090,11 +1090,12 @@ def _overhead_inputs():
     return schema, readings
 
 
-def test_panel_overhead_is_feeder_less_branches():
-    # Feeder 2033.284 W less the one branch circuit's 341.980 W. The main feed
-    # (instance 2) meters the incoming power too, so it must not be subtracted.
+def test_panel_overhead_is_main_feed_less_branches():
+    # Main feed 2003.000 W less the one branch circuit's 341.980 W. The panel
+    # meter (2033.284 W) is sampled a frame ahead of the circuits, so it is not
+    # the total; nor, metering the same intake, is it subtracted.
     schema, readings = _overhead_inputs()
-    assert round(cloud.panel_overhead(schema, readings), 3) == 1691.304
+    assert round(cloud.panel_overhead(schema, readings), 3) == 1661.020
 
 
 def test_panel_overhead_waits_for_every_circuit():
@@ -1104,10 +1105,26 @@ def test_panel_overhead_waits_for_every_circuit():
     assert cloud.panel_overhead(schema, readings) is None
 
 
-def test_panel_overhead_needs_the_feeder():
+def test_panel_overhead_needs_the_main_feed_reading():
     schema, readings = _overhead_inputs()
-    del readings[cloud.PANEL_POWER_KEY]
+    del readings["feed-2/power"]
     assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_panel_overhead_is_undefined_without_a_main_feed():
+    # Without a feed node there is no time-aligned total; the panel meter is not
+    # substituted for it.
+    schema, readings = _overhead_inputs()
+    schema.properties = {
+        k: s for k, s in schema.properties.items() if s.node_kind is not NodeKind.LUGS
+    }
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_main_feed_power_is_the_only_overhead_total():
+    schema, _ = _overhead_inputs()
+    totals = [k for k, s in schema.properties.items() if cloud.is_main_feed_power(s)]
+    assert totals == ["feed-2/power"]
 
 
 def test_panel_overhead_is_undefined_without_circuits():
@@ -1119,7 +1136,7 @@ def test_panel_overhead_is_undefined_without_circuits():
 
 
 def test_panel_overhead_is_never_negative():
-    # Branch meters reading above the feeder is meter disagreement; the panel
+    # Branch meters reading above the main feed is meter disagreement; the panel
     # cannot draw less than nothing, so the figure floors at zero.
     schema, readings = _overhead_inputs()
     readings["circuit-54/power"] = replace(readings["circuit-54/power"], value="2100.000")
