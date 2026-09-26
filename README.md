@@ -43,6 +43,8 @@ minute if it falls back to its cellular connection — with:
   (L1/L2, for checking how evenly the legs are loaded), plus a combined current
   that is the *higher* of the two legs rather than their sum, i.e. busbar loading
   to compare against your main breaker;
+- **panel overhead** — the main feed's power less the sum of every circuit, i.e.
+  the steady draw of the panel's own relays and electronics (never below zero);
 - **the main feed** and the **site flows** SPAN reports (grid, home, …).
 
 Circuit entity ids are keyed on SPAN's internal circuit identifier rather than its
