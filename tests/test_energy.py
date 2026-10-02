@@ -6,7 +6,7 @@ once, twice, or never — are the part of the energy sensors worth pinning down.
 """
 
 import pytest
-from energy import EnergyLedger
+from energy import EnergyAccumulator, EnergyLedger
 from span_client.models import EnergySample
 
 KEY = "circuit-36/power"
@@ -261,3 +261,92 @@ def test_an_unreadable_stored_key_is_dropped_rather_than_poisoning_the_rest():
     assert ledger.total("circuit-36/power") is None
     assert ledger.total("circuit-37/power") is None
     assert ledger.total("site/grid_import") == pytest.approx(3.0)
+
+
+# --- integrated energy ---------------------------------------------------------
+#
+# The panel's overhead is derived on this side and has no metered interval to
+# read back, so its energy is a sum over its power samples.
+
+
+def test_a_steady_kilowatt_for_an_hour_is_a_kilowatt_hour():
+    acc = EnergyAccumulator(max_gap_seconds=7200.0)
+    acc.add(1000.0, 0.0)
+    acc.add(1000.0, 3600.0)
+
+    assert acc.total_kwh == pytest.approx(1.0)
+
+
+def test_the_first_sample_only_sets_a_baseline():
+    # There is no interval to close yet, so nothing is added however large it is.
+    acc = EnergyAccumulator(max_gap_seconds=300.0)
+    acc.add(5000.0, 100.0)
+
+    assert acc.total_kwh == 0.0
+
+
+def test_a_ramp_is_integrated_as_a_trapezoid_not_a_step():
+    # 0 W -> 2000 W over an hour is 1 kWh by area; holding either endpoint would
+    # give 0 or 2.
+    acc = EnergyAccumulator(max_gap_seconds=7200.0)
+    acc.add(0.0, 0.0)
+    acc.add(2000.0, 3600.0)
+
+    assert acc.total_kwh == pytest.approx(1.0)
+
+
+def test_a_negative_sample_cannot_run_the_meter_backwards():
+    # A total_increasing sensor that decreases reads as a meter reset.
+    acc = EnergyAccumulator(max_gap_seconds=7200.0)
+    acc.add(-3000.0, 0.0)
+    acc.add(-3000.0, 3600.0)
+
+    assert acc.total_kwh == 0.0
+
+
+def test_a_gap_longer_than_the_limit_is_not_bridged():
+    # The stream was down; there are no readings for that window, and guessing
+    # one would write a fabricated step into long-term statistics.
+    acc = EnergyAccumulator(max_gap_seconds=300.0)
+    acc.add(2000.0, 0.0)
+    acc.add(2000.0, 1000.0)
+
+    assert acc.total_kwh == 0.0
+
+    # ...but the sample still becomes the baseline, so accounting resumes at once.
+    acc.add(2000.0, 1180.0)
+    assert acc.total_kwh == pytest.approx(0.1)
+
+
+def test_a_minute_between_samples_is_bridged():
+    # A panel on its cellular backup publishes once a minute; that cadence is
+    # ordinary and has to keep counting.
+    acc = EnergyAccumulator(max_gap_seconds=300.0)
+    acc.add(12.0, 0.0)
+    acc.add(12.0, 60.0)
+
+    assert acc.total_kwh == pytest.approx(0.0002)
+
+
+def test_a_repeated_sample_adds_nothing_and_keeps_the_baseline():
+    # Entities are woken for more than new frames — a relay command re-announces
+    # the readings already held — so the same stamp arrives twice routinely.
+    acc = EnergyAccumulator(max_gap_seconds=300.0)
+    acc.add(1000.0, 100.0)
+    acc.add(1000.0, 100.0)
+    assert acc.total_kwh == 0.0
+
+    acc.add(1000.0, 50.0)
+    assert acc.total_kwh == 0.0
+
+    # The baseline is still the sample at 100, not the stale one at 50.
+    acc.add(1000.0, 136.0)
+    assert acc.total_kwh == pytest.approx(0.01)
+
+
+def test_a_restored_total_is_carried_forward_not_restarted():
+    acc = EnergyAccumulator(max_gap_seconds=300.0, total_kwh=12.5)
+    acc.add(3600.0, 0.0)
+    acc.add(3600.0, 10.0)
+
+    assert acc.total_kwh == pytest.approx(12.51)
