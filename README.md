@@ -44,7 +44,10 @@ minute if it falls back to its cellular connection — with:
   that is the *higher* of the two legs rather than their sum, i.e. busbar loading
   to compare against your main breaker;
 - **panel overhead** — the main feed's power less the sum of every circuit, i.e.
-  the steady draw of the panel's own relays and electronics (never below zero);
+  the steady draw of the panel's own relays and electronics (never below zero),
+  with an energy total alongside so it can be tracked as a device on the Energy
+  dashboard. SPAN does not meter this one, so its kWh are integrated from the
+  power reading rather than read back from the panel;
 - **the main feed** and the **site flows** SPAN reports (grid, home, …).
 
 Circuit entity ids are keyed on SPAN's internal circuit identifier rather than its
