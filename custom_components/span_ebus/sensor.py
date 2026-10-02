@@ -6,6 +6,10 @@ dashboard measures in kWh — so a panel full of working power sensors shows up
 under "Device power consumption" and is invisible under "Device energy
 consumption", which is what these close. The kilowatt-hours are the panel's own,
 read back from SPAN's meters by the coordinator; see `SpanEnergySensor`.
+
+The panel's overhead is the exception. It is derived on this side, so there is
+no meter to read back, and its energy is integrated from its power instead; see
+`SpanPanelOverheadEnergySensor`.
 """
 
 from __future__ import annotations
@@ -32,7 +36,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SpanConfigEntry
 from .const import DOMAIN, MANUFACTURER, MODEL
-from .coordinator import SpanCloudCoordinator
+from .coordinator import STALE_AFTER_SECONDS, SpanCloudCoordinator
+from .energy import EnergyAccumulator
 from .span_client.backend import POWER_PROPERTY, SITE_NODE, is_main_feed_power, panel_overhead
 from .span_client.cloud_history import SITE_FLOW_ENERGY
 from .span_client.models import NodeKind, PropertySpec
@@ -43,6 +48,13 @@ _LOGGER = logging.getLogger(__name__)
 # is finer than SPAN's own app reports and about the granularity at which a
 # quarter-hour bucket moves on a lightly loaded circuit.
 ENERGY_PRECISION = 3
+
+# How long a gap in the stream may be before the integrated overhead energy
+# refuses to bridge it. Tied to the coordinator's staleness threshold on purpose:
+# past that the power entities went unavailable, and inventing energy for a
+# window there are no readings from would put a fabricated step into long-term
+# statistics.
+MAX_INTEGRATION_GAP_SECONDS = STALE_AFTER_SECONDS
 
 
 def _is_metered(spec: PropertySpec) -> bool:
@@ -99,9 +111,10 @@ async def async_setup_entry(
             if _is_metered(spec):
                 entities.append(SpanEnergySensor(coordinator, spec))
             # The main feed arrives once per panel, so it is what gates the one
-            # derived sensor built on it; a panel without one gets no overhead.
+            # derived pair built on it; a panel without one gets no overhead.
             if is_main_feed_power(spec):
                 entities.append(SpanPanelOverheadSensor(coordinator))
+                entities.append(SpanPanelOverheadEnergySensor(coordinator, spec))
         async_add_entities(entities)
 
     # Settable properties belong to a control platform (the relay is a switch);
@@ -251,3 +264,92 @@ class SpanPanelOverheadSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEnt
         return (
             super().available and self.coordinator.stream_is_live and self.native_value is not None
         )
+
+
+class SpanPanelOverheadEnergySensor(CoordinatorEntity[SpanCloudCoordinator], RestoreSensor):
+    """Energy behind the Panel overhead reading, integrated from it.
+
+    The one energy total here that SPAN did not measure. Overhead is a
+    difference between meters, and the meter it is taken from — the main feed —
+    returns nothing from the history RPC, so there is no interval to read back
+    and no ledger key to follow. What is left is a trapezoidal sum over the
+    frames as they arrive (see `EnergyAccumulator`), which suits this figure
+    better than it did the circuits it was retired for: overhead is a steady
+    dozen watts, not a load that switches between samples.
+
+    It exists so overhead can be tracked as a device on the Energy dashboard,
+    which wants a power sensor and an energy one. It starts from zero on install
+    and will not account for time the stream was down.
+
+    Availability follows the other energy sensors: there is always a total, and
+    a total that has stopped advancing is still true.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_name = "Panel overhead energy"
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = ENERGY_PRECISION
+
+    def __init__(self, coordinator: SpanCloudCoordinator, feed: PropertySpec) -> None:
+        super().__init__(coordinator)
+        # Every reading in a frame carries the frame's stamp, so the main feed's
+        # is the time the overhead figure was true at.
+        self._feed_key = feed.key
+        serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
+        self._attr_unique_id = f"{serial}_panel/overhead_energy"
+        self._attr_device_info = _device_info(serial)
+
+        self._accumulator = EnergyAccumulator(MAX_INTEGRATION_GAP_SECONDS)
+        # What the state machine was last told, so an unchanged total is not
+        # rewritten. `None` guarantees the first update goes out.
+        self._written_value: float | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Pick the total back up where the last run left it.
+
+        Without this every restart resets the meter, and a `total_increasing`
+        sensor dropping to zero is read as a meter reset. Restored before the
+        coordinator is listened to, so no frame can be integrated into a total
+        that is about to be replaced.
+        """
+        last = await self.async_get_last_sensor_data()
+        if last is not None and last.native_value is not None:
+            try:
+                self._accumulator.total_kwh = float(last.native_value)
+            except (TypeError, ValueError):
+                _LOGGER.debug(
+                    "%s: ignoring unrestorable stored total %r",
+                    self.entity_id,
+                    last.native_value,
+                )
+        await super().async_added_to_hass()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        schema = self.coordinator.schema
+        readings = self.coordinator.data or {}
+        feed = readings.get(self._feed_key)
+        watts = None if schema is None else panel_overhead(schema, readings)
+        if feed is not None and watts is not None:
+            self._accumulator.add(watts, feed.timestamp)
+
+        # The stream pushes one to two frames a second. State goes out only when
+        # the figure changes at the precision it is shown to — every few minutes
+        # at a dozen watts — rather than once per frame to report a few
+        # microwatt-hours.
+        value = round(self._accumulator.total_kwh, ENERGY_PRECISION)
+        if value == self._written_value:
+            return
+        self._written_value = value
+        super()._handle_coordinator_update()
+
+    @property
+    def native_value(self) -> float:
+        return self._accumulator.total_kwh
+
+    @property
+    def available(self) -> bool:
+        return True

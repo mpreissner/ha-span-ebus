@@ -17,6 +17,9 @@ Two facts about the data shape everything here:
   resolution and a live poll at 15-minutely describe the same time twice. Only
   one of them may be counted, and which is settled by arrival order — see
   `EnergyLedger.apply`.
+
+The one figure SPAN does not meter at all — the panel's overhead — is integrated
+from its power instead; see `EnergyAccumulator`.
 """
 
 from __future__ import annotations
@@ -201,3 +204,52 @@ class EnergyLedger:
 
 def _opt_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+# Watt-seconds per kilowatt-hour.
+_WS_PER_KWH = 3_600_000.0
+
+
+class EnergyAccumulator:
+    """A trapezoidal sum over power samples, in kWh, for what SPAN does not meter.
+
+    Everything SPAN meters goes through the ledger above. This is for a figure
+    that exists only on this side — the panel's overhead, which is a difference
+    between meters and has no interval in the history RPC to read back — so its
+    energy can only be the integral of its power.
+
+    Two rules make the result safe to publish as a `total_increasing` sensor:
+
+    * **Only the positive part of each sample counts.** Such a sensor going down
+      reads as a meter reset, so nothing here may subtract.
+    * **Gaps longer than `max_gap_seconds` are not bridged.** A sample arriving
+      after a long silence only re-establishes the baseline. A stalled stream is
+      precisely where a trapezoid is least trustworthy, and a fabricated step in
+      long-term statistics is worse than a flat spot — a reader can see through
+      the second and not the first.
+    """
+
+    def __init__(self, max_gap_seconds: float, total_kwh: float = 0.0) -> None:
+        self.max_gap_seconds = max_gap_seconds
+        self.total_kwh = total_kwh
+        self._last_power_w: float | None = None
+        self._last_timestamp: float | None = None
+
+    def add(self, power_w: float, timestamp: float) -> None:
+        """Fold one sample in, advancing the total by the interval it closes."""
+        previous_power, previous_timestamp = self._last_power_w, self._last_timestamp
+        if previous_timestamp is not None and timestamp <= previous_timestamp:
+            # A repeated or out-of-order stamp. The coordinator wakes its
+            # entities for reasons other than a new frame — a relay command, a
+            # liveness change — so the same sample being offered twice is
+            # routine, and it must neither add energy nor move the baseline.
+            return
+        self._last_power_w, self._last_timestamp = power_w, timestamp
+
+        if previous_power is None or previous_timestamp is None:
+            return
+        elapsed = timestamp - previous_timestamp
+        if elapsed > self.max_gap_seconds:
+            return
+        average_w = (max(previous_power, 0.0) + max(power_w, 0.0)) / 2.0
+        self.total_kwh += average_w * elapsed / _WS_PER_KWH
