@@ -17,6 +17,7 @@ import contextlib
 import logging
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -24,13 +25,14 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN
+from .const import DOMAIN, MANUFACTURER, MODEL
 from .energy import EnergyLedger
-from .span_client.backend import CloudBackend
+from .span_client.backend import CloudBackend, SiteInfo
 from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,9 +77,21 @@ ENERGY_STORE_VERSION = 1
 ENERGY_SAVE_DELAY_SECONDS = 30
 
 
-def energy_store(hass: HomeAssistant, entry_id: str) -> Store:
-    """The per-entry store holding the energy totals."""
-    return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{entry_id}.energy")
+def energy_store(hass: HomeAssistant, entry_id: str, site_id: str | None = None) -> Store:
+    """The store holding the energy totals: per entry, and per site when the
+    account has several (the same circuit key exists on every panel)."""
+    scope = f"{entry_id}.{site_id}" if site_id else entry_id
+    return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{scope}.energy")
+
+
+def site_device_uuid(device_uuid: str, site_id: str) -> str:
+    """A stable, distinct client UUID per site, derived from the entry's own.
+
+    The device UUID names the Ably channel, and the channel is what a
+    SubscribeAndGetTraits registration publishes to — so two sites sharing one
+    UUID would interleave both panels' frames on one channel again.
+    """
+    return str(uuid.uuid5(uuid.UUID(device_uuid), f"site:{site_id}"))
 
 
 @dataclass
@@ -106,18 +120,24 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         device_uuid: str,
         user_id: str | None,
         serial: str | None,
+        site: SiteInfo | None = None,
     ) -> None:
         # No update_interval: this is push, not poll.
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry)
         self.entry = entry
         self.schema: PanelSchema | None = None
+        # The site this coordinator streams, or None for the legacy single-stream
+        # setup. Its serial and model name the HA device.
+        self.site = site
+        self.model = site.model if site else MODEL
 
         self._backend = CloudBackend(
             token_path,
-            device_uuid,
+            site_device_uuid(device_uuid, site.site_id) if site else device_uuid,
             user_id=user_id,
-            serial=serial,
+            serial=site.serial if site else serial,
             on_auth_failed=self._on_auth_failed,
+            site_id=site.site_id if site else None,
         )
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
@@ -136,7 +156,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         # once a minute while readings move twice a second — waking every power
         # sensor in the panel to announce a kilowatt-hour would be pure noise.
         self._ledger = EnergyLedger()
-        self._energy_store = energy_store(hass, entry.entry_id)
+        self._energy_store = energy_store(hass, entry.entry_id, site.site_id if site else None)
         self._energy_listeners: list[Callable[[], None]] = []
         self._cancel_energy_poll: Callable[[], None] | None = None
         self._energy_failures = 0
@@ -241,6 +261,26 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         )
 
     # --- entity registration ----------------------------------------------
+
+    @property
+    def serial(self) -> str:
+        """The panel serial entities are keyed and grouped under."""
+        if self.schema is not None:
+            return self.schema.serial
+        if self.site is not None and self.site.serial:
+            return self.site.serial
+        return "span-cloud"
+
+    def device_info(self) -> DeviceInfo:
+        """One HA device per panel, named by model so two panels are told apart."""
+        serial = self.serial
+        return DeviceInfo(
+            identifiers={(DOMAIN, serial)},
+            name=f"SPAN {self.model} {serial}",
+            manufacturer=MANUFACTURER,
+            model=self.model,
+            serial_number=serial,
+        )
 
     @callback
     def register_entity_adder(
