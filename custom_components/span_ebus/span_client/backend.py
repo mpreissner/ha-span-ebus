@@ -904,6 +904,139 @@ def stream_identity(
     )
 
 
+@dataclass(frozen=True)
+class SiteRoutes:
+    """How one shared site's stream divides up: which device each block feeds."""
+
+    site_id: str
+    panels: tuple[PanelInfo, ...]
+    # Where the site's own block and flows go: the primary panel if the site holds
+    # it, since moving them would orphan their history, otherwise a site device.
+    flows_owner: PanelInfo
+
+    @property
+    def devices(self) -> tuple[PanelInfo, ...]:
+        if self.flows_owner in self.panels:
+            return self.panels
+        return (*self.panels, self.flows_owner)
+
+    @property
+    def blocks(self) -> dict[str, str]:
+        """Resource id -> the key of the device that takes it."""
+        routes = {panel.hardware_id: panel.key for panel in self.panels if panel.hardware_id}
+        routes[self.site_id] = self.flows_owner.key
+        return routes
+
+
+def site_routes(site: SiteInfo, primary_panel: str | None) -> SiteRoutes | None:
+    """Plan the split of a site with several panels. None means don't split.
+
+    One panel takes every block, as it always has. Several panels behind a single
+    gateway share one block, where instance ids are unique, so nothing collides
+    and the site stays one device. Otherwise each gateway is one panel: a board
+    that could not be paired with it leaves it nameless but still correct.
+    """
+    if len(site.panels) < 2:
+        return None
+    if len(site.gateways) < 2:
+        log.warning(
+            "SPAN site has %d panels on %d gateway(s), so its circuits stay on one "
+            "device; please share a capture so this layout can be supported",
+            len(site.panels),
+            len(site.gateways),
+        )
+        return None
+    boards = {panel.hardware_id: panel for panel in site.panels if panel.hardware_id}
+    panels = tuple(
+        boards.get(gateway, PanelInfo(site.site_id, None, None, gateway))
+        for gateway in site.gateways
+    )
+    owner = next((panel for panel in panels if panel.answers_to(primary_panel)), None)
+    return SiteRoutes(
+        site.site_id, panels, owner or PanelInfo(site.site_id, None, None, site.site_id)
+    )
+
+
+def device_name(panel: PanelInfo, routes: SiteRoutes) -> str:
+    """Name a device on a shared site. Never the site's label: that is an address."""
+    if panel.serial:
+        return f"SPAN {panel.model} {panel.serial}"
+    if panel in routes.panels:
+        return f"SPAN panel {routes.panels.index(panel) + 1}"
+    return "SPAN site"
+
+
+def panel_identity(
+    site: SiteInfo,
+    panel: PanelInfo,
+    *,
+    device_uuid: str,
+    serial: str | None,
+    primary_panel: str | None,
+) -> StreamIdentity:
+    """Key one panel of a shared site. They share its channel and nothing else."""
+    stream = stream_identity(
+        site, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
+    )
+    if panel.answers_to(primary_panel):
+        return StreamIdentity(stream.device_uuid, serial or panel.key, None)
+    return StreamIdentity(stream.device_uuid, panel.key, panel.key)
+
+
+def _drop_block(block_id: str | None, unrouted: set[str | None]) -> None:
+    if block_id not in unrouted:
+        unrouted.add(block_id)
+        log.debug("dropping block %s: it belongs to no panel here", block_id)
+
+
+def split_frame(frame: Frame, routes: SiteRoutes, unrouted: set[str | None]) -> dict[str, Frame]:
+    """Divide a frame between a site's devices, keyed by device.
+
+    A device appears only if the frame held something for it, and a frame may hold
+    any mix of blocks or none. `unrouted` remembers blocks already logged as dropped.
+    """
+    blocks = routes.blocks
+    parts: dict[str, dict[str, list[CircuitSample]]] = {}
+    for resource_id, samples in frame.resources.items():
+        key = blocks.get(resource_id)
+        if key is None:
+            _drop_block(resource_id, unrouted)
+            continue
+        parts.setdefault(key, {})[resource_id] = samples
+
+    out = {key: replace(frame, resources=res, site_flows={}) for key, res in parts.items()}
+    if frame.site_flows:
+        owner = routes.flows_owner.key
+        out[owner] = replace(
+            out.get(owner, frame), resources=parts.get(owner, {}), site_flows=frame.site_flows
+        )
+    return out
+
+
+def split_snapshot(raw: bytes, routes: SiteRoutes, unrouted: set[str | None]) -> dict[str, bytes]:
+    """Divide a trait snapshot between a site's devices, keyed by device.
+
+    Each part is a snapshot in its own right, so `parse_trait_snapshot` needs no
+    idea that a site can hold two panels. An unparseable snapshot yields nothing,
+    which is what `parse_trait_snapshot` makes of one too.
+    """
+    blocks = routes.blocks
+    out: dict[str, bytes] = {}
+    try:
+        for block in parse(raw).values(1):
+            ref = parse(block).get_msg(1)
+            resource_id = ref.get_str(1) if ref is not None else None
+            key = blocks.get(resource_id) if resource_id else None
+            if key is None:
+                _drop_block(resource_id, unrouted)
+                continue
+            out[key] = out.get(key, b"") + field_message(1, block)
+    except (ProtoError, ValueError, TypeError) as exc:
+        log.debug("unparseable trait snapshot (%d bytes): %s", len(raw), exc)
+        return {}
+    return out
+
+
 def build_subscribe_request(channel: str, hardware_ids: Iterable[str]) -> bytes:
     """Serialize a SubscribeAndGetTraitsRequest for `channel`.
 
@@ -1502,6 +1635,14 @@ class CloudBackend:
         # from a decoded frame rather than from raw bytes off the socket.
         self._last_frame = time.monotonic()
 
+        self._apply_frame(frame)
+
+    def _schema_source(self, frame: Frame) -> Frame:
+        """The frame that says what this panel holds."""
+        return frame
+
+    def _apply_frame(self, frame: Frame) -> None:
+        source = self._schema_source(frame)
         # The stream interleaves power frames (with circuits) and lean energy/
         # interval frames (empty of resources+flows). Hold the schema until a
         # content-bearing frame so we don't publish an empty topology — and,
@@ -1513,14 +1654,14 @@ class CloudBackend:
             and (self._circuits or time.monotonic() >= self._label_deadline)
         ):
             serial = self._serial or "span-cloud"
-            self._on_schema(schema_from_frame(serial, frame, self._circuits))
+            self._on_schema(schema_from_frame(serial, source, self._circuits))
             self._schema_sent = True
 
         # Only a content-bearing frame names the metering instances: the lean
         # interval frames carry a different site instance and no circuits at all,
         # so taking the identifiers from one would ask about the wrong things.
         if frame.resources or frame.site_flows:
-            targets = energy_targets(frame, self._circuits)
+            targets = energy_targets(source, self._circuits)
             if targets != self._energy_targets:
                 self._energy_targets = targets
                 log.debug(
@@ -1534,3 +1675,130 @@ class CloudBackend:
             ts = frame.epoch_millis / 1000.0 if frame.epoch_millis else None
             for reading in readings_from_frame(frame, ts, self._circuits):
                 self._on_reading(reading)
+
+
+class SitePanelBackend(CloudBackend):
+    """One panel of a shared site: all of a backend but the stream.
+
+    Holds what `CloudBackend` holds for its one panel, so commands, energy and the
+    schema work unchanged, and is fed its slice of the site's stream by `SiteStream`.
+    """
+
+    def __init__(self, stream: SiteStream, token_store: Path, device_uuid: str, **kwargs) -> None:
+        super().__init__(token_store, device_uuid, **kwargs)
+        self._stream = stream
+        # A flows frame and a block frame may arrive apart, so unlike a whole
+        # site's frame neither one alone describes this panel.
+        self._seen = Frame(epoch_millis=0, site_id=None)
+
+    def start(self, on_schema: SchemaCallback, on_reading: ReadingCallback) -> None:
+        self._on_schema = on_schema
+        self._on_reading = on_reading
+        self._schema_sent = False
+        self._label_deadline = time.monotonic() + SCHEMA_LABEL_WAIT_SECONDS
+        self._stream.attach()
+
+    def stop(self, join_timeout: float = 10.0) -> None:
+        self._stream.detach(join_timeout)
+
+    def _request_refresh(self, delay: float) -> None:
+        self._stream._request_refresh(delay)
+
+    def _schema_source(self, frame: Frame) -> Frame:
+        return self._seen
+
+    def _apply_frame(self, frame: Frame) -> None:
+        seen = replace(
+            frame,
+            resources={**self._seen.resources, **frame.resources},
+            site_flows={**self._seen.site_flows, **frame.site_flows},
+        )
+        # Something new to describe: schema again, and the coordinator only adds
+        # the entities it has not seen.
+        if seen.resources.keys() != self._seen.resources.keys() or (
+            seen.site_flows.keys() != self._seen.site_flows.keys()
+        ):
+            self._schema_sent = False
+        self._seen = seen
+        super()._apply_frame(frame)
+
+
+class SiteStream(CloudBackend):
+    """The one stream of a site with several panels, split between them.
+
+    Starts once every panel has attached, so none misses the first snapshot.
+    """
+
+    def __init__(
+        self,
+        token_store: Path,
+        device_uuid: str,
+        *,
+        routes: SiteRoutes,
+        user_id: str | None = None,
+        serial: str | None = None,
+    ) -> None:
+        super().__init__(
+            token_store, device_uuid, user_id=user_id, serial=serial, site_id=routes.site_id
+        )
+        self._routes = routes
+        self._panels: dict[str, SitePanelBackend] = {}
+        self._attached = 0
+        self._unrouted: set[str | None] = set()
+
+    def panel_backend(
+        self, key: str, serial: str | None, on_auth_failed: AuthFailedCallback | None = None
+    ) -> SitePanelBackend:
+        # Any panel's coordinator can raise the prompt; there is one entry to reauth.
+        self._on_auth_failed = self._on_auth_failed or on_auth_failed
+        panel = SitePanelBackend(
+            self,
+            self._token_store,
+            self._device_uuid,
+            user_id=self._user_id,
+            serial=serial,
+            host=self._host,
+            key_name=self._key_name,
+            on_auth_failed=on_auth_failed,
+        )
+        self._panels[key] = panel
+        return panel
+
+    @property
+    def routes(self) -> SiteRoutes:
+        return self._routes
+
+    def attach(self) -> None:
+        self._attached += 1
+        if self._attached == len(self._panels):
+            super().start(lambda _schema: None, lambda _reading: None)
+
+    def detach(self, join_timeout: float = 10.0) -> None:
+        self._attached -= 1
+        if self._attached == 0:
+            super().stop(join_timeout)
+
+    def _refresh_circuits(self, channel: str, *, announce: bool = False) -> None:
+        parts = split_snapshot(self.subscribe(channel), self._routes, self._unrouted)
+        for key, panel in self._panels.items():
+            circuits = parse_trait_snapshot(parts.get(key, b""))
+            if circuits:
+                panel._circuits = circuits
+                if announce:
+                    for info in circuits.values():
+                        if info.switch is not None:
+                            panel._emit_relay_reading(info)
+            panel._label_deadline = 0.0
+
+    def _handle_frame(self, raw: bytes) -> None:
+        try:
+            frame = decode_frame(raw)
+        except Exception as exc:  # noqa: BLE001 — a bad frame must not kill the stream
+            log.debug("undecodable telemetry frame (%d bytes): %s", len(raw), exc)
+            return
+
+        self._last_frame = time.monotonic()
+        for key, part in split_frame(frame, self._routes, self._unrouted).items():
+            panel = self._panels.get(key)
+            if panel is not None:
+                panel._apply_frame(part)

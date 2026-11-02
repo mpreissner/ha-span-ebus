@@ -23,15 +23,23 @@ from .const import (
 )
 from .coordinator import SpanCloudCoordinator, energy_store
 from .span_client import cloud_auth, cloud_grpc
-from .span_client.backend import SiteInfo, pair_by_lookup, parse_sites, primary_panel_for
+from .span_client.backend import (
+    SiteInfo,
+    SiteStream,
+    pair_by_lookup,
+    parse_sites,
+    primary_panel_for,
+    site_routes,
+    stream_identity,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 
-# One coordinator per panel. SPAN puts each panel of a multi-panel install on its
-# own site ("house" in the app), and each needs its own stream: circuit instance
-# ids restart per panel, so a shared stream collides them.
+# One coordinator per panel. A site has one stream: a panel alone on its site takes
+# all of it, and panels sharing a site take their split of it, since circuit
+# instance ids restart per panel. A shared site can also have a site device.
 type SpanConfigEntry = ConfigEntry[list[SpanCloudCoordinator]]
 
 
@@ -39,6 +47,40 @@ def _write_token_file(path: Path, tokens: dict) -> None:
     """Materialize the config-entry tokens into the file the backend refreshes."""
     path.parent.mkdir(parents=True, exist_ok=True)
     cloud_auth.save_tokens(path, cloud_auth.CloudTokens(**tokens))
+
+
+def _site_coordinators(
+    hass: HomeAssistant, entry: SpanConfigEntry, site: SiteInfo, primary_panel: str | None, **common
+) -> list[SpanCloudCoordinator]:
+    """Build the coordinators for one site: one, or one per device if it is shared."""
+    routes = site_routes(site, primary_panel)
+    if routes is None:
+        return [SpanCloudCoordinator(hass, entry, site=site, primary_panel=primary_panel, **common)]
+    identity = stream_identity(
+        site,
+        device_uuid=common["device_uuid"],
+        serial=common["serial"],
+        primary_panel=primary_panel,
+    )
+    stream = SiteStream(
+        common["token_path"],
+        identity.device_uuid,
+        routes=routes,
+        user_id=common["user_id"],
+        serial=identity.serial,
+    )
+    return [
+        SpanCloudCoordinator(
+            hass,
+            entry,
+            site=site,
+            primary_panel=primary_panel,
+            stream=stream,
+            panel=panel,
+            **common,
+        )
+        for panel in routes.devices
+    ]
 
 
 def _discover_sites(token_path: Path) -> list[SiteInfo]:
@@ -80,8 +122,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
             hass.config_entries.async_update_entry(entry, data=data)
         primary_panel = entry.data[CONF_PRIMARY_PANEL]
         coordinators = [
-            SpanCloudCoordinator(hass, entry, site=site, primary_panel=primary_panel, **common)
+            coordinator
             for site in sites
+            for coordinator in _site_coordinators(hass, entry, site, primary_panel, **common)
         ]
     else:
         # Unfamiliar topology shape: fall back to the original single stream
