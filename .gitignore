@@ -25,5 +25,6 @@ span-ca-certs/
 .span-cloud.json
 span_at.txt
 span_id.txt
+span-capture.txt
 
 .claude/
