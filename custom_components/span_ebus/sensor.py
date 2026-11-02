@@ -30,12 +30,10 @@ from homeassistant.const import (
     UnitOfPower,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SpanConfigEntry
-from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import STALE_AFTER_SECONDS, SpanCloudCoordinator
 from .energy import EnergyAccumulator
 from .span_client.backend import POWER_PROPERTY, SITE_NODE, is_main_feed_power, panel_overhead
@@ -74,16 +72,6 @@ def _is_metered(spec: PropertySpec) -> bool:
     return spec.node_id == SITE_NODE and spec.property_id in SITE_FLOW_ENERGY
 
 
-def _device_info(serial: str) -> DeviceInfo:
-    return DeviceInfo(
-        identifiers={(DOMAIN, serial)},
-        name=f"SPAN Panel {serial}",
-        manufacturer=MANUFACTURER,
-        model=MODEL,
-        serial_number=serial,
-    )
-
-
 # unit -> (device_class, native_unit, state_class)
 _UNIT_MAP = {
     "W": (SensorDeviceClass.POWER, UnitOfPower.WATT, SensorStateClass.MEASUREMENT),
@@ -99,8 +87,11 @@ async def async_setup_entry(
     entry: SpanConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator = entry.runtime_data
+    for coordinator in entry.runtime_data:
+        _register(coordinator, async_add_entities)
 
+
+def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntitiesCallback) -> None:
     @callback
     def add_specs(specs: list[PropertySpec]) -> None:
         entities: list[SensorEntity] = []
@@ -131,7 +122,7 @@ class SpanSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
     def __init__(self, coordinator: SpanCloudCoordinator, spec: PropertySpec) -> None:
         super().__init__(coordinator)
         self._key = spec.key
-        serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
+        serial = coordinator.serial
 
         node_label = spec.node_name or spec.node_id
         self._attr_name = f"{node_label} {spec.property_id}".replace("_", " ")
@@ -144,7 +135,7 @@ class SpanSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
         self._attr_native_unit_of_measurement = native_unit
         self._attr_state_class = state_class
 
-        self._attr_device_info = _device_info(serial)
+        self._attr_device_info = coordinator.device_info()
 
     @property
     def native_value(self) -> float | None:
@@ -190,7 +181,7 @@ class SpanEnergySensor(RestoreSensor):
     def __init__(self, coordinator: SpanCloudCoordinator, spec: PropertySpec) -> None:
         self._coordinator = coordinator
         self._key = spec.key
-        serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
+        serial = coordinator.serial
 
         node_label = spec.node_name or spec.node_id
         # "power" is the node's own reading, so "Kitchen energy" rather than
@@ -198,7 +189,7 @@ class SpanEnergySensor(RestoreSensor):
         qualifier = "" if spec.property_id == POWER_PROPERTY else f" {spec.property_id}"
         self._attr_name = f"{node_label}{qualifier} energy".replace("_", " ")
         self._attr_unique_id = f"{serial}_{spec.key}_energy"
-        self._attr_device_info = _device_info(serial)
+        self._attr_device_info = coordinator.device_info()
 
     async def async_added_to_hass(self) -> None:
         """Offer the ledger whatever total this entity was carrying, then follow it.
@@ -248,9 +239,9 @@ class SpanPanelOverheadSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEnt
 
     def __init__(self, coordinator: SpanCloudCoordinator) -> None:
         super().__init__(coordinator)
-        serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
+        serial = coordinator.serial
         self._attr_unique_id = f"{serial}_panel/overhead"
-        self._attr_device_info = _device_info(serial)
+        self._attr_device_info = coordinator.device_info()
 
     @property
     def native_value(self) -> float | None:
@@ -298,9 +289,9 @@ class SpanPanelOverheadEnergySensor(CoordinatorEntity[SpanCloudCoordinator], Res
         # Every reading in a frame carries the frame's stamp, so the main feed's
         # is the time the overhead figure was true at.
         self._feed_key = feed.key
-        serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
+        serial = coordinator.serial
         self._attr_unique_id = f"{serial}_panel/overhead_energy"
-        self._attr_device_info = _device_info(serial)
+        self._attr_device_info = coordinator.device_info()
 
         self._accumulator = EnergyAccumulator(MAX_INTEGRATION_GAP_SECONDS)
         # What the state machine was last told, so an unchanged total is not

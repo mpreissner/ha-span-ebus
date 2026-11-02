@@ -10,6 +10,9 @@ CONF_TOKENS = "tokens"
 CONF_USER_ID = "user_id"
 CONF_DEVICE_UUID = "device_uuid"
 CONF_SERIAL = "serial"
+# Key of the panel that owns the entry's identity. Set once, on the first start
+# that can read the account; None means no panel does, so every panel is scoped.
+CONF_PRIMARY_PANEL = "primary_panel"
 
 # Where the auto-refreshing token file lives, relative to the HA config dir.
 TOKEN_DIR = ".span_ebus"

@@ -24,13 +24,14 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN
+from .const import DOMAIN, MANUFACTURER, MODEL
 from .energy import EnergyLedger
-from .span_client.backend import CloudBackend
+from .span_client.backend import CloudBackend, SiteInfo, stream_identity
 from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,9 +76,12 @@ ENERGY_STORE_VERSION = 1
 ENERGY_SAVE_DELAY_SECONDS = 30
 
 
-def energy_store(hass: HomeAssistant, entry_id: str) -> Store:
-    """The per-entry store holding the energy totals."""
-    return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{entry_id}.energy")
+def energy_store(hass: HomeAssistant, entry_id: str, panel_key: str | None = None) -> Store:
+    """The store holding the energy totals: the entry's own for the panel that owns
+    its identity, one per panel otherwise (the same circuit key exists on every
+    panel)."""
+    scope = f"{entry_id}.{panel_key}" if panel_key else entry_id
+    return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{scope}.energy")
 
 
 @dataclass
@@ -106,18 +110,29 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         device_uuid: str,
         user_id: str | None,
         serial: str | None,
+        site: SiteInfo | None = None,
+        primary_panel: str | None = None,
     ) -> None:
         # No update_interval: this is push, not poll.
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry)
         self.entry = entry
         self.schema: PanelSchema | None = None
+        # The site this coordinator streams, or None for the legacy single-stream
+        # setup. Its serial and model name the HA device.
+        self.site = site
+        self.model = site.model if site else MODEL
+        identity = stream_identity(
+            site, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
+        )
+        self._serial = identity.serial
 
         self._backend = CloudBackend(
             token_path,
-            device_uuid,
+            identity.device_uuid,
             user_id=user_id,
-            serial=serial,
+            serial=identity.serial,
             on_auth_failed=self._on_auth_failed,
+            site_id=site.site_id if site else None,
         )
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
@@ -136,7 +151,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         # once a minute while readings move twice a second — waking every power
         # sensor in the panel to announce a kilowatt-hour would be pure noise.
         self._ledger = EnergyLedger()
-        self._energy_store = energy_store(hass, entry.entry_id)
+        self._energy_store = energy_store(hass, entry.entry_id, identity.store_panel_key)
         self._energy_listeners: list[Callable[[], None]] = []
         self._cancel_energy_poll: Callable[[], None] | None = None
         self._energy_failures = 0
@@ -241,6 +256,26 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         )
 
     # --- entity registration ----------------------------------------------
+
+    @property
+    def serial(self) -> str:
+        """The panel serial entities are keyed and grouped under."""
+        if self.schema is not None:
+            return self.schema.serial
+        if self._serial:
+            return self._serial
+        return "span-cloud"
+
+    def device_info(self) -> DeviceInfo:
+        """One HA device per panel, named by model so two panels are told apart."""
+        serial = self.serial
+        return DeviceInfo(
+            identifiers={(DOMAIN, serial)},
+            name=f"SPAN {self.model} {serial}",
+            manufacturer=MANUFACTURER,
+            model=self.model,
+            serial_number=serial,
+        )
 
     @callback
     def register_entity_adder(

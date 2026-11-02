@@ -11,12 +11,10 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SpanConfigEntry
-from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import SpanCloudCoordinator
 from .span_client.backend import RELAY_PROPERTY
 from .span_client.models import PropertySpec
@@ -31,8 +29,11 @@ async def async_setup_entry(
     entry: SpanConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator = entry.runtime_data
+    for coordinator in entry.runtime_data:
+        _register(coordinator, async_add_entities)
 
+
+def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntitiesCallback) -> None:
     @callback
     def add_specs(specs: list[PropertySpec]) -> None:
         async_add_entities(SpanRelaySwitch(coordinator, spec) for spec in specs)
@@ -53,19 +54,12 @@ class SpanRelaySwitch(CoordinatorEntity[SpanCloudCoordinator], SwitchEntity):
     def __init__(self, coordinator: SpanCloudCoordinator, spec: PropertySpec) -> None:
         super().__init__(coordinator)
         self._key = spec.key
-        serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
+        serial = coordinator.serial
 
         node_label = spec.node_name or spec.node_id
         self._attr_name = f"{node_label} breaker".replace("_", " ")
         self._attr_unique_id = f"{serial}_{spec.key}"
-
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, serial)},
-            name=f"SPAN Panel {serial}",
-            manufacturer=MANUFACTURER,
-            model=MODEL,
-            serial_number=serial,
-        )
+        self._attr_device_info = coordinator.device_info()
 
     @property
     def is_on(self) -> bool | None:

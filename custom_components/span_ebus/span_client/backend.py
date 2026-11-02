@@ -41,6 +41,7 @@ import logging
 import random
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -622,6 +623,138 @@ def parse_sites_hardware_ids(raw: bytes) -> list[str]:
     return out
 
 
+# Panelboard model codes seen in GetSitesForUser. 1-02100-04 is documented in
+# CLOUD-FLOW.md; 1-04100-01 was observed on an account whose second site is a
+# MAIN 16 fed from a MAIN 40. Unknown codes fall back to a generic name.
+PANEL_MODELS = {
+    "1-02100-04": "MAIN 40",
+    "1-04100-01": "MAIN 16",
+}
+
+
+@dataclass(frozen=True)
+class SiteInfo:
+    """One site ("house" in the SPAN app) from GetSitesForUser.
+
+    SPAN can put each panel of a multi-panel install on its own site, so the
+    account's topology is a list of these, not one panel. Layout, by field:
+
+        1 sites[] {
+            1 { 1 site_id ... }
+            3 { 1 member[] { 1 kind  2 hardware_id ... }
+                2 panelboard { 4 { 3 serial  5 model_code }  5 "Panelboard" } }
+        }
+    """
+
+    site_id: str
+    serial: str | None
+    model_code: str | None
+    hardware_ids: tuple[str, ...]
+
+    @property
+    def model(self) -> str:
+        return PANEL_MODELS.get(self.model_code or "", f"Panel {self.model_code or ''}".strip())
+
+    @property
+    def panel_key(self) -> str:
+        """What this panel's energy store and stored choices are keyed by."""
+        return self.serial or self.site_id
+
+
+def parse_sites(raw: bytes) -> list[SiteInfo]:
+    """Split a GetSitesForUser response into its sites, in response order.
+
+    Sites without any subscribable hardware id are dropped — there is nothing
+    to stream for them. Empty on an unfamiliar shape; never raises.
+    """
+    if not raw:
+        return []
+    out: list[SiteInfo] = []
+    try:
+        for site in parse(raw).get_msgs(1):
+            head = site.get_msg_opt(1)
+            hardware_ids: list[str] = []
+            serial = model_code = None
+            for group in site.get_msgs(3):
+                for member in group.get_msgs(1):
+                    value = member.get_str(2)
+                    if value and value not in hardware_ids:
+                        hardware_ids.append(value)
+                for board in group.get_msgs(2):
+                    ident = board.get_msg_opt(4)
+                    if ident is not None and serial is None:
+                        serial = ident.get_str(3)
+                        model_code = ident.get_str(5)
+            if not hardware_ids:
+                continue
+            site_id = (head.get_str(1) if head is not None else None) or hardware_ids[0]
+            out.append(
+                SiteInfo(
+                    site_id=site_id,
+                    serial=serial,
+                    model_code=model_code,
+                    hardware_ids=tuple(hardware_ids),
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 — a shape change must not break setup
+        log.debug("could not split GetSitesForUser into sites: %s", exc)
+        return []
+    return out
+
+
+def site_device_uuid(device_uuid: str, site_id: str) -> str:
+    """A stable, distinct client UUID per site, derived from the entry's own.
+
+    The device UUID names the Ably channel, and the channel is what a
+    SubscribeAndGetTraits registration publishes to — so two sites sharing one
+    UUID would interleave both panels' frames on one channel again.
+    """
+    return str(uuid.uuid5(uuid.UUID(device_uuid), f"site:{site_id}"))
+
+
+@dataclass(frozen=True)
+class StreamIdentity:
+    """What one stream is keyed by: its channel, its entities and its energy."""
+
+    device_uuid: str
+    serial: str | None
+    store_panel_key: str | None
+
+
+def primary_panel_for(sites: list[SiteInfo]) -> str | None:
+    """The panel that owns the entry's identity: an account's only panel, if so.
+
+    An account that starts with several has no panel the entry's identity could
+    mean, so none owns it. Recorded once, because the count changes later and the
+    answer must not: see `stream_identity`.
+    """
+    return sites[0].panel_key if len(sites) == 1 else None
+
+
+def stream_identity(
+    site: SiteInfo | None,
+    *,
+    device_uuid: str,
+    serial: str | None,
+    primary_panel: str | None,
+) -> StreamIdentity:
+    """Key a stream by panel, except for the panel that owns the entry's identity.
+
+    That panel keeps the entry's own identity for good, so its entities, its
+    energy totals and its Ably channel carry on untouched, even after the account
+    gains another panel. Any other panel takes its own serial, since the entry's
+    single saved one is not true of it, and the site id stands in when the
+    response has none: two panels must never share a device.
+    """
+    if site is None or site.panel_key == primary_panel:
+        return StreamIdentity(device_uuid, serial or (site.serial if site else None), None)
+    return StreamIdentity(
+        site_device_uuid(device_uuid, site.site_id),
+        site.panel_key,
+        site.panel_key,
+    )
+
+
 def build_subscribe_request(channel: str, hardware_ids: Iterable[str]) -> bytes:
     """Serialize a SubscribeAndGetTraitsRequest for `channel`.
 
@@ -688,11 +821,18 @@ class CloudBackend:
         key_name: str = cloud_ably.DEFAULT_KEY_NAME,
         reconnect_seconds: float = 5.0,
         on_auth_failed: AuthFailedCallback | None = None,
+        site_id: str | None = None,
     ) -> None:
         self._token_store = Path(token_store)
         self._device_uuid = device_uuid
         self._user_id = user_id
         self._serial = serial
+        # When set, this backend streams only that site's panel. Each site needs
+        # its own backend (and its own device UUID, hence its own Ably channel):
+        # circuit instance ids restart per panel, so two panels on one channel
+        # collide on ids like 21-27 and overwrite each other's names, readings
+        # and relay targets. None keeps the original whole-account behavior.
+        self._site_id = site_id
         self._host = host
         self._key_name = key_name
         self._reconnect_seconds = reconnect_seconds
@@ -1058,12 +1198,23 @@ class CloudBackend:
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
             if self._serial is None or not self._hardware_ids:
                 sites = grpc.get_sites_for_user()
+                site = None
+                if self._site_id is not None:
+                    site = next((s for s in parse_sites(sites) if s.site_id == self._site_id), None)
+                    if site is None:
+                        raise cloud_grpc.GrpcError(
+                            5,
+                            f"site {self._site_id} is no longer on this account",
+                            "GetSitesForUser",
+                        )
                 if self._serial is None:
-                    self._serial = _parse_sites_serial(sites)
+                    self._serial = (site.serial if site else None) or _parse_sites_serial(sites)
                     if self._serial:
                         log.info("resolved panel serial %s from GetSitesForUser", self._serial)
                 if not self._hardware_ids:
-                    self._hardware_ids = parse_sites_hardware_ids(sites)
+                    self._hardware_ids = (
+                        list(site.hardware_ids) if site else parse_sites_hardware_ids(sites)
+                    )
                     if (
                         self._resolved_hardware_ids
                         and self._hardware_ids != self._resolved_hardware_ids
