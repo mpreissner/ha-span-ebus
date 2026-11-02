@@ -14,6 +14,11 @@ CONF_SERIAL = "serial"
 # that can read the account; None means no panel does, so every panel is scoped.
 CONF_PRIMARY_PANEL = "primary_panel"
 
+# Config-entry option keys. `panels` absent means nothing has been chosen yet;
+# `declined` is what the user has seen and left off, so it isn't announced again.
+CONF_PANELS = "panels"
+CONF_DECLINED = "declined"
+
 # Where the auto-refreshing token file lives, relative to the HA config dir.
 TOKEN_DIR = ".span_ebus"
 

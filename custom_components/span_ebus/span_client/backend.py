@@ -646,6 +646,7 @@ class PanelInfo:
     serial: str | None
     model_code: str | None
     hardware_id: str | None  # the frame and trait resource id, once paired
+    stored_key: str | None = None  # the key already recorded for it, which holds
 
     @property
     def model(self) -> str:
@@ -654,7 +655,7 @@ class PanelInfo:
     @property
     def key(self) -> str:
         """What this panel's energy store and stored choices are keyed by."""
-        return self.serial or self.hardware_id or self.site_id
+        return self.stored_key or self.serial or self.hardware_id or self.site_id
 
     def answers_to(self, key: str | None) -> bool:
         """Whether a recorded key means this panel.
@@ -822,6 +823,14 @@ def _lookup_gateway(panel: PanelInfo, lookup: Callable[[bytes], bytes]) -> str |
     return ids[0] if holds_board and len(ids) == 1 else None
 
 
+def discover_sites(access_token: str) -> list[SiteInfo]:
+    """Blocking: read the account's sites and pair their panels."""
+    with cloud_grpc.CloudGrpcClient(access_token) as grpc:
+        return pair_by_lookup(
+            parse_sites(grpc.get_sites_for_user()), grpc.get_resources_for_hardware
+        )
+
+
 def pair_by_lookup(sites: list[SiteInfo], lookup: Callable[[bytes], bytes]) -> list[SiteInfo]:
     """Ask the cloud about boards the site response could not pair.
 
@@ -913,6 +922,8 @@ class SiteRoutes:
     # Where the site's own block and flows go: the primary panel if the site holds
     # it, since moving them would orphan their history, otherwise a site device.
     flows_owner: PanelInfo
+    # Every gateway on the site, ticked or not, so names don't shift with the ticks.
+    gateways: tuple[str, ...] = ()
 
     @property
     def devices(self) -> tuple[PanelInfo, ...]:
@@ -928,13 +939,37 @@ class SiteRoutes:
         return routes
 
 
-def site_routes(site: SiteInfo, primary_panel: str | None) -> SiteRoutes | None:
+def _gateway_panels(site: SiteInfo) -> tuple[PanelInfo, ...]:
+    """One panel per gateway: a board that could not be paired leaves it nameless."""
+    boards = {panel.hardware_id: panel for panel in site.panels if panel.hardware_id}
+    return tuple(
+        boards.get(gateway, PanelInfo(site.site_id, None, None, gateway))
+        for gateway in site.gateways
+    )
+
+
+def site_choices(site: SiteInfo) -> tuple[PanelInfo, ...]:
+    """What a site offers the picker: the devices it will really become."""
+    if len(site.panels) < 2 or len(site.gateways) < 2:
+        return (site.lead,)
+    return _gateway_panels(site)
+
+
+def _is_chosen(panel: PanelInfo, chosen: Iterable[str]) -> bool:
+    return any(panel.answers_to(key) for key in chosen)
+
+
+def site_routes(
+    site: SiteInfo, primary_panel: str | None, chosen: Iterable[str] | None = None
+) -> SiteRoutes | None:
     """Plan the split of a site with several panels. None means don't split.
 
     One panel takes every block, as it always has. Several panels behind a single
     gateway share one block, where instance ids are unique, so nothing collides
     and the site stays one device. Otherwise each gateway is one panel: a board
-    that could not be paired with it leaves it nameless but still correct.
+    that could not be paired with it leaves it nameless but still correct. A panel
+    left out of `chosen` gets no route, so its blocks are dropped, and a site that
+    is split stays split however few of its panels are chosen.
     """
     if len(site.panels) < 2:
         return None
@@ -946,24 +981,102 @@ def site_routes(site: SiteInfo, primary_panel: str | None) -> SiteRoutes | None:
             len(site.gateways),
         )
         return None
-    boards = {panel.hardware_id: panel for panel in site.panels if panel.hardware_id}
-    panels = tuple(
-        boards.get(gateway, PanelInfo(site.site_id, None, None, gateway))
-        for gateway in site.gateways
-    )
+    panels = _gateway_panels(site)
+    if chosen is not None:
+        panels = tuple(panel for panel in panels if _is_chosen(panel, chosen))
     owner = next((panel for panel in panels if panel.answers_to(primary_panel)), None)
     return SiteRoutes(
-        site.site_id, panels, owner or PanelInfo(site.site_id, None, None, site.site_id)
+        site.site_id,
+        panels,
+        owner or PanelInfo(site.site_id, None, None, site.site_id),
+        site.gateways,
     )
+
+
+def _panel_name(panel: PanelInfo, gateways: tuple[str, ...]) -> str:
+    if panel.serial:
+        return f"SPAN {panel.model} {panel.serial}"
+    if panel.hardware_id in gateways:
+        return f"SPAN panel {gateways.index(panel.hardware_id) + 1}"
+    return "SPAN site"
 
 
 def device_name(panel: PanelInfo, routes: SiteRoutes) -> str:
     """Name a device on a shared site. Never the site's label: that is an address."""
-    if panel.serial:
-        return f"SPAN {panel.model} {panel.serial}"
-    if panel in routes.panels:
-        return f"SPAN panel {routes.panels.index(panel) + 1}"
-    return "SPAN site"
+    return _panel_name(panel, routes.gateways)
+
+
+def panel_labels(sites: list[SiteInfo]) -> dict[str, str]:
+    """Panel key -> what the picker calls it. Forms only: a site's name is an address."""
+    labels: dict[str, str] = {}
+    for site in sites:
+        for panel in site_choices(site):
+            name = _panel_name(panel, site.gateways).removeprefix("SPAN ")
+            labels[panel.key] = f"{site.name}: {name}" if site.name else name
+    return labels
+
+
+def pin_panels(sites: list[SiteInfo], recorded: Iterable[str]) -> list[SiteInfo]:
+    """Hold each panel to the key already recorded for it.
+
+    A panel recorded by hardware id keeps that key once its serial is known, or
+    pairing it later would make it a new device with new totals.
+    """
+    keys = tuple(recorded)
+
+    def pin(panel: PanelInfo) -> PanelInfo:
+        key = next((key for key in keys if panel.answers_to(key)), None)
+        return replace(panel, stored_key=key) if key else panel
+
+    return [replace(site, panels=tuple(pin(panel) for panel in site.panels)) for site in sites]
+
+
+@dataclass(frozen=True)
+class PanelPlan:
+    """The account's panels read against the entry's stored answers."""
+
+    sites: list[SiteInfo]
+    chosen: tuple[str, ...]  # recorded keys, or every panel if nothing was chosen yet
+    new: tuple[str, ...]  # on the account, and neither chosen nor declined
+    departed: int  # recorded, but no longer on the account
+
+    @property
+    def running(self) -> list[SiteInfo]:
+        return [
+            site
+            for site in self.sites
+            if any(_is_chosen(panel, self.chosen) for panel in site_choices(site))
+        ]
+
+
+def panel_plan(
+    sites: list[SiteInfo], recorded: Iterable[str] | None, declined: Iterable[str] = ()
+) -> PanelPlan:
+    """Decide which panels run. No record yet means every panel does.
+
+    A panel the record doesn't know stays off until the user says otherwise: it
+    may not belong to this Home Assistant.
+    """
+    known = [*(recorded or ()), *declined]
+    pinned = pin_panels(sites, known)
+    panels = [panel for site in pinned for panel in site_choices(site)]
+    if recorded is None:
+        return PanelPlan(pinned, tuple(panel.key for panel in panels), (), 0)
+    new = tuple(panel.key for panel in panels if not _is_chosen(panel, known))
+    departed = sum(1 for key in recorded if not any(p.answers_to(key) for p in panels))
+    return PanelPlan(pinned, tuple(recorded), new, departed)
+
+
+def device_keys(
+    sites: list[SiteInfo], chosen: Iterable[str], primary_panel: str | None
+) -> set[str]:
+    """The HA devices these panels make, including any site device they bring."""
+    picked = tuple(chosen)
+    keys: set[str] = set()
+    for site in panel_plan(sites, picked).running:
+        routes = site_routes(site, primary_panel, picked)
+        keys |= {device.key for device in routes.devices} if routes else {site.lead.key}
+    return keys
 
 
 def panel_identity(

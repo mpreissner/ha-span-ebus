@@ -11,9 +11,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 
 from .const import (
+    CONF_DECLINED,
     CONF_DEVICE_UUID,
+    CONF_PANELS,
     CONF_PRIMARY_PANEL,
     CONF_SERIAL,
     CONF_TOKENS,
@@ -22,12 +25,13 @@ from .const import (
     TOKEN_DIR,
 )
 from .coordinator import SpanCloudCoordinator, energy_store
-from .span_client import cloud_auth, cloud_grpc
+from .span_client import cloud_auth
 from .span_client.backend import (
+    PanelPlan,
     SiteInfo,
     SiteStream,
-    pair_by_lookup,
-    parse_sites,
+    discover_sites,
+    panel_plan,
     primary_panel_for,
     site_routes,
     stream_identity,
@@ -50,10 +54,15 @@ def _write_token_file(path: Path, tokens: dict) -> None:
 
 
 def _site_coordinators(
-    hass: HomeAssistant, entry: SpanConfigEntry, site: SiteInfo, primary_panel: str | None, **common
+    hass: HomeAssistant,
+    entry: SpanConfigEntry,
+    site: SiteInfo,
+    primary_panel: str | None,
+    chosen: tuple[str, ...],
+    **common,
 ) -> list[SpanCloudCoordinator]:
     """Build the coordinators for one site: one, or one per device if it is shared."""
-    routes = site_routes(site, primary_panel)
+    routes = site_routes(site, primary_panel, chosen)
     if routes is None:
         return [SpanCloudCoordinator(hass, entry, site=site, primary_panel=primary_panel, **common)]
     identity = stream_identity(
@@ -85,10 +94,31 @@ def _site_coordinators(
 
 def _discover_sites(token_path: Path) -> list[SiteInfo]:
     """Executor thread: prove the credentials and read the account's sites."""
-    access_token = cloud_auth.access_token_from_store(token_path)
-    with cloud_grpc.CloudGrpcClient(access_token) as grpc:
-        sites = parse_sites(grpc.get_sites_for_user())
-        return pair_by_lookup(sites, grpc.get_resources_for_hardware)
+    return discover_sites(cloud_auth.access_token_from_store(token_path))
+
+
+def _new_panels_issue(entry: SpanConfigEntry) -> str:
+    return f"new_panels_{entry.entry_id}"
+
+
+def _note_panels(hass: HomeAssistant, entry: SpanConfigEntry, plan: PanelPlan) -> None:
+    """Tell the user about panels the stored list doesn't account for."""
+    if plan.departed:
+        _LOGGER.info("%d chosen SPAN panel(s) are no longer on the account", plan.departed)
+    if not plan.running:
+        _LOGGER.warning("none of the chosen SPAN panels are on the account; nothing will run")
+    if plan.new:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            _new_panels_issue(entry),
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="new_panels",
+            translation_placeholders={"count": str(len(plan.new))},
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, _new_panels_issue(entry))
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
@@ -121,10 +151,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
             data = {**entry.data, CONF_PRIMARY_PANEL: primary_panel_for(sites)}
             hass.config_entries.async_update_entry(entry, data=data)
         primary_panel = entry.data[CONF_PRIMARY_PANEL]
+        plan = panel_plan(
+            sites, entry.options.get(CONF_PANELS), entry.options.get(CONF_DECLINED, ())
+        )
+        if CONF_PANELS not in entry.options:
+            options = {**entry.options, CONF_PANELS: list(plan.chosen)}
+            hass.config_entries.async_update_entry(entry, options=options)
+        _note_panels(hass, entry, plan)
         coordinators = [
             coordinator
-            for site in sites
-            for coordinator in _site_coordinators(hass, entry, site, primary_panel, **common)
+            for site in plan.running
+            for coordinator in _site_coordinators(
+                hass, entry, site, primary_panel, plan.chosen, **common
+            )
         ]
     else:
         # Unfamiliar topology shape: fall back to the original single stream
@@ -159,6 +198,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> Non
     The per-panel stores are named after panel keys that are only known while the
     entry runs, so they are found by prefix.
     """
+    ir.async_delete_issue(hass, DOMAIN, _new_panels_issue(entry))
     await energy_store(hass, entry.entry_id).async_remove()
     storage = Path(hass.config.path(".storage"))
     prefix = f"{DOMAIN}.{entry.entry_id}."

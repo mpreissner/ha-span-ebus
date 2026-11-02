@@ -131,9 +131,10 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         # setup. Its serial and model name the HA device.
         self.site = site
         self.model = site.model if site else MODEL
-        # A serial-less device on a shared site has no serial or model to show.
+        # The board behind this device, where its key isn't its serial. Without a
+        # serial there is no serial or model to show.
+        self._board: PanelInfo | None = None
         self._device_name: str | None = None
-        self._labelled = True
         if stream is not None and panel is not None and site is not None:
             # One device of a site whose stream it shares with the others.
             identity = panel_identity(
@@ -141,7 +142,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
             )
             self.model = panel.model
             self._device_name = device_name(panel, stream.routes)
-            self._labelled = panel.serial is not None
+            self._board = panel
             self._backend = stream.panel_backend(
                 panel.key, identity.serial, on_auth_failed=self._on_auth_failed
             )
@@ -157,6 +158,8 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
                 on_auth_failed=self._on_auth_failed,
                 site_id=site.site_id if site else None,
             )
+            if site and site.lead.serial and site.lead.key != site.lead.serial:
+                self._board = site.lead
         self._serial = identity.serial
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
@@ -292,13 +295,14 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
 
     def device_info(self) -> DeviceInfo:
         """One HA device per panel, named by model so two panels are told apart."""
-        serial = self.serial
+        board = self._board
+        serial = board.serial if board else self.serial
         return DeviceInfo(
-            identifiers={(DOMAIN, serial)},
+            identifiers={(DOMAIN, self.serial)},
             name=self._device_name or f"SPAN {self.model} {serial}",
             manufacturer=MANUFACTURER,
-            model=self.model if self._labelled else None,
-            serial_number=serial if self._labelled else None,
+            model=self.model if serial else None,
+            serial_number=serial,
         )
 
     @callback
