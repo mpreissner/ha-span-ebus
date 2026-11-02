@@ -23,7 +23,7 @@ from .const import (
 )
 from .coordinator import SpanCloudCoordinator, energy_store
 from .span_client import cloud_auth, cloud_grpc
-from .span_client.backend import SiteInfo, parse_sites, primary_panel_for
+from .span_client.backend import SiteInfo, pair_by_lookup, parse_sites, primary_panel_for
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,7 +45,8 @@ def _discover_sites(token_path: Path) -> list[SiteInfo]:
     """Executor thread: prove the credentials and read the account's sites."""
     access_token = cloud_auth.access_token_from_store(token_path)
     with cloud_grpc.CloudGrpcClient(access_token) as grpc:
-        return parse_sites(grpc.get_sites_for_user())
+        sites = parse_sites(grpc.get_sites_for_user())
+        return pair_by_lookup(sites, grpc.get_resources_for_hardware)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
