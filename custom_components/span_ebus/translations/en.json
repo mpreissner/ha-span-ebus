@@ -16,17 +16,52 @@
           "email": "Email",
           "password": "Password"
         }
+      },
+      "panels": {
+        "title": "Choose your panels",
+        "description": "These panels are on your SPAN account. Tick the ones that belong to this Home Assistant.",
+        "data": {
+          "panels": "Panels"
+        }
       }
     },
     "error": {
       "invalid_auth": "Invalid email or password.",
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
-      "no_telemetry": "Signed in, but SPAN published no telemetry within the setup timeout. Check that your panel is online in the SPAN mobile app, then try again."
+      "no_telemetry": "Signed in, but SPAN published no telemetry within the setup timeout. Check that your panel is online in the SPAN mobile app, then try again.",
+      "no_panels": "Choose at least one panel."
     },
     "abort": {
       "already_configured": "This SPAN account is already configured.",
       "reauth_successful": "Re-authentication was successful.",
       "wrong_account": "The credentials are for a different SPAN account than the one being re-authenticated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Choose your panels",
+        "description": "Tick the panels on your SPAN account that belong to this Home Assistant.",
+        "data": {
+          "panels": "Panels"
+        }
+      },
+      "confirm_remove": {
+        "title": "Remove panels?",
+        "description": "This removes {count} device(s) and their entities from Home Assistant. Saved energy totals are kept, so ticking a panel again resumes them."
+      }
+    },
+    "error": {
+      "no_panels": "Choose at least one panel."
+    },
+    "abort": {
+      "cannot_connect": "Could not reach the SPAN cloud. Please try again."
+    }
+  },
+  "issues": {
+    "new_panels": {
+      "title": "New SPAN panel found",
+      "description": "{count} panel(s) on your SPAN account are not set up here. To add or dismiss them, open the SPAN Panel (eBus) integration, select Configure and tick the panels that belong to this Home Assistant."
     }
   }
 }
