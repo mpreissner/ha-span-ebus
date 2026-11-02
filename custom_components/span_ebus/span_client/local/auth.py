@@ -139,7 +139,7 @@ def fetch_ca_from_broker(panel: PanelConfig, serial: str) -> Path:
         candidate.write_text(pem)
         if tls.verifies_peer(candidate, host, port, timeout=REGISTER_TIMEOUT):
             candidate.replace(path)
-            log.info("recovered CA certificate to %s", path)
+            log.debug("recovered CA certificate to %s", path)
             return path
         candidate.unlink(missing_ok=True)
 
@@ -182,7 +182,7 @@ def fetch_ca_certificate(panel: PanelConfig, serial: str) -> Path:
     panel.ca_cert_dir.mkdir(parents=True, exist_ok=True)
     path = panel.ca_cert_dir / f"{serial}.crt"
     path.write_text(resp.text)
-    log.info("cached CA certificate at %s", path)
+    log.debug("cached CA certificate at %s", path)
     return path
 
 
@@ -227,7 +227,7 @@ def register(
     resp.raise_for_status()
 
     creds = Credentials.from_response(resp.json())
-    log.info("registered with panel %s (%s)", creds.serial, creds.hostname)
+    log.debug("registered with panel %s (%s)", creds.serial, creds.hostname)
     return creds
 
 
@@ -269,7 +269,7 @@ def save_credentials(auth_file: Path, creds: Credentials) -> None:
     auth_file.parent.mkdir(parents=True, exist_ok=True)
     with open(auth_file, "w", opener=_open_0600) as fh:
         json.dump(data, fh, indent=2)
-    log.info("saved credentials for %s to %s", creds.serial, auth_file)
+    log.debug("saved credentials for %s to %s", creds.serial, auth_file)
 
 
 def load_credentials(auth_file: Path, serial: str | None = None) -> Credentials | None:

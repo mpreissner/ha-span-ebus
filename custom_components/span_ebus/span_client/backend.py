@@ -1517,7 +1517,7 @@ class CloudBackend:
             attached_at = time.monotonic()
             try:
                 token, channel = self.bootstrap()
-                log.info("attaching to Ably channel %s", channel)
+                log.debug("attaching to Ably channel %s", channel)
                 # The watchdog measures from the attach, not from the last frame
                 # of the previous connection, so the reconnect gets a full budget.
                 self._last_frame = attached_at = time.monotonic()
@@ -1643,13 +1643,13 @@ class CloudBackend:
                     if site is None:
                         raise cloud_grpc.GrpcError(
                             5,
-                            f"site {self._site_id} is no longer on this account",
+                            "the site is no longer on this account",
                             "GetSitesForUser",
                         )
                 if self._serial is None:
                     self._serial = (site.serial if site else None) or _parse_sites_serial(sites)
                     if self._serial:
-                        log.info("resolved panel serial %s from GetSitesForUser", self._serial)
+                        log.debug("resolved panel serial %s from GetSitesForUser", self._serial)
                 if not self._hardware_ids:
                     self._hardware_ids = (
                         list(site.hardware_ids) if site else parse_sites_hardware_ids(sites)
@@ -1661,8 +1661,13 @@ class CloudBackend:
                         # Worth a WARNING: this is the silent-channel cause, and
                         # a line naming both sets is what proves it in the field.
                         log.warning(
-                            "subscribable hardware ids changed (%s -> %s); the "
+                            "subscribable hardware ids changed (%d -> %d); the "
                             "previous set is why the channel went quiet",
+                            len(self._resolved_hardware_ids),
+                            len(self._hardware_ids),
+                        )
+                        log.debug(
+                            "hardware ids were %s, now %s",
                             self._resolved_hardware_ids,
                             self._hardware_ids,
                         )
@@ -1769,9 +1774,8 @@ class CloudBackend:
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
             snapshot = grpc.subscribe_and_get_traits(request)
         log.info(
-            "subscribed %d resource(s) for telemetry on %s (%d-byte trait snapshot)",
+            "subscribed %d resource(s) for telemetry (%d-byte trait snapshot)",
             len(self._hardware_ids),
-            channel,
             len(snapshot),
         )
         return snapshot

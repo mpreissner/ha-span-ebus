@@ -342,7 +342,7 @@ def authenticate(username: str, password: str) -> CloudTokens:
         raise CloudAuthError(
             f"login did not complete; Cognito returned challenge {result.get('ChallengeName')!r}"
         )
-    log.info("Cognito login succeeded for %s", username)
+    log.debug("Cognito login succeeded for %s", username)
     return _tokens_from_result(auth)
 
 

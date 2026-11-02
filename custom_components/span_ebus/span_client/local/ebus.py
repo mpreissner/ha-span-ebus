@@ -79,7 +79,7 @@ class EbusBackend:
         if not self._client:
             raise RuntimeError("backend not started")
         topic = f"ebus/5/{self._creds.serial}/{key}/set"
-        log.info("command %s -> %s", topic, value)
+        log.debug("command %s -> %s", topic, value)
         self._client.publish(topic, value, qos=1)
 
     # --- mqtt callbacks ----------------------------------------------------
@@ -89,7 +89,7 @@ class EbusBackend:
             log.error("panel broker refused connection: %s", reason_code)
             return
         topic = f"ebus/5/{self._creds.serial}/#"
-        log.info("connected; subscribing to %s", topic)
+        log.debug("connected; subscribing to %s", topic)
         client.subscribe(topic, qos=1)
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
