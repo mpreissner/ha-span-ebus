@@ -75,7 +75,7 @@ def parse_description(serial: str, doc: dict[str, Any]) -> PanelSchema:
 
     nodes = doc.get("nodes") or {}
     if not nodes:
-        log.warning("$description for %s contained no nodes", serial)
+        log.warning("panel $description contained no nodes")
 
     for node_id, node in nodes.items():
         kind = classify_node(node_id)
@@ -112,7 +112,7 @@ def parse_description(serial: str, doc: dict[str, Any]) -> PanelSchema:
                 )
             )
 
-    log.info(
+    log.debug(
         "parsed schema for %s: %d properties across %d nodes",
         serial,
         len(schema.properties),

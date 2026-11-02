@@ -1182,3 +1182,46 @@ def test_panel_overhead_is_never_negative():
     schema, readings = _overhead_inputs()
     readings["circuit-54/power"] = replace(readings["circuit-54/power"], value="2100.000")
     assert cloud.panel_overhead(schema, readings) == 0.0
+
+
+def test_private_ids_stay_below_info_level(monkeypatch, caplog, tmp_path):
+    ids = iter([["gw-secret-old"], ["gw-secret-new"]])
+
+    class FakeGrpc:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_sites_for_user(self):
+            return b"sites"
+
+        def ably_token(self, request):
+            return b"token"
+
+        def subscribe_and_get_traits(self, request):
+            return b"snapshot"
+
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", lambda path: "at")
+    monkeypatch.setattr(cloud.cloud_grpc, "CloudGrpcClient", lambda *a, **kw: FakeGrpc())
+    monkeypatch.setattr(cloud, "parse_sites_hardware_ids", lambda sites: next(ids))
+    monkeypatch.setattr(cloud, "_parse_sites_serial", lambda sites: "XC-SECRET")
+    monkeypatch.setattr(
+        cloud,
+        "parse_ably_token",
+        lambda raw, fallback_channel=None: cloud.AblyDirective(
+            token="tok", token_request=None, channel="c:user-secret:uuid-secret"
+        ),
+    )
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", user_id="u")
+    with caplog.at_level("INFO", logger=cloud.log.name):
+        backend.bootstrap()
+        backend._note_attach_ended(delivered=False, reason="no telemetry for 90s")
+        _, channel = backend.bootstrap()
+        backend.subscribe(channel)
+
+    assert "subscribable hardware ids changed" in caplog.text
+    assert "subscribed 1 resource(s)" in caplog.text
+    assert "secret" not in caplog.text.lower()
