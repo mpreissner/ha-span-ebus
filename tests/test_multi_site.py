@@ -12,7 +12,9 @@ import uuid
 
 from span_client import cloud_auth
 from span_client.backend import (
+    PanelInfo,
     SiteInfo,
+    pair_by_lookup,
     parse_sites,
     primary_panel_for,
     site_device_uuid,
@@ -70,7 +72,7 @@ ENTRY_UUID = str(uuid.uuid4())
 
 
 def _info(site_id: str = "site-a", serial: str | None = "XC-AAAA") -> SiteInfo:
-    return SiteInfo(site_id, serial, "1-02100-04", (site_id,))
+    return SiteInfo(site_id, (site_id,), (PanelInfo(site_id, serial, "1-02100-04", None),))
 
 
 def test_the_primary_panel_keeps_the_entrys_identity():
@@ -157,6 +159,40 @@ def test_the_others_stay_scoped_when_the_primary_leaves_the_account():
     assert identity.store_panel_key == "XC-BBBB"
 
 
+def test_a_primary_recorded_by_hardware_id_survives_a_serial_appearing():
+    site = SiteInfo("site-a", ("gw-a",), (PanelInfo("site-a", "XC-AAAA", None, "gw-a"),))
+    identity = stream_identity(site, device_uuid=ENTRY_UUID, serial=None, primary_panel="gw-a")
+    assert (identity.device_uuid, identity.store_panel_key) == (ENTRY_UUID, None)
+
+
+def test_the_primary_keeps_its_identity_when_a_board_joins_its_site_ahead_of_it():
+    panels = (
+        PanelInfo("site-a", "XC-NEW", None, "gw-new"),
+        PanelInfo("site-a", "XC-AAAA", None, "gw-a"),
+    )
+    site = SiteInfo("site-a", ("gw-new", "gw-a"), panels)
+    identity = stream_identity(site, device_uuid=ENTRY_UUID, serial=None, primary_panel="XC-AAAA")
+    assert (identity.device_uuid, identity.store_panel_key) == (ENTRY_UUID, None)
+
+
+def test_the_primary_keeps_its_identity_when_a_panel_appears_on_another_site():
+    primary = _info("site-a", "XC-AAAA")
+    other = _info("site-b", "XC-BBBB")
+    kept = stream_identity(primary, device_uuid=ENTRY_UUID, serial=None, primary_panel="XC-AAAA")
+    moved = stream_identity(other, device_uuid=ENTRY_UUID, serial=None, primary_panel="XC-AAAA")
+    assert kept.device_uuid == ENTRY_UUID
+    assert (moved.device_uuid, moved.store_panel_key) == (
+        site_device_uuid(ENTRY_UUID, "site-b"),
+        "XC-BBBB",
+    )
+
+
+def test_a_serial_less_panel_is_keyed_by_its_hardware_id():
+    panel = PanelInfo("site-a", None, None, "gw-a")
+    assert panel.key == "gw-a"
+    assert not panel.answers_to(None)
+
+
 def test_a_site_uuid_is_stable_across_restarts():
     assert site_device_uuid(ENTRY_UUID, "site-a") == site_device_uuid(ENTRY_UUID, "site-a")
 
@@ -185,3 +221,177 @@ def test_panels_refreshing_together_do_not_break_the_shared_token_store(tmp_path
     assert errors == []
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert [p.name for p in tmp_path.iterdir()] == ["entry.json"]
+
+
+# Two panels on one site. No such response has been seen: shapes A, B and C are
+# the guesses from the spec, not captures, and every id below is invented.
+
+
+def _board(serial: str | None, model: str = "1-02100-04", links: tuple[str, ...] = ()) -> bytes:
+    ident = field_message(4, field_string(3, serial) + field_string(5, model)) if serial else b""
+    components = b"".join(field_message(8, field_message(7, field_string(1, h))) for h in links)
+    return field_message(2, ident + field_string(5, "<board name>") + components)
+
+
+def _shared_site(*groups: bytes) -> bytes:
+    head = field_message(1, field_string(1, "site-1") + field_string(2, "<address>"))
+    return field_message(1, head + b"".join(field_message(3, g) for g in groups))
+
+
+def _pairs(raw: bytes) -> dict[str | None, str | None]:
+    (site,) = parse_sites(raw)
+    return {p.serial: p.hardware_id for p in site.panels}
+
+
+def test_a_one_panel_site_pairs_without_any_component_link():
+    assert _pairs(_site("s", "XC-1", "1-02100-04", [(4, "s"), (5, "gw")])) == {"XC-1": "gw"}
+
+
+def test_a_board_with_no_serial_stays_paired_on_a_one_panel_site():
+    (site,) = parse_sites(_shared_site(_member(4, "site-1") + _member(5, "gw") + _board(None)))
+    assert site.lead.hardware_id == "gw"
+    assert site.lead.key == "gw"
+
+
+def test_a_site_with_no_board_still_has_a_panel():
+    (site,) = parse_sites(_shared_site(_member(4, "site-1") + _member(5, "gw")))
+    assert [p.key for p in site.panels] == ["gw"]
+
+
+def test_guessed_shape_a_pairs_within_each_group():
+    raw = _shared_site(
+        _member(4, "site-1") + _member(5, "gw-1") + _board("XC-A"),
+        _member(5, "gw-2") + _board("XC-B"),
+    )
+    assert _pairs(raw) == {"XC-A": "gw-1", "XC-B": "gw-2"}
+
+
+def test_guessed_shape_b_pairs_by_component_ids_not_by_order():
+    raw = _shared_site(
+        _member(4, "site-1")
+        + _member(5, "gw-2")
+        + _member(5, "gw-1")
+        + _board("XC-A", links=("site-1", "gw-1"))
+        + _board("XC-B", links=("gw-2",))
+    )
+    assert _pairs(raw) == {"XC-A": "gw-1", "XC-B": "gw-2"}
+
+
+def test_matching_counts_never_pair_by_order():
+    raw = _shared_site(
+        _member(4, "site-1")
+        + _member(5, "gw-1")
+        + _member(5, "gw-2")
+        + _board("XC-A")
+        + _board("XC-B")
+    )
+    assert _pairs(raw) == {"XC-A": None, "XC-B": None}
+
+
+def test_guessed_shape_c_leaves_two_boards_on_one_gateway_unpaired():
+    raw = _shared_site(_member(4, "site-1") + _member(5, "gw") + _board("XC-A") + _board("XC-B"))
+    assert _pairs(raw) == {"XC-A": None, "XC-B": None}
+
+
+def test_two_boards_claiming_one_gateway_get_neither():
+    raw = _shared_site(
+        _member(5, "gw-1")
+        + _member(5, "gw-2")
+        + _board("XC-A", links=("gw-1",))
+        + _board("XC-B", links=("gw-1",))
+    )
+    assert _pairs(raw) == {"XC-A": None, "XC-B": None}
+
+
+def test_a_second_site_member_does_not_make_a_second_site():
+    (site,) = parse_sites(
+        _shared_site(
+            _member(4, "site-1")
+            + _member(4, "site-2")
+            + _member(5, "gw-1")
+            + _member(5, "gw-2")
+            + _board("XC-A", links=("gw-1",))
+            + _board("XC-B", links=("gw-2",))
+        )
+    )
+    assert site.site_id == "site-1"
+    assert site.hardware_ids == ("site-1", "site-2", "gw-1", "gw-2")
+    assert len(site.panels) == 2
+
+
+def test_two_panels_on_one_site_have_no_primary():
+    raw = _shared_site(
+        _member(5, "gw-1")
+        + _member(5, "gw-2")
+        + _board("XC-A", links=("gw-1",))
+        + _board("XC-B", links=("gw-2",))
+    )
+    assert primary_panel_for(parse_sites(raw)) is None
+
+
+def test_the_site_label_stays_out_of_its_repr():
+    (site,) = parse_sites(_site("s", "XC-1", "1-02100-04", [(4, "s")]))
+    assert site.name == "<address>"
+    assert "<address>" not in repr(site)
+
+
+UNPAIRED = _shared_site(
+    _member(5, "gw-1") + _member(5, "gw-2") + _board("XC-A") + _board("XC-B"),
+)
+
+
+def _answer(serial: str, *gateways: str) -> bytes:
+    return b"".join(_member(5, g) for g in gateways) + _board(serial)
+
+
+def _lookup(answers: dict[str, bytes], calls: list[bytes] | None = None):
+    def call(request: bytes) -> bytes:
+        if calls is not None:
+            calls.append(request)
+        return next(raw for serial, raw in answers.items() if serial.encode() in request)
+
+    return call
+
+
+def test_a_lookup_naming_one_gateway_pairs_the_board():
+    lookup = _lookup({"XC-A": _answer("XC-A", "gw-2"), "XC-B": _answer("XC-B", "gw-1")})
+    (site,) = pair_by_lookup(parse_sites(UNPAIRED), lookup)
+    assert {p.serial: p.hardware_id for p in site.panels} == {"XC-A": "gw-2", "XC-B": "gw-1"}
+
+
+def test_a_lookup_returning_the_whole_site_settles_nothing():
+    whole = _answer("XC-A", "gw-1", "gw-2") + _board("XC-B")
+    (site,) = pair_by_lookup(parse_sites(UNPAIRED), _lookup({"XC": whole}))
+    assert all(p.hardware_id is None for p in site.panels)
+
+
+def test_a_lookup_giving_both_boards_one_gateway_pairs_neither():
+    lookup = _lookup({"XC-A": _answer("XC-A", "gw-1"), "XC-B": _answer("XC-B", "gw-1")})
+    (site,) = pair_by_lookup(parse_sites(UNPAIRED), lookup)
+    assert all(p.hardware_id is None for p in site.panels)
+
+
+def test_a_lookup_naming_another_panels_board_is_ignored():
+    (site,) = pair_by_lookup(parse_sites(UNPAIRED), _lookup({"XC": _answer("XC-Z", "gw-1")}))
+    assert all(p.hardware_id is None for p in site.panels)
+
+
+def test_a_failed_lookup_counts_as_no_answer():
+    def fail(request: bytes) -> bytes:
+        raise OSError("cloud hiccup")
+
+    (site,) = pair_by_lookup(parse_sites(UNPAIRED), fail)
+    assert all(p.hardware_id is None for p in site.panels)
+
+
+def test_no_lookup_when_the_site_response_already_pairs():
+    calls: list[bytes] = []
+    pair_by_lookup(parse_sites(SITES), _lookup({}, calls))
+    raw = _shared_site(
+        _member(5, "gw-1")
+        + _member(5, "gw-2")
+        + _board("XC-A", links=("gw-1",))
+        + _board("XC-B", links=("gw-2",))
+    )
+    pair_by_lookup(parse_sites(raw), _lookup({}, calls))
+    assert calls == []

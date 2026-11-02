@@ -42,8 +42,9 @@ import random
 import threading
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import cloud_ably, cloud_auth, cloud_commands, cloud_grpc, cloud_history
@@ -632,6 +633,38 @@ PANEL_MODELS = {
 }
 
 
+# Member kinds in GetSitesForUser: 4 site, 5 gateway, 6 bess. A panel's circuits
+# live on the resource named by its gateway's id.
+_KIND_GATEWAY = 5
+
+
+@dataclass(frozen=True)
+class PanelInfo:
+    """One panelboard from GetSitesForUser."""
+
+    site_id: str
+    serial: str | None
+    model_code: str | None
+    hardware_id: str | None  # the frame and trait resource id, once paired
+
+    @property
+    def model(self) -> str:
+        return PANEL_MODELS.get(self.model_code or "", f"Panel {self.model_code or ''}".strip())
+
+    @property
+    def key(self) -> str:
+        """What this panel's energy store and stored choices are keyed by."""
+        return self.serial or self.hardware_id or self.site_id
+
+    def answers_to(self, key: str | None) -> bool:
+        """Whether a recorded key means this panel.
+
+        A key recorded before the serial was known is the hardware id, and the
+        panel is still the same panel once SPAN reports the serial.
+        """
+        return key is not None and key in (self.key, self.serial, self.hardware_id)
+
+
 @dataclass(frozen=True)
 class SiteInfo:
     """One site ("house" in the SPAN app) from GetSitesForUser.
@@ -640,25 +673,120 @@ class SiteInfo:
     account's topology is a list of these, not one panel. Layout, by field:
 
         1 sites[] {
-            1 { 1 site_id ... }
+            1 { 1 site_id  2 label ... }
             3 { 1 member[] { 1 kind  2 hardware_id ... }
-                2 panelboard { 4 { 3 serial  5 model_code }  5 "Panelboard" } }
+                2 panelboard[] { 4 { 3 serial  5 model_code }
+                                 8 component[] { 7 { 1 hardware_id } } } }
         }
+
+    Every site has at least one panel. `name` is often a street address, so it
+    stays out of logs and device names.
     """
 
     site_id: str
-    serial: str | None
-    model_code: str | None
     hardware_ids: tuple[str, ...]
+    panels: tuple[PanelInfo, ...]
+    gateways: tuple[str, ...] = ()
+    name: str | None = field(default=None, repr=False)
+
+    @property
+    def lead(self) -> PanelInfo:
+        """The panel a site's single stream is named after."""
+        return next((p for p in self.panels if p.serial), self.panels[0])
+
+    @property
+    def serial(self) -> str | None:
+        return self.lead.serial
 
     @property
     def model(self) -> str:
-        return PANEL_MODELS.get(self.model_code or "", f"Panel {self.model_code or ''}".strip())
+        return self.lead.model
 
-    @property
-    def panel_key(self) -> str:
-        """What this panel's energy store and stored choices are keyed by."""
-        return self.serial or self.site_id
+
+def _gateway_ids(group: Message) -> list[str]:
+    ids = (m.get_str(2) for m in group.get_msgs(1) if m.get_uint(1) == _KIND_GATEWAY)
+    return [value for value in ids if value]
+
+
+def _component_ids(board: Message) -> set[str]:
+    linked = (c.get_msg_opt(7) for c in board.get_msgs(8))
+    return {value for link in linked if link is not None and (value := link.get_str(1))}
+
+
+def _unique_claims(claims: dict[int, str]) -> dict[int, str]:
+    """Drop any gateway two boards claim: at most one is right, and nothing says which."""
+    counts = Counter(claims.values())
+    return {board: gateway for board, gateway in claims.items() if counts[gateway] == 1}
+
+
+def _pair_boards(groups: list[Message], gateways: list[str]) -> dict[int, str]:
+    """Pair boards, by position across the site, with their gateways.
+
+    Response order is never used: a wrong guess swaps two panels' circuits while
+    looking correct, so a board with no evidence stays unpaired.
+    """
+    placed = [(no, board) for no, group in enumerate(groups) for board in group.get_msgs(2)]
+    if len(placed) == 1 and len(gateways) == 1:
+        return {0: gateways[0]}
+
+    claims: dict[int, str] = {}
+    for position, (_, board) in enumerate(placed):
+        linked = _component_ids(board) & set(gateways)
+        if len(linked) == 1:
+            claims[position] = next(iter(linked))
+    paired = _unique_claims(claims)
+
+    for no, group in enumerate(groups):
+        boards = [position for position, (home, _) in enumerate(placed) if home == no]
+        ids = _gateway_ids(group)
+        lone = len(boards) == 1 and len(ids) == 1
+        if lone and boards[0] not in paired and ids[0] not in paired.values():
+            paired[boards[0]] = ids[0]
+    return paired
+
+
+def _parse_site(site: Message) -> SiteInfo | None:
+    head = site.get_msg_opt(1)
+    groups = site.get_msgs(3)
+    hardware_ids: list[str] = []
+    gateways: list[str] = []
+    for group in groups:
+        for member in group.get_msgs(1):
+            value = member.get_str(2)
+            if value and value not in hardware_ids:
+                hardware_ids.append(value)
+        for value in _gateway_ids(group):
+            if value not in gateways:
+                gateways.append(value)
+    if not hardware_ids:
+        return None
+    # A second kind 4 member must not read as a second site, so the id comes only
+    # from the head.
+    site_id = (head.get_str(1) if head is not None else None) or hardware_ids[0]
+
+    paired = _pair_boards(groups, gateways)
+    panels: list[PanelInfo] = []
+    for group in groups:
+        for board in group.get_msgs(2):
+            ident = board.get_msg_opt(4)
+            panels.append(
+                PanelInfo(
+                    site_id=site_id,
+                    serial=ident.get_str(3) if ident is not None else None,
+                    model_code=ident.get_str(5) if ident is not None else None,
+                    hardware_id=paired.get(len(panels)),
+                )
+            )
+    if not panels:
+        only = gateways[0] if len(gateways) == 1 else None
+        panels.append(PanelInfo(site_id, None, None, only))
+    return SiteInfo(
+        site_id=site_id,
+        hardware_ids=tuple(hardware_ids),
+        panels=tuple(panels),
+        gateways=tuple(gateways),
+        name=head.get_str(2) if head is not None else None,
+    )
 
 
 def parse_sites(raw: bytes) -> list[SiteInfo]:
@@ -669,37 +797,58 @@ def parse_sites(raw: bytes) -> list[SiteInfo]:
     """
     if not raw:
         return []
-    out: list[SiteInfo] = []
     try:
-        for site in parse(raw).get_msgs(1):
-            head = site.get_msg_opt(1)
-            hardware_ids: list[str] = []
-            serial = model_code = None
-            for group in site.get_msgs(3):
-                for member in group.get_msgs(1):
-                    value = member.get_str(2)
-                    if value and value not in hardware_ids:
-                        hardware_ids.append(value)
-                for board in group.get_msgs(2):
-                    ident = board.get_msg_opt(4)
-                    if ident is not None and serial is None:
-                        serial = ident.get_str(3)
-                        model_code = ident.get_str(5)
-            if not hardware_ids:
-                continue
-            site_id = (head.get_str(1) if head is not None else None) or hardware_ids[0]
-            out.append(
-                SiteInfo(
-                    site_id=site_id,
-                    serial=serial,
-                    model_code=model_code,
-                    hardware_ids=tuple(hardware_ids),
-                )
-            )
+        return [info for site in parse(raw).get_msgs(1) if (info := _parse_site(site))]
     except Exception as exc:  # noqa: BLE001 — a shape change must not break setup
         log.debug("could not split GetSitesForUser into sites: %s", exc)
         return []
-    return out
+
+
+def _lookup_gateway(panel: PanelInfo, lookup: Callable[[bytes], bytes]) -> str | None:
+    """The gateway a GetResourcesForHardware answer names for one panel, if it does.
+
+    The response has a group's fields. An answer naming several gateways is the
+    whole site, which settles nothing, and a failed call counts as no answer.
+    """
+    request = field_string(1, panel.serial or "") + field_string(2, panel.model_code or "")
+    try:
+        result = parse(lookup(request))
+        ids = _gateway_ids(result)
+        boards = (board.get_msg_opt(4) for board in result.get_msgs(2))
+        holds_board = any(i is not None and i.get_str(3) == panel.serial for i in boards)
+    except Exception as exc:  # noqa: BLE001 — pairing is best effort
+        log.debug("GetResourcesForHardware gave no answer: %s", exc)
+        return None
+    return ids[0] if holds_board and len(ids) == 1 else None
+
+
+def pair_by_lookup(sites: list[SiteInfo], lookup: Callable[[bytes], bytes]) -> list[SiteInfo]:
+    """Ask the cloud about boards the site response could not pair.
+
+    Only sites with several panels and an unpaired board are looked up, so a
+    one-panel site never makes this call.
+    """
+    return [_pair_site_by_lookup(site, lookup) for site in sites]
+
+
+def _pair_site_by_lookup(site: SiteInfo, lookup: Callable[[bytes], bytes]) -> SiteInfo:
+    if len(site.panels) < 2:
+        return site
+    taken = {panel.hardware_id for panel in site.panels}
+    claims: dict[int, str] = {}
+    for position, panel in enumerate(site.panels):
+        if panel.hardware_id is None and panel.serial:
+            gateway = _lookup_gateway(panel, lookup)
+            if gateway in site.gateways and gateway not in taken:
+                claims[position] = gateway
+    if not claims:
+        return site
+    paired = _unique_claims(claims)
+    panels = tuple(
+        replace(panel, hardware_id=paired[position]) if position in paired else panel
+        for position, panel in enumerate(site.panels)
+    )
+    return replace(site, panels=panels)
 
 
 def site_device_uuid(device_uuid: str, site_id: str) -> str:
@@ -725,10 +874,11 @@ def primary_panel_for(sites: list[SiteInfo]) -> str | None:
     """The panel that owns the entry's identity: an account's only panel, if so.
 
     An account that starts with several has no panel the entry's identity could
-    mean, so none owns it. Recorded once, because the count changes later and the
-    answer must not: see `stream_identity`.
+    mean, so none owns it, whichever sites they are on. Recorded once, because the
+    count changes later and the answer must not: see `stream_identity`.
     """
-    return sites[0].panel_key if len(sites) == 1 else None
+    panels = [panel for site in sites for panel in site.panels]
+    return panels[0].key if len(panels) == 1 else None
 
 
 def stream_identity(
@@ -742,16 +892,15 @@ def stream_identity(
 
     That panel keeps the entry's own identity for good, so its entities, its
     energy totals and its Ably channel carry on untouched, even after the account
-    gains another panel. Any other panel takes its own serial, since the entry's
-    single saved one is not true of it, and the site id stands in when the
-    response has none: two panels must never share a device.
+    gains another panel. Any other panel takes its own key, since the entry's
+    single saved serial is not true of it: two panels must never share a device.
     """
-    if site is None or site.panel_key == primary_panel:
+    if site is None or any(panel.answers_to(primary_panel) for panel in site.panels):
         return StreamIdentity(device_uuid, serial or (site.serial if site else None), None)
     return StreamIdentity(
         site_device_uuid(device_uuid, site.site_id),
-        site.panel_key,
-        site.panel_key,
+        site.lead.key,
+        site.lead.key,
     )
 
 
