@@ -14,6 +14,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from .const import (
     CONF_DEVICE_UUID,
+    CONF_PRIMARY_PANEL,
     CONF_SERIAL,
     CONF_TOKENS,
     CONF_USER_ID,
@@ -22,7 +23,7 @@ from .const import (
 )
 from .coordinator import SpanCloudCoordinator, energy_store
 from .span_client import cloud_auth, cloud_grpc
-from .span_client.backend import SiteInfo, parse_sites
+from .span_client.backend import SiteInfo, parse_sites, primary_panel_for
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,14 +69,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         "serial": entry.data.get(CONF_SERIAL),
     }
     if sites:
-        _LOGGER.info(
-            "SPAN account has %d site(s): %s",
-            len(sites),
-            ", ".join(f"{s.model} {s.serial}" for s in sites),
-        )
-        multi_site = len(sites) > 1
+        _LOGGER.info("SPAN account has %d site(s)", len(sites))
+        _LOGGER.debug("SPAN sites: %s", ", ".join(f"{s.model} {s.serial}" for s in sites))
+        # The key's presence is what makes this once-only: None is an answer, and
+        # asking again after a panel leaves would hand a scoped panel the entry's
+        # empty store.
+        if CONF_PRIMARY_PANEL not in entry.data:
+            data = {**entry.data, CONF_PRIMARY_PANEL: primary_panel_for(sites)}
+            hass.config_entries.async_update_entry(entry, data=data)
+        primary_panel = entry.data[CONF_PRIMARY_PANEL]
         coordinators = [
-            SpanCloudCoordinator(hass, entry, site=site, multi_site=multi_site, **common)
+            SpanCloudCoordinator(hass, entry, site=site, primary_panel=primary_panel, **common)
             for site in sites
         ]
     else:
@@ -108,7 +112,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> Non
     Unloading keeps the stores — that is a restart, and the totals are the point.
     Deleting the entry means the panels are gone, and leaving files behind would
     resurrect stale kilowatt-hours if the same panels were ever set up again.
-    The per-site stores are named after site ids that are only known while the
+    The per-panel stores are named after panel keys that are only known while the
     entry runs, so they are found by prefix.
     """
     await energy_store(hass, entry.entry_id).async_remove()

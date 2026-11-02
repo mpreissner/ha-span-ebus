@@ -655,6 +655,11 @@ class SiteInfo:
     def model(self) -> str:
         return PANEL_MODELS.get(self.model_code or "", f"Panel {self.model_code or ''}".strip())
 
+    @property
+    def panel_key(self) -> str:
+        """What this panel's energy store and stored choices are keyed by."""
+        return self.serial or self.site_id
+
 
 def parse_sites(raw: bytes) -> list[SiteInfo]:
     """Split a GetSitesForUser response into its sites, in response order.
@@ -713,7 +718,17 @@ class StreamIdentity:
 
     device_uuid: str
     serial: str | None
-    store_site_id: str | None
+    store_panel_key: str | None
+
+
+def primary_panel_for(sites: list[SiteInfo]) -> str | None:
+    """The panel that owns the entry's identity: an account's only panel, if so.
+
+    An account that starts with several has no panel the entry's identity could
+    mean, so none owns it. Recorded once, because the count changes later and the
+    answer must not: see `stream_identity`.
+    """
+    return sites[0].panel_key if len(sites) == 1 else None
 
 
 def stream_identity(
@@ -721,22 +736,22 @@ def stream_identity(
     *,
     device_uuid: str,
     serial: str | None,
-    multi_site: bool,
+    primary_panel: str | None,
 ) -> StreamIdentity:
-    """Key a stream by site only when the account really has several.
+    """Key a stream by panel, except for the panel that owns the entry's identity.
 
-    A one-site account keeps the entry's own identity, so its entities, its
-    energy totals and its Ably channel carry on untouched. On a multi-site
-    account the entry's single saved serial can only be true of one panel, so
-    each stream takes its own, and the site id stands in when the response has
-    none: two panels must never share a device.
+    That panel keeps the entry's own identity for good, so its entities, its
+    energy totals and its Ably channel carry on untouched, even after the account
+    gains another panel. Any other panel takes its own serial, since the entry's
+    single saved one is not true of it, and the site id stands in when the
+    response has none: two panels must never share a device.
     """
-    if site is None or not multi_site:
+    if site is None or site.panel_key == primary_panel:
         return StreamIdentity(device_uuid, serial or (site.serial if site else None), None)
     return StreamIdentity(
         site_device_uuid(device_uuid, site.site_id),
-        site.serial or site.site_id,
-        site.site_id,
+        site.panel_key,
+        site.panel_key,
     )
 
 

@@ -141,6 +141,14 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
                     if self._reauth_entry_data is not None:
                         entry = self._get_reauth_entry()
                         self._abort_if_unique_id_mismatch(reason="wrong_account")
+                        # Reauth proves the login and changes nothing else. The
+                        # probe's serial is whichever panel came first, which on
+                        # a multi-panel account need not be the saved one.
+                        data = {
+                            **entry.data,
+                            **data,
+                            CONF_SERIAL: entry.data.get(CONF_SERIAL) or serial,
+                        }
                         return self.async_update_reload_and_abort(entry, data=data)
 
                     self._abort_if_unique_id_configured()

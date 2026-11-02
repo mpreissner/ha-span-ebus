@@ -76,10 +76,11 @@ ENERGY_STORE_VERSION = 1
 ENERGY_SAVE_DELAY_SECONDS = 30
 
 
-def energy_store(hass: HomeAssistant, entry_id: str, site_id: str | None = None) -> Store:
-    """The store holding the energy totals: per entry, and per site when the
-    account has several (the same circuit key exists on every panel)."""
-    scope = f"{entry_id}.{site_id}" if site_id else entry_id
+def energy_store(hass: HomeAssistant, entry_id: str, panel_key: str | None = None) -> Store:
+    """The store holding the energy totals: the entry's own for the panel that owns
+    its identity, one per panel otherwise (the same circuit key exists on every
+    panel)."""
+    scope = f"{entry_id}.{panel_key}" if panel_key else entry_id
     return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{scope}.energy")
 
 
@@ -110,7 +111,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         user_id: str | None,
         serial: str | None,
         site: SiteInfo | None = None,
-        multi_site: bool = False,
+        primary_panel: str | None = None,
     ) -> None:
         # No update_interval: this is push, not poll.
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry)
@@ -121,7 +122,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         self.site = site
         self.model = site.model if site else MODEL
         identity = stream_identity(
-            site, device_uuid=device_uuid, serial=serial, multi_site=multi_site
+            site, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
         )
         self._serial = identity.serial
 
@@ -150,7 +151,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         # once a minute while readings move twice a second — waking every power
         # sensor in the panel to announce a kilowatt-hour would be pure noise.
         self._ledger = EnergyLedger()
-        self._energy_store = energy_store(hass, entry.entry_id, identity.store_site_id)
+        self._energy_store = energy_store(hass, entry.entry_id, identity.store_panel_key)
         self._energy_listeners: list[Callable[[], None]] = []
         self._cancel_energy_poll: Callable[[], None] | None = None
         self._energy_failures = 0
