@@ -31,7 +31,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN, MANUFACTURER, MODEL
 from .energy import EnergyLedger
-from .span_client.backend import CloudBackend, SiteInfo, stream_identity
+from .span_client.backend import (
+    CloudBackend,
+    PanelInfo,
+    SiteInfo,
+    SiteStream,
+    device_name,
+    panel_identity,
+    stream_identity,
+)
 from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
@@ -112,6 +120,8 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         serial: str | None,
         site: SiteInfo | None = None,
         primary_panel: str | None = None,
+        stream: SiteStream | None = None,
+        panel: PanelInfo | None = None,
     ) -> None:
         # No update_interval: this is push, not poll.
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry)
@@ -121,19 +131,33 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         # setup. Its serial and model name the HA device.
         self.site = site
         self.model = site.model if site else MODEL
-        identity = stream_identity(
-            site, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
-        )
+        # A serial-less device on a shared site has no serial or model to show.
+        self._device_name: str | None = None
+        self._labelled = True
+        if stream is not None and panel is not None and site is not None:
+            # One device of a site whose stream it shares with the others.
+            identity = panel_identity(
+                site, panel, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
+            )
+            self.model = panel.model
+            self._device_name = device_name(panel, stream.routes)
+            self._labelled = panel.serial is not None
+            self._backend = stream.panel_backend(
+                panel.key, identity.serial, on_auth_failed=self._on_auth_failed
+            )
+        else:
+            identity = stream_identity(
+                site, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
+            )
+            self._backend = CloudBackend(
+                token_path,
+                identity.device_uuid,
+                user_id=user_id,
+                serial=identity.serial,
+                on_auth_failed=self._on_auth_failed,
+                site_id=site.site_id if site else None,
+            )
         self._serial = identity.serial
-
-        self._backend = CloudBackend(
-            token_path,
-            identity.device_uuid,
-            user_id=user_id,
-            serial=identity.serial,
-            on_auth_failed=self._on_auth_failed,
-            site_id=site.site_id if site else None,
-        )
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
         self._flush_scheduled = False
@@ -271,10 +295,10 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         serial = self.serial
         return DeviceInfo(
             identifiers={(DOMAIN, serial)},
-            name=f"SPAN {self.model} {serial}",
+            name=self._device_name or f"SPAN {self.model} {serial}",
             manufacturer=MANUFACTURER,
-            model=self.model,
-            serial_number=serial,
+            model=self.model if self._labelled else None,
+            serial_number=serial if self._labelled else None,
         )
 
     @callback
