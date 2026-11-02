@@ -23,13 +23,25 @@
         "data": {
           "panels": "Panels"
         }
+      },
+      "feed": {
+        "title": "What feeds each panel?",
+        "description": "Choose how each panel gets its power. Most panels have their own supply."
+      },
+      "feed_circuit": {
+        "title": "Which circuit feeds this panel?",
+        "description": "Choose the circuit on {upstream} that feeds {panel}.",
+        "data": {
+          "circuit": "Circuit"
+        }
       }
     },
     "error": {
       "invalid_auth": "Invalid email or password.",
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
       "no_telemetry": "Signed in, but SPAN published no telemetry within the setup timeout. Check that your panel is online in the SPAN mobile app, then try again.",
-      "no_panels": "Choose at least one panel."
+      "no_panels": "Choose at least one panel.",
+      "feed_cycle": "Panels can't feed each other. Check the answers for a loop."
     },
     "abort": {
       "already_configured": "This SPAN account is already configured.",
@@ -49,10 +61,22 @@
       "confirm_remove": {
         "title": "Remove panels?",
         "description": "This removes {count} device(s) and their entities from Home Assistant. Saved energy totals are kept, so ticking a panel again resumes them."
+      },
+      "feed": {
+        "title": "What feeds each panel?",
+        "description": "Choose how each panel gets its power. Most panels have their own supply."
+      },
+      "feed_circuit": {
+        "title": "Which circuit feeds this panel?",
+        "description": "Choose the circuit on {upstream} that feeds {panel}.",
+        "data": {
+          "circuit": "Circuit"
+        }
       }
     },
     "error": {
-      "no_panels": "Choose at least one panel."
+      "no_panels": "Choose at least one panel.",
+      "feed_cycle": "Panels can't feed each other. Check the answers for a loop."
     },
     "abort": {
       "cannot_connect": "Could not reach the SPAN cloud. Please try again."

@@ -32,6 +32,7 @@ from .const import (
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_EMAIL,
+    CONF_FEEDS,
     CONF_PANELS,
     CONF_PRIMARY_PANEL,
     CONF_SERIAL,
@@ -40,17 +41,22 @@ from .const import (
     DOMAIN,
     TOKEN_DIR,
 )
-from .span_client import cloud_auth
+from .span_client import cloud_auth, feeds
 from .span_client.backend import (
     CloudBackend,
     SiteInfo,
     device_keys,
     discover_sites,
+    find_panel,
+    panel_circuits,
     panel_labels,
     panel_plan,
+    primary_panel_for,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+CONF_CIRCUIT = "circuit"
 
 # How long to wait for the first telemetry frame when validating the channel.
 # Generous: the subscribe is deliberately delayed a couple of seconds and the
@@ -113,24 +119,148 @@ def _panels_schema(labels: dict[str, str], ticked: list[str]) -> vol.Schema:
     return vol.Schema({vol.Required(CONF_PANELS, default=ticked): selector})
 
 
-def _panel_options(labels: dict[str, str], ticked: list[str]) -> dict[str, list[str]]:
+def _select(choices: dict[str, str]) -> SelectSelector:
+    options = [SelectOptionDict(value=value, label=label) for value, label in choices.items()]
+    return SelectSelector(SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN))
+
+
+def _panel_options(
+    labels: dict[str, str], ticked: list[str], answers: dict[str, feeds.Feed]
+) -> dict[str, Any]:
     """The stored answer: what was left off has been seen, so it stays quiet."""
-    return {CONF_PANELS: ticked, CONF_DECLINED: [key for key in labels if key not in ticked]}
+    return {
+        CONF_PANELS: ticked,
+        CONF_DECLINED: [key for key in labels if key not in ticked],
+        CONF_FEEDS: answers,
+    }
 
 
 def _sites_from_token_store(token_path: Path) -> list[SiteInfo]:
     return discover_sites(cloud_auth.access_token_from_store(token_path))
 
 
-class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
+class _FeedSteps:
+    """The questions about what feeds each panel, shared by setup and options."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._sites: list[SiteInfo] = []
+        self._labels: dict[str, str] = {}
+        self._ticked: list[str] = []
+        self._feeds: dict[str, feeds.Feed] = {}
+        self._asking: list[str] = []
+        self._circuits: dict[str, dict[str, str]] = {}
+
+    def _access_token(self) -> str:
+        raise NotImplementedError
+
+    def _identity(self) -> Mapping[str, Any]:
+        """Where the entry's user id, device UUID and primary panel are found."""
+        raise NotImplementedError
+
+    async def _finish_feeds(self) -> ConfigFlowResult:
+        raise NotImplementedError
+
+    async def _ask_feeds(self) -> ConfigFlowResult:
+        """Move on from the picker: one panel has nothing to ask about."""
+        self._feeds = feeds.clean_feeds(self._feeds, self._ticked)
+        if len(self._ticked) > 1:
+            return await self.async_step_feed()
+        return await self._finish_feeds()
+
+    async def async_step_feed(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        labels = {key: self._labels[key] for key in self._ticked}
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            answers = {
+                key: feeds.from_form(user_input[label], self._feeds.get(key))
+                for key, label in labels.items()
+            }
+            self._feeds = answers
+            if feeds.has_cycle(answers):
+                errors["base"] = "feed_cycle"
+            else:
+                self._asking = feeds.branch_fed(answers)
+                return await self._next_feed_circuit()
+        schema = {
+            vol.Required(label, default=feeds.form_value(self._feeds[key])): _select(
+                feeds.feed_choices(key, labels, self._feeds[key])
+            )
+            for key, label in labels.items()
+        }
+        return self.async_show_form(step_id="feed", data_schema=vol.Schema(schema), errors=errors)
+
+    async def _next_feed_circuit(self) -> ConfigFlowResult:
+        """Ask about the next branch feed whose upstream circuits can be read.
+
+        A panel that can't be read keeps its answer without a circuit, and options
+        shows it as unfinished, so one failure doesn't lose the rest.
+        """
+        while self._asking:
+            if await self._upstream_circuits(self._asking[0]):
+                return await self.async_step_feed_circuit()
+            self._asking.pop(0)
+        return await self._finish_feeds()
+
+    async def _upstream_circuits(self, key: str) -> dict[str, str]:
+        upstream = self._feeds[key]["upstream"]
+        if upstream not in self._circuits:
+            self._circuits[upstream] = await self.hass.async_add_executor_job(
+                self._read_circuits, upstream
+            )
+        return self._circuits[upstream]
+
+    def _read_circuits(self, upstream: str) -> dict[str, str]:
+        found = find_panel(self._sites, upstream)
+        if found is None:
+            return {}
+        identity = self._identity()
+        try:
+            circuits = panel_circuits(
+                self._access_token(),
+                *found,
+                user_id=identity.get(CONF_USER_ID),
+                device_uuid=identity[CONF_DEVICE_UUID],
+                primary_panel=identity.get(CONF_PRIMARY_PANEL, primary_panel_for(self._sites)),
+            )
+        except Exception as err:  # noqa: BLE001 — the question can wait for options
+            _LOGGER.debug("could not list a SPAN panel's circuits: %s", err)
+            return {}
+        return feeds.circuit_choices(circuits)
+
+    async def async_step_feed_circuit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        key = self._asking[0]
+        feed = self._feeds[key]
+        choices = self._circuits[feed["upstream"]]
+        if user_input is not None:
+            feed["circuit"] = int(user_input[CONF_CIRCUIT])
+            self._asking.pop(0)
+            return await self._next_feed_circuit()
+        field = vol.Required(CONF_CIRCUIT)
+        if str(feed.get("circuit")) in choices:
+            field = vol.Required(CONF_CIRCUIT, default=str(feed["circuit"]))
+        return self.async_show_form(
+            step_id="feed_circuit",
+            data_schema=vol.Schema({field: _select(choices)}),
+            description_placeholders={
+                "panel": self._labels[key],
+                "upstream": self._labels[feed["upstream"]],
+            },
+        )
+
+
+class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
     """Handle the SPAN eBus config and reauth flows."""
 
     VERSION = 1
 
     def __init__(self) -> None:
+        super().__init__()
         self._reauth_entry_data: Mapping[str, Any] | None = None
         self._entry_data: dict[str, Any] = {}
-        self._labels: dict[str, str] = {}
+        self._token = ""
 
     @staticmethod
     @callback
@@ -194,7 +324,8 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
 
                     self._abort_if_unique_id_configured()
                     self._entry_data = data
-                    self._labels = await self._discover_labels(tokens.access_token)
+                    self._token = tokens.access_token
+                    self._labels = await self._discover_labels()
                     if len(self._labels) > 1:
                         return await self.async_step_panels()
                     return self.async_create_entry(title=email, data=data)
@@ -207,15 +338,21 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def _discover_labels(self, access_token: str) -> dict[str, str]:
+    def _access_token(self) -> str:
+        return self._token
+
+    def _identity(self) -> Mapping[str, Any]:
+        return self._entry_data
+
+    async def _discover_labels(self) -> dict[str, str]:
         """The account's panels. Failing to learn them doesn't block setup: nothing
         is recorded, and every panel runs until a start can read the account."""
         try:
-            sites = await self.hass.async_add_executor_job(discover_sites, access_token)
+            self._sites = await self.hass.async_add_executor_job(discover_sites, self._token)
         except Exception as err:  # noqa: BLE001 — discovery is optional here
             _LOGGER.debug("could not list SPAN panels during setup: %s", err)
             return {}
-        return panel_labels(sites)
+        return panel_labels(self._sites)
 
     async def async_step_panels(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -223,14 +360,18 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             ticked = user_input[CONF_PANELS]
             if ticked:
-                return self.async_create_entry(
-                    title=self._entry_data[CONF_EMAIL],
-                    data=self._entry_data,
-                    options=_panel_options(self._labels, ticked),
-                )
+                self._ticked = ticked
+                return await self._ask_feeds()
             errors["base"] = "no_panels"
         return self.async_show_form(
             step_id="panels", data_schema=_panels_schema(self._labels, ticked), errors=errors
+        )
+
+    async def _finish_feeds(self) -> ConfigFlowResult:
+        return self.async_create_entry(
+            title=self._entry_data[CONF_EMAIL],
+            data=self._entry_data,
+            options=_panel_options(self._labels, self._ticked, self._feeds),
         )
 
     def _existing_device_uuid(self) -> str | None:
@@ -270,23 +411,29 @@ class SpanEbusConfigFlow(ConfigFlow, domain=DOMAIN):
         return await self.async_step_user(user_input)
 
 
-class SpanEbusOptionsFlow(OptionsFlow):
-    """Change which of the account's panels run here."""
+class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
+    """Change which of the account's panels run here, and what feeds them."""
 
     def __init__(self) -> None:
-        self._sites: list[SiteInfo] = []
+        super().__init__()
         self._chosen: list[str] = []
-        self._labels: dict[str, str] = {}
-        self._ticked: list[str] = []
+
+    def _token_path(self) -> Path:
+        return Path(self.hass.config.path(TOKEN_DIR)) / f"{self.config_entry.entry_id}.json"
+
+    def _access_token(self) -> str:
+        return cloud_auth.access_token_from_store(self._token_path())
+
+    def _identity(self) -> Mapping[str, Any]:
+        return self.config_entry.data
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is None:
-            token_path = (
-                Path(self.hass.config.path(TOKEN_DIR)) / f"{self.config_entry.entry_id}.json"
-            )
             try:
-                sites = await self.hass.async_add_executor_job(_sites_from_token_store, token_path)
+                sites = await self.hass.async_add_executor_job(
+                    _sites_from_token_store, self._token_path()
+                )
             except Exception as err:  # noqa: BLE001 — the form can't be built without them
                 _LOGGER.debug("could not list SPAN panels: %s", err)
                 return self.async_abort(reason="cannot_connect")
@@ -296,6 +443,7 @@ class SpanEbusOptionsFlow(OptionsFlow):
             self._labels = panel_labels(plan.sites)
             self._chosen = [key for key in plan.chosen if key in self._labels]
             self._ticked = self._chosen
+            self._feeds = dict(options.get(CONF_FEEDS, {}))
         else:
             self._ticked = user_input[CONF_PANELS]
             if not self._ticked:
@@ -303,7 +451,7 @@ class SpanEbusOptionsFlow(OptionsFlow):
             elif set(self._chosen) - set(self._ticked):
                 return await self.async_step_confirm_remove()
             else:
-                return self._save()
+                return await self._ask_feeds()
         return self.async_show_form(
             step_id="init", data_schema=_panels_schema(self._labels, self._ticked), errors=errors
         )
@@ -318,6 +466,9 @@ class SpanEbusOptionsFlow(OptionsFlow):
                 data_schema=vol.Schema({}),
                 description_placeholders={"count": str(count)},
             )
+        return await self._ask_feeds()
+
+    async def _finish_feeds(self) -> ConfigFlowResult:
         self._remove_devices()
         return self._save()
 
@@ -337,7 +488,7 @@ class SpanEbusOptionsFlow(OptionsFlow):
     def _save(self) -> ConfigFlowResult:
         # Stored here, not left to the flow's result: the reload must see the answer.
         entry = self.config_entry
-        options = {**entry.options, **_panel_options(self._labels, self._ticked)}
+        options = {**entry.options, **_panel_options(self._labels, self._ticked, self._feeds)}
         self.hass.config_entries.async_update_entry(entry, options=options)
         self.hass.config_entries.async_schedule_reload(entry.entry_id)
         return self.async_create_entry(data=options)

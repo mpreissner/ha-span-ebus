@@ -18,6 +18,7 @@ CONF_PRIMARY_PANEL = "primary_panel"
 # `declined` is what the user has seen and left off, so it isn't announced again.
 CONF_PANELS = "panels"
 CONF_DECLINED = "declined"
+CONF_FEEDS = "feeds"
 
 # Where the auto-refreshing token file lives, relative to the HA config dir.
 TOKEN_DIR = ".span_ebus"
