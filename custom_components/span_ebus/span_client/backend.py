@@ -1012,8 +1012,52 @@ def panel_labels(sites: list[SiteInfo]) -> dict[str, str]:
     for site in sites:
         for panel in site_choices(site):
             name = _panel_name(panel, site.gateways).removeprefix("SPAN ")
-            labels[panel.key] = f"{site.name}: {name}" if site.name else name
+            label = f"{site.name}: {name}" if site.name else name
+            # Forms key their fields by label, so two must never match.
+            taken = list(labels.values())
+            labels[panel.key] = f"{label} ({taken.count(label) + 1})" if label in taken else label
     return labels
+
+
+def find_panel(sites: list[SiteInfo], key: str) -> tuple[SiteInfo, PanelInfo] | None:
+    """The picker's panel for a key, with the site it is on."""
+    for site in sites:
+        for panel in site_choices(site):
+            if panel.answers_to(key):
+                return site, panel
+    return None
+
+
+def panel_circuits(
+    access_token: str,
+    site: SiteInfo,
+    panel: PanelInfo,
+    *,
+    user_id: str | None,
+    device_uuid: str,
+    primary_panel: str | None,
+) -> dict[int, CircuitInfo]:
+    """Blocking: one panel's circuits, read from its site's trait snapshot.
+
+    The snapshot answers the subscribe directly, so this needs no stream. It asks
+    for the channel the way a stream does, and a running stream shares it.
+    """
+    identity = stream_identity(
+        site, device_uuid=device_uuid, serial=None, primary_panel=primary_panel
+    )
+    fallback = f"c:{user_id}:{identity.device_uuid}" if user_id else None
+    with cloud_grpc.CloudGrpcClient(access_token) as grpc:
+        directive = parse_ably_token(
+            grpc.ably_token(field_string(1, identity.device_uuid)), fallback_channel=fallback
+        )
+        if directive.channel is None:
+            raise cloud_grpc.GrpcError(5, "no channel to subscribe on", "AblyToken")
+        request = build_subscribe_request(directive.channel, site.hardware_ids)
+        snapshot = grpc.subscribe_and_get_traits(request)
+    routes = site_routes(site, None)
+    if routes is None:
+        return parse_trait_snapshot(snapshot)
+    return parse_trait_snapshot(split_snapshot(snapshot, routes, set()).get(panel.key, b""))
 
 
 def pin_panels(sites: list[SiteInfo], recorded: Iterable[str]) -> list[SiteInfo]:
