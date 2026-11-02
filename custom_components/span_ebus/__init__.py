@@ -73,7 +73,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
             len(sites),
             ", ".join(f"{s.model} {s.serial}" for s in sites),
         )
-        coordinators = [SpanCloudCoordinator(hass, entry, site=site, **common) for site in sites]
+        multi_site = len(sites) > 1
+        coordinators = [
+            SpanCloudCoordinator(hass, entry, site=site, multi_site=multi_site, **common)
+            for site in sites
+        ]
     else:
         # Unfamiliar topology shape: fall back to the original single stream
         # rather than refusing to start.

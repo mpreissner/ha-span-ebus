@@ -24,6 +24,7 @@ is discarded.
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime
 import hashlib
 import hmac
@@ -31,6 +32,7 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -382,11 +384,17 @@ def save_tokens(path: Path, tokens: CloudTokens) -> None:
         "token_type": tokens.token_type,
     }
     # Write via a private temp file so a reader never sees a half-written store.
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        json.dump(payload, fh)
-    os.replace(tmp, path)
+    # The name is unique because every panel's backend shares this store and may
+    # refresh at the same moment; mkstemp also creates it 0600.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
 
 
 def load_tokens(path: Path) -> CloudTokens | None:

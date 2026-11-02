@@ -41,6 +41,7 @@ import logging
 import random
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -696,6 +697,49 @@ def parse_sites(raw: bytes) -> list[SiteInfo]:
     return out
 
 
+def site_device_uuid(device_uuid: str, site_id: str) -> str:
+    """A stable, distinct client UUID per site, derived from the entry's own.
+
+    The device UUID names the Ably channel, and the channel is what a
+    SubscribeAndGetTraits registration publishes to — so two sites sharing one
+    UUID would interleave both panels' frames on one channel again.
+    """
+    return str(uuid.uuid5(uuid.UUID(device_uuid), f"site:{site_id}"))
+
+
+@dataclass(frozen=True)
+class StreamIdentity:
+    """What one stream is keyed by: its channel, its entities and its energy."""
+
+    device_uuid: str
+    serial: str | None
+    store_site_id: str | None
+
+
+def stream_identity(
+    site: SiteInfo | None,
+    *,
+    device_uuid: str,
+    serial: str | None,
+    multi_site: bool,
+) -> StreamIdentity:
+    """Key a stream by site only when the account really has several.
+
+    A one-site account keeps the entry's own identity, so its entities, its
+    energy totals and its Ably channel carry on untouched. On a multi-site
+    account the entry's single saved serial can only be true of one panel, so
+    each stream takes its own, and the site id stands in when the response has
+    none: two panels must never share a device.
+    """
+    if site is None or not multi_site:
+        return StreamIdentity(device_uuid, serial or (site.serial if site else None), None)
+    return StreamIdentity(
+        site_device_uuid(device_uuid, site.site_id),
+        site.serial or site.site_id,
+        site.site_id,
+    )
+
+
 def build_subscribe_request(channel: str, hardware_ids: Iterable[str]) -> bytes:
     """Serialize a SubscribeAndGetTraitsRequest for `channel`.
 
@@ -1149,7 +1193,7 @@ class CloudBackend:
                             "GetSitesForUser",
                         )
                 if self._serial is None:
-                    self._serial = site.serial if site else _parse_sites_serial(sites)
+                    self._serial = (site.serial if site else None) or _parse_sites_serial(sites)
                     if self._serial:
                         log.info("resolved panel serial %s from GetSitesForUser", self._serial)
                 if not self._hardware_ids:

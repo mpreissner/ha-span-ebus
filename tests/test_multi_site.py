@@ -6,7 +6,12 @@ Shapes mirror a real two-site GetSitesForUser response (a MAIN 16 and a MAIN
 
 from __future__ import annotations
 
-from span_client.backend import parse_sites
+import stat
+import threading
+import uuid
+
+from span_client import cloud_auth
+from span_client.backend import SiteInfo, parse_sites, site_device_uuid, stream_identity
 from span_client.cloud_pb import field_message, field_string, field_varint
 
 
@@ -53,3 +58,78 @@ def test_unfamiliar_or_empty_shapes_give_no_sites():
     assert parse_sites(b"\xff\xff\xff") == []
     # A site with no subscribable hardware has nothing to stream.
     assert parse_sites(_site("s", "XC-1", "1-02100-04", [])) == []
+
+
+ENTRY_UUID = str(uuid.uuid4())
+
+
+def _info(site_id: str = "site-a", serial: str | None = "XC-AAAA") -> SiteInfo:
+    return SiteInfo(site_id, serial, "1-02100-04", (site_id,))
+
+
+def test_a_lone_site_keeps_the_entrys_identity():
+    # Entities, energy totals and the Ably channel must all survive an upgrade.
+    identity = stream_identity(_info(), device_uuid=ENTRY_UUID, serial="XC-SAVED", multi_site=False)
+    assert identity.device_uuid == ENTRY_UUID
+    assert identity.serial == "XC-SAVED"
+    assert identity.store_site_id is None
+
+
+def test_a_lone_site_fills_in_a_serial_the_entry_never_saved():
+    identity = stream_identity(_info(), device_uuid=ENTRY_UUID, serial=None, multi_site=False)
+    assert identity.serial == "XC-AAAA"
+
+
+def test_no_site_at_all_is_the_legacy_single_stream():
+    identity = stream_identity(None, device_uuid=ENTRY_UUID, serial="XC-SAVED", multi_site=False)
+    assert (identity.device_uuid, identity.serial) == (ENTRY_UUID, "XC-SAVED")
+    assert identity.store_site_id is None
+
+
+def test_each_of_several_sites_gets_its_own_channel_serial_and_store():
+    a = stream_identity(
+        _info("site-a", "XC-AAAA"), device_uuid=ENTRY_UUID, serial="XC-AAAA", multi_site=True
+    )
+    b = stream_identity(
+        _info("site-b", "XC-BBBB"), device_uuid=ENTRY_UUID, serial="XC-AAAA", multi_site=True
+    )
+    assert a.device_uuid == site_device_uuid(ENTRY_UUID, "site-a")
+    assert a.device_uuid != b.device_uuid
+    assert (a.serial, b.serial) == ("XC-AAAA", "XC-BBBB")
+    assert (a.store_site_id, b.store_site_id) == ("site-a", "site-b")
+
+
+def test_several_sites_without_serials_still_get_separate_devices():
+    a = stream_identity(_info("site-a", None), device_uuid=ENTRY_UUID, serial=None, multi_site=True)
+    b = stream_identity(_info("site-b", None), device_uuid=ENTRY_UUID, serial=None, multi_site=True)
+    assert a.serial != b.serial
+
+
+def test_a_site_uuid_is_stable_across_restarts():
+    assert site_device_uuid(ENTRY_UUID, "site-a") == site_device_uuid(ENTRY_UUID, "site-a")
+
+
+def test_panels_refreshing_together_do_not_break_the_shared_token_store(tmp_path):
+    path = tmp_path / "entry.json"
+    errors: list[BaseException] = []
+    start = threading.Barrier(8)
+
+    def refresh(n: int) -> None:
+        start.wait()
+        tokens = cloud_auth.CloudTokens(f"a{n}", f"i{n}", f"r{n}", float(n))
+        try:
+            for _ in range(100):
+                cloud_auth.save_tokens(path, tokens)
+                assert cloud_auth.load_tokens(path) is not None
+        except BaseException as err:  # noqa: BLE001 — reported by the main thread
+            errors.append(err)
+
+    threads = [threading.Thread(target=refresh, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert [p.name for p in tmp_path.iterdir()] == ["entry.json"]

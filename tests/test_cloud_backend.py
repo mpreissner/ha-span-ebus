@@ -443,6 +443,47 @@ def test_bootstrap_reads_serial_and_hardware_ids_from_one_call(monkeypatch, tmp_
     assert calls == ["sites", "ably", "ably"]
 
 
+def test_bootstrap_keeps_the_top_level_serial_when_the_site_has_none(monkeypatch, tmp_path):
+    # A site scan finds no panelboard here, and the broader scan must still win
+    # over keying every entity under the "span-cloud" placeholder.
+    sites = pb.field_message(
+        1,
+        pb.field_message(1, pb.field_string(1, "site-1"))
+        + pb.field_string(4, "XC-0000-00000")
+        + pb.field_message(3, pb.field_message(1, pb.field_string(2, "hw-1"))),
+    )
+
+    class FakeGrpc:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def get_sites_for_user(self):
+            return sites
+
+        def ably_token(self, request):
+            return pb.field_string(1, json.dumps({"keyName": "k", "nonce": "n", "mac": "m"}))
+
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", lambda p: "access")
+    monkeypatch.setattr(cloud.cloud_grpc, "CloudGrpcClient", FakeGrpc)
+    monkeypatch.setattr(
+        cloud.cloud_ably,
+        "request_token",
+        lambda req, **kw: cloud.cloud_ably.AblyTokenDetails(token="realtok"),
+    )
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "DEV", user_id="user", site_id="site-1")
+    backend.bootstrap()
+
+    assert backend._serial == "XC-0000-00000"
+    assert backend._hardware_ids == ["hw-1"]
+
+
 def test_probe_returns_schema_from_first_content_frame(monkeypatch, tmp_path):
     # The config flow uses probe() to prove the channel actually carries data.
     monkeypatch.setattr(cloud, "decode_frame", lambda raw: _frame())

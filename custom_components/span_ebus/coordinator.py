@@ -17,7 +17,6 @@ import contextlib
 import logging
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -32,7 +31,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN, MANUFACTURER, MODEL
 from .energy import EnergyLedger
-from .span_client.backend import CloudBackend, SiteInfo
+from .span_client.backend import CloudBackend, SiteInfo, stream_identity
 from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
@@ -84,16 +83,6 @@ def energy_store(hass: HomeAssistant, entry_id: str, site_id: str | None = None)
     return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{scope}.energy")
 
 
-def site_device_uuid(device_uuid: str, site_id: str) -> str:
-    """A stable, distinct client UUID per site, derived from the entry's own.
-
-    The device UUID names the Ably channel, and the channel is what a
-    SubscribeAndGetTraits registration publishes to — so two sites sharing one
-    UUID would interleave both panels' frames on one channel again.
-    """
-    return str(uuid.uuid5(uuid.UUID(device_uuid), f"site:{site_id}"))
-
-
 @dataclass
 class _Platform:
     """One platform's claim on the schema: which specs it wants, and what it has.
@@ -121,6 +110,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         user_id: str | None,
         serial: str | None,
         site: SiteInfo | None = None,
+        multi_site: bool = False,
     ) -> None:
         # No update_interval: this is push, not poll.
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry)
@@ -130,12 +120,16 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         # setup. Its serial and model name the HA device.
         self.site = site
         self.model = site.model if site else MODEL
+        identity = stream_identity(
+            site, device_uuid=device_uuid, serial=serial, multi_site=multi_site
+        )
+        self._serial = identity.serial
 
         self._backend = CloudBackend(
             token_path,
-            site_device_uuid(device_uuid, site.site_id) if site else device_uuid,
+            identity.device_uuid,
             user_id=user_id,
-            serial=site.serial if site else serial,
+            serial=identity.serial,
             on_auth_failed=self._on_auth_failed,
             site_id=site.site_id if site else None,
         )
@@ -156,7 +150,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         # once a minute while readings move twice a second — waking every power
         # sensor in the panel to announce a kilowatt-hour would be pure noise.
         self._ledger = EnergyLedger()
-        self._energy_store = energy_store(hass, entry.entry_id, site.site_id if site else None)
+        self._energy_store = energy_store(hass, entry.entry_id, identity.store_site_id)
         self._energy_listeners: list[Callable[[], None]] = []
         self._cancel_energy_poll: Callable[[], None] | None = None
         self._energy_failures = 0
@@ -267,8 +261,8 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         """The panel serial entities are keyed and grouped under."""
         if self.schema is not None:
             return self.schema.serial
-        if self.site is not None and self.site.serial:
-            return self.site.serial
+        if self._serial:
+            return self._serial
         return "span-cloud"
 
     def device_info(self) -> DeviceInfo:
