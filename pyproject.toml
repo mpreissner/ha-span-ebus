@@ -5,6 +5,11 @@
 # and the runtime dependencies that needs are declared in its manifest.json.
 # This file exists to configure ruff and pytest, and to pin the dev toolchain.
 
+[project]
+name = "ha-span-ebus"
+version = "0"
+requires-python = ">=3.12"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -15,6 +20,8 @@ dev = [
     # Imported by the cloud client under test.
     "requests>=2.31.0",
     "httpx[http2]>=0.27",
+    "aiohttp>=3.10",
+    "paho-mqtt>=2.1",
 ]
 
 [tool.ruff]
