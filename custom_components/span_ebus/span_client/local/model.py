@@ -13,7 +13,9 @@ modelled from the r202639 spec and covered by synthetic tests.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -22,7 +24,9 @@ from typing import Any
 
 from . import homie
 from .health import Transport
-from .homie import DeviceDescription, DeviceState, DeviceTree
+from .homie import DEVICE_TYPE_PREFIX, DeviceDescription, DeviceState, DeviceTree
+
+log = logging.getLogger(__name__)
 
 ROOT_CLASS = "distribution-enclosure"
 CIRCUIT_CLASS = "circuit"
@@ -54,6 +58,7 @@ PII_KEYS: frozenset[str] = frozenset(
         "info/utility-meter-serial-number",
         "info/country-code",
         "status/postal-code",
+        "status/time-zone",
         "status/wifi-ssid",
     }
 )
@@ -103,6 +108,39 @@ class PcsFacts:
 
 
 @dataclass(frozen=True, slots=True)
+class ShedForecast:
+    """The panel's forecast of when load shedding starts, in minutes."""
+
+    time_to_priority_shed: int | None
+    total_time_remaining: int | None
+    full_charge_time_to_priority_shed: int | None
+    full_charge_total_time_remaining: int | None
+    confidence: str | None  # LOW / MEDIUM / HIGH as published
+
+
+@dataclass(frozen=True, slots=True)
+class ShedPolicy:
+    """The battery thresholds of a `soc-priority.v1` shed policy, in percent."""
+
+    soc_threshold_shed: float
+    soc_threshold_release: float
+
+
+@dataclass(frozen=True, slots=True)
+class Link:
+    """One end of a `connection/feeds-device-*` or `fed-by-device-*` link.
+
+    On a circuit or lugs device it names the other end: `via_kind` is that
+    device's class (`bess`, `pv`, ...; from its `$description` when the tree has
+    it, else the published type) and `via_id` its Homie id. Never shown in HA.
+    """
+
+    via_kind: str | None
+    via_id: str
+    status: str | None  # OK / LOST / DEGRADED, or None while unpublished
+
+
+@dataclass(frozen=True, slots=True)
 class PanelFacts:
     device_id: str
     state: DeviceState | None
@@ -122,6 +160,11 @@ class PanelFacts:
     main_breaker_rating: int | None
     pcs: PcsFacts | None
     flows: PowerFlows
+    door: str | None  # UNKNOWN / OPEN / CLOSED as published
+    ethernet: bool | None
+    wifi: bool | None
+    shed_forecast: ShedForecast | None  # None unless the capability is described
+    shed_policy: ShedPolicy | None  # None unless published and valid
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +181,11 @@ class LugsFacts:
     service_rating: int | None
     overcurrent_protection: int | None
     feeds_role: str | None
+    backed_up: str | None
+    unit_count: int | None
+    location: str | None  # the user's room label, never logged
+    feeds: Link | None
+    fed_by: Link | None
 
     @property
     def net_wh(self) -> float | None:
@@ -182,6 +230,11 @@ class CircuitFacts:
     is_remote_ct: bool
     shared_meter_with: tuple[str, ...] | None
     shared_switch_with: tuple[str, ...] | None
+    backed_up: str | None
+    unit_count: int | None
+    location: str | None  # the user's room label, never logged
+    feeds: Link | None
+    fed_by: Link | None
 
     @property
     def has_switch(self) -> bool:
@@ -240,46 +293,71 @@ _ROOT_READS = frozenset(
         "meter/busbar-current",
         "meter/frequency",
         "breaker/rating",
+        "door/state",
+        "status/ethernet",
+        "status/wifi",
+        "shed/policy",
     }
 )
-_ROOT_READ_CAPABILITIES = frozenset({"pcs", "power-flows"})
-_LUGS_READS = frozenset(
+# `shed/asserted-islanding-state` stays unmapped until the islanding entity
+# that carries it exists (4b-2).
+_ROOT_READ_CAPABILITIES = frozenset({"pcs", "power-flows", "shed-forecast"})
+_CONNECTION_READS = frozenset(
     {
-        "info/direction",
-        "meter/active-power",
-        "meter/current-a",
-        "meter/current-b",
-        "meter/imported-energy",
-        "meter/exported-energy",
-        "connection/service-rating",
-        "connection/overcurrent-protection",
-        "connection/feeds-role",
+        "connection/backed-up",
+        "connection/count",
+        "connection/feeds-device-id",
+        "connection/feeds-device-type",
+        "connection/feeds-device-status",
+        "connection/fed-by-device-id",
+        "connection/fed-by-device-type",
+        "connection/fed-by-device-status",
+        "info/locations",
     }
 )
-_CIRCUIT_READS = frozenset(
-    {
-        "info/name",
-        "info/spaces",
-        "info/dedicated",
-        "info/nominal-voltage",
-        "info/tags",
-        "breaker/poles",
-        "breaker/rating",
-        "breaker/protection-functions",
-        "meter/active-power",
-        "meter/current",
-        "meter/imported-energy",
-        "meter/exported-energy",
-        "meter/shared-with-device-ids",
-        "switch/relay",
-        "switch/relay-requester",
-        "switch/relay-controllable",
-        "switch/shared-with-device-ids",
-        "load-shed/priority",
-        "pcs/managed",
-        "pcs/priority",
-        "connection/feeds-role",
-    }
+_LUGS_READS = (
+    frozenset(
+        {
+            "info/direction",
+            "meter/active-power",
+            "meter/current-a",
+            "meter/current-b",
+            "meter/imported-energy",
+            "meter/exported-energy",
+            "connection/service-rating",
+            "connection/overcurrent-protection",
+            "connection/feeds-role",
+        }
+    )
+    | _CONNECTION_READS
+)
+_CIRCUIT_READS = (
+    frozenset(
+        {
+            "info/name",
+            "info/spaces",
+            "info/dedicated",
+            "info/nominal-voltage",
+            "info/tags",
+            "breaker/poles",
+            "breaker/rating",
+            "breaker/protection-functions",
+            "meter/active-power",
+            "meter/current",
+            "meter/imported-energy",
+            "meter/exported-energy",
+            "meter/shared-with-device-ids",
+            "switch/relay",
+            "switch/relay-requester",
+            "switch/relay-controllable",
+            "switch/shared-with-device-ids",
+            "load-shed/priority",
+            "pcs/managed",
+            "pcs/priority",
+            "connection/feeds-role",
+        }
+    )
+    | _CONNECTION_READS
 )
 
 
@@ -357,6 +435,19 @@ def _panel(tree: DeviceTree, description: DeviceDescription) -> PanelFacts:
         if key.startswith("power-flows/")
     }
     grid = flows.get("grid")
+    forecast = None
+    if "shed-forecast" in description.capabilities:
+        forecast = ShedForecast(
+            time_to_priority_shed=_int(get("shed-forecast/time-to-priority-shed")),
+            total_time_remaining=_int(get("shed-forecast/total-time-remaining")),
+            full_charge_time_to_priority_shed=_int(
+                get("shed-forecast/full-charge-time-to-priority-shed")
+            ),
+            full_charge_total_time_remaining=_int(
+                get("shed-forecast/full-charge-total-time-remaining")
+            ),
+            confidence=_text(get("shed-forecast/confidence")),
+        )
     return PanelFacts(
         device_id=device_id,
         state=tree.states.get(device_id),
@@ -382,7 +473,55 @@ def _panel(tree: DeviceTree, description: DeviceDescription) -> PanelFacts:
             battery=flows.get("battery"),
             published=frozenset(k for k, v in flows.items() if v is not None),
         ),
+        door=_text(get("door/state")),
+        ethernet=_bool(get("status/ethernet")),
+        wifi=_bool(get("status/wifi")),
+        shed_forecast=forecast,
+        shed_policy=parse_shed_policy(get("shed/policy")),
     )
+
+
+SHED_POLICY_ALGORITHM = "soc-priority.v1"
+_policy_rejections_logged: set[str] = set()
+
+
+def parse_shed_policy(value: Any) -> ShedPolicy | None:
+    """The thresholds of a `soc-priority.v1` policy, or None for anything else.
+
+    The schema names the policy in `algorithm`; `version` and `$schema` are
+    accepted too. Both thresholds must be numbers from 0 to 100. A rejection is
+    logged once per reason at debug, never with the payload.
+    """
+    if value is None:
+        return None
+    doc = value
+    if isinstance(value, str | bytes):
+        try:
+            doc = json.loads(value)
+        except ValueError:
+            return _reject_policy("not JSON")
+    if not isinstance(doc, dict):
+        return _reject_policy("not an object")
+    if SHED_POLICY_ALGORITHM not in (doc.get("algorithm"), doc.get("version"), doc.get("$schema")):
+        return _reject_policy("not soc-priority.v1")
+    params = doc.get("parameters", doc)
+    if not isinstance(params, dict):
+        return _reject_policy("no parameters")
+    shed, release = params.get("soc-threshold-shed"), params.get("soc-threshold-release")
+    if not (_percent(shed) and _percent(release)):
+        return _reject_policy("thresholds out of range")
+    return ShedPolicy(soc_threshold_shed=float(shed), soc_threshold_release=float(release))
+
+
+def _percent(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int | float) and 0 <= value <= 100
+
+
+def _reject_policy(reason: str) -> None:
+    if reason not in _policy_rejections_logged:
+        _policy_rejections_logged.add(reason)
+        log.debug("Ignoring the panel's shed/policy: %s", reason)
+    return None
 
 
 def _lugs(tree: DeviceTree, description: DeviceDescription) -> LugsFacts:
@@ -404,6 +543,7 @@ def _lugs(tree: DeviceTree, description: DeviceDescription) -> LugsFacts:
         service_rating=_int(get("connection/service-rating")),
         overcurrent_protection=_int(get("connection/overcurrent-protection")),
         feeds_role=_text(get("connection/feeds-role")),
+        **_connection(tree, get),
     )
 
 
@@ -484,7 +624,51 @@ def _circuit(tree: DeviceTree, description: DeviceDescription) -> CircuitFacts:
         is_remote_ct=is_remote_ct,
         shared_meter_with=_split(get("meter/shared-with-device-ids")),
         shared_switch_with=_split(get("switch/shared-with-device-ids")),
+        **_connection(tree, get),
     )
+
+
+def _connection(tree: DeviceTree, get: Callable[[str], Any]) -> dict[str, Any]:
+    """The `connection/*` and `info/locations` facts circuits and lugs share."""
+    return {
+        "backed_up": _text(get("connection/backed-up")),
+        "unit_count": _int(get("connection/count")),
+        "location": _location(get("info/locations")),
+        "feeds": _link(tree, get, "feeds-device"),
+        "fed_by": _link(tree, get, "fed-by-device"),
+    }
+
+
+def _link(tree: DeviceTree, get: Callable[[str], Any], prefix: str) -> Link | None:
+    """The link a device publishes, or None until its id is published."""
+    target = _text(get(f"connection/{prefix}-id"))
+    if target is None:
+        return None
+    described = tree.descriptions.get(target)
+    if described is not None and described.device_class:
+        kind: str | None = described.device_class
+    else:
+        kind = _device_kind(_text(get(f"connection/{prefix}-type")))
+    return Link(via_kind=kind, via_id=target, status=_text(get(f"connection/{prefix}-status")))
+
+
+def _device_kind(published: str | None) -> str | None:
+    """`energy.ebus.device.bess`, `bess` or `BESS` -> `bess`."""
+    if published is None:
+        return None
+    kind = published.strip().lower()
+    return kind.removeprefix(DEVICE_TYPE_PREFIX) or None
+
+
+def _location(value: Any) -> str | None:
+    """`info/locations` as one label: a string, or a list joined with commas."""
+    if isinstance(value, str) and value.lstrip().startswith("["):
+        with contextlib.suppress(ValueError):
+            value = json.loads(value)
+    if isinstance(value, list):
+        parts = [part.strip() for part in value if isinstance(part, str) and part.strip()]
+        return ", ".join(parts) or None
+    return _text(value.strip() if isinstance(value, str) else value)
 
 
 def circuit_label(circuit: CircuitFacts) -> str:
@@ -634,7 +818,7 @@ class Row:
     """
 
     key: str  # translation key for panel rows, a stable name for circuit rows
-    platform: str  # "sensor", "switch" or "select"
+    platform: str  # "sensor", "binary_sensor", "switch" or "select"
     scope: Scope
     source: str  # the property key the unique id ends in
     kind: ValueKind
@@ -680,8 +864,83 @@ def _circuit_attrs(c: CircuitFacts) -> dict[str, Any]:
         "role": c.role.value if c.role is not Role.LOAD else None,
         "shared_meter_with": list(c.shared_meter_with) if c.shared_meter_with else None,
         "shared_switch_with": list(c.shared_switch_with) if c.shared_switch_with else None,
+        **_connection_attrs(c),
     }
     return {key: value for key, value in attrs.items() if value is not None}
+
+
+def _connection_attrs(facts: LugsFacts | CircuitFacts) -> dict[str, Any]:
+    """Backup, unit count and room, each only once published. Link ids stay hidden."""
+    return _present(
+        {
+            "backed_up": _lower(facts.backed_up),
+            "unit_count": facts.unit_count,
+            "location": facts.location,
+        }
+    )
+
+
+# Switching off the circuit that charges a battery or carries solar can cut
+# backup power or fault the inverter, so it gets no relay switch (spec §6.4).
+_NO_RELAY_TARGETS = frozenset({"bess", "pv"})
+
+
+def feeds_storage_or_solar(c: CircuitFacts) -> bool:
+    """Whether the circuit must not be switched. Fails closed: a published
+    target whose kind is not known yet counts as storage or solar.
+    """
+    if c.role is Role.STORAGE:
+        return True
+    if c.feeds is None:
+        return False
+    return c.feeds.via_kind is None or c.feeds.via_kind in _NO_RELAY_TARGETS
+
+
+def relay_blocked(snapshot: Snapshot, device_id: str) -> bool:
+    """Whether a circuit's relay switch, if it exists, must go unavailable and
+    refuse commands: re-checked on every snapshot, since a link can arrive
+    after the switch was created.
+    """
+    circuit = snapshot.circuits.get(device_id)
+    return circuit is not None and feeds_storage_or_solar(circuit)
+
+
+def _pcs_flag(name: str) -> Callable[[PanelFacts], bool | None]:
+    return lambda p: _bool(p.pcs.attributes.get(name)) if p.pcs else None
+
+
+def _door(p: PanelFacts) -> bool | None:
+    return {"OPEN": True, "CLOSED": False}.get(p.door) if p.door else None
+
+
+def _forecast(read: Callable[[ShedForecast], Any]) -> Callable[[PanelFacts], Any]:
+    return lambda p: read(p.shed_forecast) if p.shed_forecast else None
+
+
+def _shed_attrs(p: PanelFacts) -> dict[str, Any]:
+    forecast, policy = p.shed_forecast, p.shed_policy
+    return _present(
+        {
+            "full_charge_time_to_priority_shed": (
+                forecast.full_charge_time_to_priority_shed if forecast else None
+            ),
+            "confidence": _lower(forecast.confidence) if forecast else None,
+            "soc_threshold_shed": policy.soc_threshold_shed if policy else None,
+            "soc_threshold_release": policy.soc_threshold_release if policy else None,
+        }
+    )
+
+
+def _remaining_attrs(p: PanelFacts) -> dict[str, Any]:
+    forecast = p.shed_forecast
+    if forecast is None:
+        return {}
+    return _present(
+        {
+            "full_charge_total_time_remaining": forecast.full_charge_total_time_remaining,
+            "confidence": _lower(forecast.confidence),
+        }
+    )
 
 
 def _flow(name: str) -> Callable[[PanelFacts], bool]:
@@ -731,6 +990,21 @@ def _panel_rows() -> tuple[Row, ...]:
         Row("pcs_binding_constraint", "sensor", p, "pcs/binding-constraint", _M,
             lambda f: _lower(f.pcs.binding_constraint) if f.pcs else None,
             ("pcs/binding-constraint",)),
+        Row("door", "binary_sensor", p, "door/state", _M, _door, ("door/state",)),
+        Row("ethernet", "binary_sensor", p, "status/ethernet", _M, lambda f: f.ethernet,
+            ("status/ethernet",)),
+        Row("wifi", "binary_sensor", p, "status/wifi", _M, lambda f: f.wifi,
+            ("status/wifi",)),
+        Row("pcs_active", "binary_sensor", p, "pcs/active", _M, _pcs_flag("active"),
+            ("pcs/active",)),
+        Row("pcs_enabled", "binary_sensor", p, "pcs/enabled", _S, _pcs_flag("enabled"),
+            ("pcs/enabled",)),
+        Row("time_to_priority_shed", "sensor", p, "shed-forecast/time-to-priority-shed", _M,
+            _forecast(lambda s: s.time_to_priority_shed),
+            ("shed-forecast/time-to-priority-shed",), attrs=_shed_attrs),
+        Row("total_time_remaining", "sensor", p, "shed-forecast/total-time-remaining", _M,
+            _forecast(lambda s: s.total_time_remaining),
+            ("shed-forecast/total-time-remaining",), attrs=_remaining_attrs),
     )  # fmt: skip
 
 
@@ -738,7 +1012,7 @@ def _lugs_rows() -> tuple[Row, ...]:
     up, down = Scope.UPSTREAM, Scope.DOWNSTREAM
     return (
         Row("current_power", "sensor", up, "meter/active-power", _M,
-            lambda f: f.active_power, ("meter/active-power",)),
+            lambda f: f.active_power, ("meter/active-power",), attrs=_connection_attrs),
         Row("main_consumed_energy", "sensor", up, _IMPORTED, _E,
             lambda f: _kwh(f.imported_wh), (_IMPORTED,)),
         Row("main_produced_energy", "sensor", up, _EXPORTED, _E,
@@ -757,7 +1031,7 @@ def _lugs_rows() -> tuple[Row, ...]:
             _published(lambda f: f.overcurrent_protection)),
         Row("feedthrough_power", "sensor", down, "meter/active-power", _M,
             lambda f: f.active_power, ("meter/active-power",),
-            _published(lambda f: f.active_power)),
+            _published(lambda f: f.active_power), attrs=_connection_attrs),
         Row("feedthrough_imported_energy", "sensor", down, _IMPORTED, _E,
             lambda f: _kwh(f.imported_wh), (_IMPORTED,), _published(lambda f: f.imported_wh)),
         Row("feedthrough_exported_energy", "sensor", down, _EXPORTED, _E,
@@ -785,7 +1059,7 @@ def _circuit_rows() -> tuple[Row, ...]:
         Row("breaker_rating", "sensor", c, "breaker/rating", _S, lambda f: f.rating,
             ("breaker/rating",)),
         Row("breaker", "switch", c, "switch/relay", _C, lambda f: f.relay,
-            ("switch/relay",), lambda f: f.has_switch,
+            ("switch/relay",), lambda f: f.has_switch and not feeds_storage_or_solar(f),
             attrs=lambda f: _present({"relay_requester": f.relay_requester})),
         Row("priority", "select", c, "load-shed/priority", _C, lambda f: f.priority,
             ("load-shed/priority",), lambda f: f.has_priority_select,

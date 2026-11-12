@@ -5,6 +5,7 @@ capability nodes, `energy.ebus.device.<class>` types) with made-up ids.
 """
 
 import json
+import logging
 
 import pytest
 from span_client.local import homie
@@ -320,3 +321,17 @@ def test_cleared_description_drops_values():
     tree.apply(f"ebus/5/{CIRCUIT}/meter/active-power", b"5")
     tree.apply(f"ebus/5/{CIRCUIT}/$description", b"")
     assert tree.values(CIRCUIT) == {}
+
+
+@pytest.mark.parametrize(
+    ("datatype", "payload"),
+    [
+        (DataType.JSON, b'{"site": "secret-garage-7"'),
+        (DataType.INTEGER, b"secret-garage-7"),
+    ],
+)
+def test_unparseable_value_is_never_logged(caplog, datatype, payload):
+    caplog.set_level(logging.DEBUG)
+    assert homie.decode_value(prop(datatype), payload) is None
+    assert "unparseable" in caplog.text
+    assert "secret" not in caplog.text and "garage" not in caplog.text

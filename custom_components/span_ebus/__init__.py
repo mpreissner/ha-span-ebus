@@ -49,7 +49,12 @@ from .transport import SpanTransportManager, fallback_issue_id, local_tree_store
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.SELECT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 # One coordinator per panel. A site has one stream: a panel alone on its site takes
 # all of it, and panels sharing a site take their split of it, since circuit

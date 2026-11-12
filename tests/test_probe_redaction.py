@@ -55,6 +55,9 @@ def test_location_properties_are_identifying():
         ("info/machine-type", False, False),
         ("info/name", True, True),
         ("info/name", False, False),
+        ("status/time-zone", True, True),
+        ("info/serial-number", False, True),  # a battery's or charger's own serial
+        ("shed-forecast/confidence", True, False),
     ],
 )
 def test_identifying_matches_whole_words(key, root, identifying):

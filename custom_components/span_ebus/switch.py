@@ -18,7 +18,8 @@ from . import SpanConfigEntry
 from .coordinator import SpanCloudCoordinator
 from .local_entity import SpanLocalEntity, async_setup_local
 from .span_client.backend import RELAY_PROPERTY
-from .span_client.local.model import Row
+from .span_client.local import model
+from .span_client.local.model import Row, Snapshot
 from .span_client.models import PropertySpec
 from .transport import SpanTransportManager
 
@@ -111,6 +112,11 @@ class SpanLocalRelaySwitch(SpanLocalEntity, SwitchEntity):
         self, entry: SpanConfigEntry, transport: SpanTransportManager, row: Row, device_id: str
     ) -> None:
         super().__init__(entry, transport, row, device_id)
+
+    def _blocked(self, snapshot: Snapshot) -> bool:
+        # A link to a battery or PV inverter can arrive after this switch was
+        # created (or on an upgrade): go unavailable, keep the registry entry.
+        return model.relay_blocked(snapshot, self._device_id)
 
     @property
     def is_on(self) -> bool | None:
