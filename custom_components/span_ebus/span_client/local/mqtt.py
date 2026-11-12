@@ -43,6 +43,20 @@ MessageHandler = Callable[[str, bytes, bool], None]
 StateHandler = Callable[[bool], None]
 
 
+def _drop_out_messages(client: paho.Client) -> None:
+    """Drop every unacknowledged outgoing message, so none is resent.
+
+    `Client.drop_out_messages` arrived in paho-mqtt 2.2, and Home Assistant
+    pins 2.1, so on 2.1 this does what that method does.
+    """
+    drop = getattr(client, "drop_out_messages", None)
+    if drop is not None:
+        drop()
+        return
+    with client._out_message_mutex:  # private: paho 2.1 has no public way
+        client._out_messages.clear()
+
+
 class LocalMqtt:
     """One panel's broker connection.
 
@@ -127,7 +141,7 @@ class LocalMqtt:
         # Not only when connected: a stop during the handshake must still close
         # the socket, or a late CONNACK would report a connection after stop.
         self._client.disconnect()
-        self._client.drop_out_messages()
+        _drop_out_messages(self._client)
         await self._stop_misc()
         self._set_connected(False)
         # Already sent, so the panel may still act on them.
@@ -246,7 +260,7 @@ class LocalMqtt:
     ) -> None:
         # paho resends unacknowledged QoS 1 publishes once this returns; their
         # callers already got OutcomeUnknown, so drop them.
-        client.drop_out_messages()
+        _drop_out_messages(client)
         if self._stopping:
             # A CONNACK that raced stop(): close instead of reporting it.
             client.disconnect()

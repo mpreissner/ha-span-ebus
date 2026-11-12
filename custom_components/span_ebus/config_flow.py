@@ -1,7 +1,12 @@
-"""Config flow: sign in to SPAN cloud once, store tokens (never the password)."""
+"""Config flow: add a panel over its local API, or a SPAN account over the cloud.
+
+Neither the cloud password nor the panel passphrase is stored; only the
+tokens and broker credentials they buy.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import dataclasses
@@ -11,13 +16,14 @@ import tempfile
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
-from homeassistant.const import CONF_PASSWORD
+from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.core import callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -29,10 +35,17 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_ACCESS_TOKEN,
+    CONF_BROKER_PASSWORD,
+    CONF_BROKER_USERNAME,
+    CONF_CA_PEM,
+    CONF_CLIENT_NAME,
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_EMAIL,
     CONF_FEEDS,
+    CONF_LOCAL_SERIAL,
+    CONF_MQTTS_PORT,
     CONF_PANELS,
     CONF_PRIMARY_PANEL,
     CONF_SERIAL,
@@ -53,10 +66,16 @@ from .span_client.backend import (
     panel_plan,
     primary_panel_for,
 )
+from .span_client.local import onboard, tls
+from .span_client.local.rest import NotFound, SpanLocalError, UnexpectedResponse
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 _LOGGER = logging.getLogger(__name__)
 
 CONF_CIRCUIT = "circuit"
+CONF_PASSPHRASE = "passphrase"
 
 # How long to wait for the first telemetry frame when validating the channel.
 # Generous: the subscribe is deliberately delayed a couple of seconds and the
@@ -71,6 +90,41 @@ STEP_USER_SCHEMA = vol.Schema(
         ),
     }
 )
+
+
+STEP_HOST_SCHEMA = vol.Schema({vol.Required(CONF_HOST): TextSelector()})
+# Never stored or logged: it buys a client registration and is dropped.
+STEP_PASSPHRASE_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_PASSPHRASE): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        )
+    }
+)
+
+
+def _is_cloud_account(data: Mapping[str, Any]) -> bool:
+    """A whole account added over the cloud, rather than one panel added locally."""
+    return CONF_TOKENS in data and CONF_LOCAL_SERIAL not in data
+
+
+def _account_key(user_id: str | None, email: str) -> str:
+    """What an account entry is keyed by: the user id, else the email."""
+    return user_id or email.lower()
+
+
+def _same_account(data: Mapping[str, Any], user_id: str | None, email: str) -> bool:
+    """Whether an entry's stored account is this one, by user id or by email."""
+    keys = {key for key in (user_id, email.lower()) if key}
+    stored = {data.get(CONF_USER_ID), str(data.get(CONF_EMAIL, "")).lower()}
+    return bool(keys & stored)
+
+
+def _account_has_panel(entry: ConfigEntry, serial: str) -> bool:
+    """Whether a cloud account entry already runs the panel with this serial."""
+    wanted = serial.lower()
+    keys = [entry.data.get(CONF_SERIAL), *entry.options.get(CONF_PANELS, [])]
+    return any(isinstance(key, str) and key.lower() == wanted for key in keys)
 
 
 def _user_id_from_access_token(access_token: str) -> str | None:
@@ -252,7 +306,11 @@ class _FeedSteps:
 
 
 class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
-    """Handle the SPAN eBus config and reauth flows."""
+    """Handle the SPAN eBus config, discovery, reauth and reconfigure flows.
+
+    A panel is added over its local API (host, then passphrase) with the cloud
+    as an optional fallback, or the whole SPAN account is added over the cloud.
+    """
 
     VERSION = 1
 
@@ -261,13 +319,254 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         self._reauth_entry_data: Mapping[str, Any] | None = None
         self._entry_data: dict[str, Any] = {}
         self._token = ""
+        # The panel being added locally: where it is and its pinned CA, then,
+        # once registered, the entry data for it.
+        self._host = ""
+        self._ca_pem = ""
+        self._serial = ""
+        self._local: dict[str, Any] | None = None
+        self._committed = False
+        # Names registered whose outcome was never confirmed; removed with
+        # the token of the registration that does succeed.
+        self._unconfirmed: list[str] = []
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> SpanEbusOptionsFlow:
         return SpanEbusOptionsFlow()
 
+    @classmethod
+    @callback
+    def async_supports_options_flow(cls, config_entry: ConfigEntry) -> bool:
+        """Options choose among the account's panels: cloud-only entries alone."""
+        return _is_cloud_account(config_entry.data)
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="user", menu_options=["local", "cloud"])
+
+    # --- local ------------------------------------------------------------------
+
+    def _session(self) -> Any:
+        return async_get_clientsession(self.hass)
+
+    async def async_step_local(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        placeholders = {"retry_after": "60"}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            try:
+                status, ca_pem = await onboard.probe_panel(self._session(), host)
+            except NotFound:
+                # Answers HTTPS but has no v2 API: older firmware.
+                return await self.async_step_local_unsupported()
+            except UnexpectedResponse:
+                errors["base"] = "not_a_panel"
+            except SpanLocalError as exc:
+                errors["base"], extra = onboard.form_error(exc)
+                placeholders.update(extra)
+            else:
+                if not onboard.firmware_supported(status.firmware):
+                    return await self.async_step_local_unsupported()
+                await self.async_set_unique_id(status.serial)
+                # No host update here: only the pinned CA proves it is the same panel.
+                self._abort_if_unique_id_configured()
+                if self._cloud_runs_panel(status.serial):
+                    return self.async_abort(reason="cloud_account_configured")
+                self._host, self._ca_pem, self._serial = host, ca_pem, status.serial
+                return await self.async_step_local_auth()
+        return self.async_show_form(
+            step_id="local",
+            data_schema=self.add_suggested_values_to_schema(STEP_HOST_SCHEMA, user_input or {}),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_local_unsupported(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="local_unsupported", menu_options=["cloud", "local"])
+
+    def _cloud_runs_panel(self, serial: str) -> bool:
+        """Whether a cloud account entry already runs this panel."""
+        return any(
+            _is_cloud_account(entry.data) and _account_has_panel(entry, serial)
+            for entry in self._async_current_entries(include_ignore=False)
+        )
+
+    async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo) -> ConfigFlowResult:
+        host = str(discovery_info.host)
+        session = self._session()
+        for entry in self._async_current_entries(include_ignore=False):
+            if CONF_CA_PEM not in entry.data:
+                continue
+            if entry.data.get(CONF_HOST) == host:
+                return self.async_abort(reason="already_configured")
+            if await onboard.host_matches_ca(
+                session, host, entry.data[CONF_CA_PEM], entry.data[CONF_LOCAL_SERIAL]
+            ):
+                # The panel moved, and its CA proves it: follow it.
+                self.hass.config_entries.async_update_entry(
+                    entry, data={**entry.data, CONF_HOST: host}
+                )
+                self.hass.config_entries.async_schedule_reload(entry.entry_id)
+                return self.async_abort(reason="already_configured")
+        try:
+            status, ca_pem = await onboard.probe_panel(session, host)
+        except NotFound:
+            return self.async_abort(reason="not_supported")
+        except SpanLocalError:
+            return self.async_abort(reason="cannot_connect")
+        if not onboard.firmware_supported(status.firmware):
+            return self.async_abort(reason="not_supported")
+        await self.async_set_unique_id(status.serial)
+        self._abort_if_unique_id_configured()
+        if self._cloud_runs_panel(status.serial):
+            return self.async_abort(reason="already_configured")
+        self._host, self._ca_pem, self._serial = host, ca_pem, status.serial
+        self.context["title_placeholders"] = {"host": host}
+        return await self.async_step_local_auth()
+
+    async def _register(self, passphrase: str) -> dict[str, Any]:
+        """Register a client and prove its broker login; the local entry data.
+
+        A registration that fails the broker test is removed again, and so is
+        every earlier one whose outcome was never confirmed.
+        """
+        session = self._session()
+        registration, name = await onboard.register_client(
+            session,
+            self._host,
+            self._ca_pem,
+            onboard.new_client_name(),
+            passphrase,
+            unconfirmed=self._unconfirmed,
+        )
+        token = registration.access_token
+        stale, self._unconfirmed = self._unconfirmed, []
+        for old in stale:
+            await onboard.discard_client(session, self._host, self._ca_pem, token, old)
+        try:
+            if registration.serial != self._serial:
+                raise UnexpectedResponse("registration is for another panel")
+            await onboard.wait_until_ready(registration, self._host, self._ca_pem, name)
+        except asyncio.CancelledError:
+            # The flow is going away: don't await on a cancelled task.
+            self.hass.async_create_background_task(
+                onboard.discard_client(session, self._host, self._ca_pem, token, name),
+                "span_ebus remove unused client",
+            )
+            raise
+        except Exception:
+            await onboard.discard_client(session, self._host, self._ca_pem, token, name)
+            raise
+        return {
+            CONF_HOST: self._host,
+            CONF_LOCAL_SERIAL: self._serial,
+            CONF_CA_PEM: self._ca_pem,
+            CONF_CLIENT_NAME: name,
+            CONF_ACCESS_TOKEN: registration.access_token,
+            CONF_BROKER_USERNAME: registration.broker_username,
+            CONF_BROKER_PASSWORD: registration.broker_password,
+            CONF_MQTTS_PORT: registration.mqtts_port,
+        }
+
+    async def _passphrase_step(
+        self, step_id: str, user_input: dict[str, Any] | None
+    ) -> tuple[dict[str, Any] | None, ConfigFlowResult | None]:
+        """Ask for the passphrase until a client registers.
+
+        Returns the entry data once registered, else the form to show.
+        """
+        errors: dict[str, str] = {}
+        placeholders = {"retry_after": "60", "host": self._host}
+        if user_input is not None:
+            try:
+                return await self._register(user_input[CONF_PASSPHRASE]), None
+            except SpanLocalError as exc:
+                errors["base"], extra = onboard.form_error(exc)
+                placeholders.update(extra)
+            except Exception:
+                _LOGGER.exception("unexpected error registering with a SPAN panel")
+                errors["base"] = "unknown"
+        placeholders["fingerprint"] = tls.ca_fingerprint(self._ca_pem)
+        return None, self.async_show_form(
+            step_id=step_id,
+            data_schema=STEP_PASSPHRASE_SCHEMA,
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_local_auth(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        data, form = await self._passphrase_step("local_auth", user_input)
+        if data is None:
+            assert form is not None  # noqa: S101 — one of the two is always set
+            return form
+        self._local = data
+        return await self.async_step_cloud_fallback()
+
+    async def async_step_cloud_fallback(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="cloud_fallback", menu_options=["cloud", "local_only"])
+
+    async def async_step_local_only(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if self._local is None:
+            return self.async_abort(reason="unknown")
+        return self._create(self._local)
+
+    def _create(
+        self, data: dict[str, Any], options: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Create the entry. A local one is named for its host, never its serial."""
+        self._committed = True
+        title = f"SPAN Panel ({data[CONF_HOST]})" if CONF_HOST in data else data[CONF_EMAIL]
+        if options is None:
+            return self.async_create_entry(title=title, data=data)
+        return self.async_create_entry(title=title, data=data, options=options)
+
+    @callback
+    def async_remove(self) -> None:
+        """A flow left before its entry was made: unregister its client."""
+        if self._local is None or self._committed:
+            return
+        local, self._local = self._local, None
+        self.hass.async_create_background_task(
+            onboard.discard_client(
+                self._session(),
+                local[CONF_HOST],
+                local[CONF_CA_PEM],
+                local[CONF_ACCESS_TOKEN],
+                local[CONF_CLIENT_NAME],
+            ),
+            "span_ebus remove unused client",
+        )
+
+    async def _link_cloud(
+        self, local: dict[str, Any], cloud: dict[str, Any], token: str
+    ) -> ConfigFlowResult | str:
+        """Make the local entry, with the cloud for this panel alone as its fallback.
+
+        Returns a form error key when the account can't be read.
+        """
+        try:
+            sites = await self.hass.async_add_executor_job(discover_sites, token)
+        except Exception as err:  # noqa: BLE001 — shown as a form error
+            _LOGGER.debug("could not list SPAN panels during setup: %s", err)
+            return "cannot_connect"
+        found = find_panel(sites, local[CONF_LOCAL_SERIAL])
+        if found is None:
+            return self.async_abort(reason="panel_not_on_account")
+        data = {**local, **cloud, CONF_SERIAL: local[CONF_LOCAL_SERIAL]}
+        options = _panel_options(panel_labels(sites), [found[1].key], {})
+        return self._create(data, options)
+
+    # --- cloud ------------------------------------------------------------------
+
+    async def async_step_cloud(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             email = user_input[CONF_EMAIL]
@@ -287,6 +586,11 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
             else:
                 # The password is discarded here — only tokens are persisted.
                 user_id = _user_id_from_access_token(tokens.access_token)
+                # Before the slow probe: an account that can't be added here
+                # should say so at once.
+                reason = None if self._reauth_entry_data else self._account_conflict(user_id, email)
+                if reason is not None:
+                    return self.async_abort(reason=reason)
                 serial: str | None = None
                 try:
                     serial = await self.hass.async_add_executor_job(
@@ -299,8 +603,6 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
                     errors["base"] = "cannot_connect"
 
                 if not errors:
-                    await self.async_set_unique_id(user_id or email.lower())
-
                     data = {
                         CONF_EMAIL: email,
                         CONF_TOKENS: dataclasses.asdict(tokens),
@@ -310,33 +612,64 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
                     }
 
                     if self._reauth_entry_data is not None:
-                        entry = self._get_reauth_entry()
-                        self._abort_if_unique_id_mismatch(reason="wrong_account")
-                        # Reauth proves the login and changes nothing else. The
-                        # probe's serial is whichever panel came first, which on
-                        # a multi-panel account need not be the saved one.
-                        data = {
-                            **entry.data,
-                            **data,
-                            CONF_SERIAL: entry.data.get(CONF_SERIAL) or serial,
-                        }
-                        return self.async_update_reload_and_abort(entry, data=data)
+                        return await self._finish_cloud_reauth(data)
 
-                    self._abort_if_unique_id_configured()
-                    self._entry_data = data
-                    self._token = tokens.access_token
-                    self._labels = await self._discover_labels()
-                    if len(self._labels) > 1:
-                        return await self.async_step_panels()
-                    return self.async_create_entry(title=email, data=data)
+                    if self._local is not None:
+                        linked = await self._link_cloud(self._local, data, tokens.access_token)
+                        if not isinstance(linked, str):
+                            return linked
+                        errors["base"] = linked
+                    else:
+                        await self.async_set_unique_id(user_id or email.lower())
+                        self._abort_if_unique_id_configured()
+                        self._entry_data = data
+                        self._token = tokens.access_token
+                        self._labels = await self._discover_labels()
+                        if len(self._labels) > 1:
+                            return await self.async_step_panels()
+                        return self._create(data)
 
         return self.async_show_form(
-            step_id="user",
+            step_id="cloud",
             data_schema=self.add_suggested_values_to_schema(
                 STEP_USER_SCHEMA, self._suggested_values(user_input)
             ),
             errors=errors,
         )
+
+    def _account_conflict(self, user_id: str | None, email: str) -> str | None:
+        """Why this account can't be added in this flow, if it can't.
+
+        Linking a local panel: the account must not already run as its own
+        entry. Adding the account: none of its panels may run locally.
+        """
+        account = _account_key(user_id, email)
+        for entry in self._async_current_entries(include_ignore=False):
+            if _is_cloud_account(entry.data):
+                if self._local is not None and entry.unique_id in {
+                    account,
+                    email.lower(),
+                }:
+                    return "cloud_account_configured"
+            elif self._local is None and _same_account(entry.data, user_id, email):
+                return "panel_configured_locally"
+        return None
+
+    async def _finish_cloud_reauth(self, data: dict[str, Any]) -> ConfigFlowResult:
+        """Reauth proves the login and changes nothing else."""
+        entry = self._get_reauth_entry()
+        account = _account_key(data[CONF_USER_ID], data[CONF_EMAIL])
+        if _is_cloud_account(entry.data):
+            await self.async_set_unique_id(account)
+            self._abort_if_unique_id_mismatch(reason="wrong_account")
+        else:
+            # A local entry is keyed by its panel; the account is in its data.
+            if not _same_account(entry.data, data[CONF_USER_ID], data[CONF_EMAIL]):
+                return self.async_abort(reason="wrong_account")
+        # The probe's serial is whichever panel came first, which on a
+        # multi-panel account need not be the saved one.
+        data = {**entry.data, **data, CONF_SERIAL: entry.data.get(CONF_SERIAL) or data[CONF_SERIAL]}
+        return self.async_update_reload_and_abort(entry, data=data)
 
     def _access_token(self) -> str:
         return self._token
@@ -368,10 +701,8 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         )
 
     async def _finish_feeds(self) -> ConfigFlowResult:
-        return self.async_create_entry(
-            title=self._entry_data[CONF_EMAIL],
-            data=self._entry_data,
-            options=_panel_options(self._labels, self._ticked, self._feeds),
+        return self._create(
+            self._entry_data, _panel_options(self._labels, self._ticked, self._feeds)
         )
 
     def _existing_device_uuid(self) -> str | None:
@@ -394,8 +725,12 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
             suggested[CONF_EMAIL] = user_input[CONF_EMAIL]
         return {k: v for k, v in suggested.items() if v is not None}
 
+    # --- reauth and reconfigure -------------------------------------------------
+
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
         self._reauth_entry_data = entry_data
+        if CONF_TOKENS not in entry_data and CONF_LOCAL_SERIAL in entry_data:
+            return await self.async_step_reauth_local()
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -408,7 +743,56 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
                     STEP_USER_SCHEMA, self._suggested_values(None)
                 ),
             )
-        return await self.async_step_user(user_input)
+        return await self.async_step_cloud(user_input)
+
+    async def async_step_reauth_local(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Register a new client with the passphrase, then drop the old one."""
+        entry = self._get_reauth_entry()
+        self._host = entry.data[CONF_HOST]
+        self._ca_pem = entry.data[CONF_CA_PEM]
+        self._serial = entry.data[CONF_LOCAL_SERIAL]
+        data, form = await self._passphrase_step("reauth_local", user_input)
+        if data is None:
+            assert form is not None  # noqa: S101 — one of the two is always set
+            return form
+        self._committed = True
+        old_name = entry.data.get(CONF_CLIENT_NAME)
+        if old_name and old_name != data[CONF_CLIENT_NAME]:
+            await onboard.discard_client(
+                self._session(),
+                self._host,
+                self._ca_pem,
+                data[CONF_ACCESS_TOKEN],
+                old_name,
+            )
+        return self.async_update_reload_and_abort(entry, data={**entry.data, **data})
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Point a local entry at a new address, if the panel there has its CA."""
+        entry = self._get_reconfigure_entry()
+        if CONF_CA_PEM not in entry.data:
+            return self.async_abort(reason="not_local")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            if await onboard.host_matches_ca(
+                self._session(), host, entry.data[CONF_CA_PEM], entry.data[CONF_LOCAL_SERIAL]
+            ):
+                return self.async_update_reload_and_abort(
+                    entry, data={**entry.data, CONF_HOST: host}
+                )
+            errors["base"] = "ca_mismatch"
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_HOST_SCHEMA, user_input or {CONF_HOST: entry.data[CONF_HOST]}
+            ),
+            errors=errors,
+        )
 
 
 class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
@@ -428,6 +812,8 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
         return self.config_entry.data
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if not _is_cloud_account(self.config_entry.data):
+            return self.async_abort(reason="not_cloud_account")
         errors: dict[str, str] = {}
         if user_input is None:
             try:

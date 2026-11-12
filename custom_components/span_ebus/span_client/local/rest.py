@@ -68,6 +68,10 @@ class UnexpectedResponse(SpanLocalError):
     """Any other status, or a body that does not match the API."""
 
 
+class NotFound(UnexpectedResponse):
+    """HTTP 404: on the CA endpoint, a panel without the v2 API."""
+
+
 @dataclass(frozen=True)
 class PanelStatus:
     """`GET /api/v2/status`."""
@@ -366,6 +370,8 @@ async def _raise_for(resp: aiohttp.ClientResponse, method: str, path: str) -> No
         raise PanelNotReady(detail or "not ready")
     if status == 504:
         raise OutcomeUnknown(f"{method} {path}: gateway timeout")
+    if status == 404:
+        raise NotFound(f"{method} {path}: HTTP 404")
     raise UnexpectedResponse(f"{method} {path}: HTTP {status}")
 
 

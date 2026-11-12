@@ -14,6 +14,16 @@ CONF_SERIAL = "serial"
 # that can read the account; None means no panel does, so every panel is scoped.
 CONF_PRIMARY_PANEL = "primary_panel"
 
+# Config-entry data keys for a panel added over its local API. The host is
+# HA's `host`. An entry with these and no `tokens` runs without the cloud.
+CONF_LOCAL_SERIAL = "local_serial"
+CONF_CA_PEM = "ca_pem"
+CONF_CLIENT_NAME = "client_name"
+CONF_ACCESS_TOKEN = "access_token"
+CONF_BROKER_USERNAME = "broker_username"
+CONF_BROKER_PASSWORD = "broker_password"
+CONF_MQTTS_PORT = "mqtts_port"
+
 # Config-entry option keys. `panels` absent means nothing has been chosen yet;
 # `declined` is what the user has seen and left off, so it isn't announced again.
 CONF_PANELS = "panels"

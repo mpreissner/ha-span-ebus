@@ -3,10 +3,62 @@
     "step": {
       "user": {
         "title": "SPAN Panel (eBus)",
+        "description": "How do you want to add SPAN?",
+        "menu_options": {
+          "local": "A panel on my network (firmware r202639 or later)",
+          "cloud": "My SPAN account, over the cloud"
+        }
+      },
+      "cloud": {
+        "title": "Sign in to SPAN",
         "description": "Sign in with your SPAN account. Your password is used once to obtain access tokens and is never stored.\n\nSetup registers this Home Assistant install as a telemetry client and waits for the first live frame before finishing, so it may take up to a minute.",
         "data": {
           "email": "Email",
           "password": "Password"
+        }
+      },
+      "local": {
+        "title": "Find your panel",
+        "description": "Enter the panel's IP address or hostname. The panel needs firmware r202639 or later.",
+        "data": {
+          "host": "Host"
+        }
+      },
+      "local_unsupported": {
+        "title": "Local API not available",
+        "description": "This panel doesn't offer SPAN's local API yet; it arrives with firmware r202639. You can add your SPAN account over the cloud instead, or try another address.",
+        "menu_options": {
+          "cloud": "Use the cloud instead",
+          "local": "Try another address"
+        }
+      },
+      "local_auth": {
+        "title": "Enter the panel passphrase",
+        "description": "Find the passphrase in the SPAN app, under the panel's settings. It is used once to register Home Assistant with the panel and is never stored.\n\nThe panel at {host} presented a certificate authority with fingerprint:\n`{fingerprint}`",
+        "data": {
+          "passphrase": "Passphrase"
+        }
+      },
+      "cloud_fallback": {
+        "title": "Use the cloud as a fallback?",
+        "description": "Home Assistant now talks to the panel directly. Signing in to your SPAN account as well lets it fall back to the cloud when the panel can't be reached locally.",
+        "menu_options": {
+          "cloud": "Sign in for the cloud fallback (recommended)",
+          "local_only": "Local only: never use the cloud"
+        }
+      },
+      "reauth_local": {
+        "title": "Re-register with the panel",
+        "description": "The panel at {host} no longer accepts Home Assistant's credentials. Enter the passphrase from the SPAN app to register again; it is never stored.\n\nCertificate authority fingerprint:\n`{fingerprint}`",
+        "data": {
+          "passphrase": "Passphrase"
+        }
+      },
+      "reconfigure": {
+        "title": "Change the panel address",
+        "description": "Enter the panel's new IP address or hostname. The panel there must present the same certificate authority as before.",
+        "data": {
+          "host": "Host"
         }
       },
       "reauth_confirm": {
@@ -41,13 +93,32 @@
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
       "no_telemetry": "Signed in, but SPAN published no telemetry within the setup timeout. Check that your panel is online in the SPAN mobile app, then try again.",
       "no_panels": "Choose at least one panel.",
-      "feed_cycle": "Panels can't feed each other. Check the answers for a loop."
+      "feed_cycle": "Panels can't feed each other. Check the answers for a loop.",
+      "rate_limited": "The panel is limiting requests. Wait {retry_after} seconds and try again.",
+      "invalid_passphrase": "The panel didn't accept that passphrase.",
+      "panel_not_ready": "The panel isn't ready yet. Try again in a minute.",
+      "broker_auth": "The panel registered Home Assistant but its broker refused the login. Try again.",
+      "panel_unreachable": "Could not reach the panel at that address.",
+      "no_ready_state": "Connected to the panel, but it didn't report ready in time. Try again.",
+      "ca_mismatch": "The device at that address isn't this panel, or couldn't be reached.",
+      "unknown": "Unexpected error. Check the logs and try again.",
+      "not_a_panel": "The device at that address doesn't look like a SPAN panel."
     },
     "abort": {
-      "already_configured": "This SPAN account is already configured.",
+      "already_configured": "This SPAN panel or account is already configured.",
       "reauth_successful": "Re-authentication was successful.",
-      "wrong_account": "The credentials are for a different SPAN account than the one being re-authenticated."
-    }
+      "wrong_account": "The credentials are for a different SPAN account than the one being re-authenticated.",
+      "already_in_progress": "This panel is already being set up.",
+      "reconfigure_successful": "The panel address was updated.",
+      "not_local": "Only panels added over the local API have an address to change.",
+      "cloud_account_configured": "This SPAN account is already set up over the cloud. Remove that entry first, then add the panel locally.",
+      "panel_configured_locally": "A panel on this SPAN account is already set up locally, with this account as its cloud fallback. Remove that entry first to add the whole account over the cloud.",
+      "panel_not_on_account": "This panel isn't on that SPAN account.",
+      "cannot_connect": "Could not reach the panel.",
+      "not_supported": "This panel's firmware doesn't offer the local API yet.",
+      "unknown": "Unexpected error."
+    },
+    "flow_title": "{host}"
   },
   "options": {
     "step": {
@@ -79,13 +150,18 @@
       "feed_cycle": "Panels can't feed each other. Check the answers for a loop."
     },
     "abort": {
-      "cannot_connect": "Could not reach the SPAN cloud. Please try again."
+      "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
+      "not_cloud_account": "Panels added locally have no options yet."
     }
   },
   "issues": {
     "new_panels": {
       "title": "New SPAN panel found",
       "description": "{count} panel(s) on your SPAN account are not set up here. To add or dismiss them, open the SPAN Panel (eBus) integration, select Configure and tick the panels that belong to this Home Assistant."
+    },
+    "local_pending": {
+      "title": "SPAN panel added locally: telemetry coming soon",
+      "description": "This panel was added over its local API without the cloud fallback. This version of the integration does not yet stream local telemetry, so the entry has no entities. They will appear after a later update, with nothing for you to do."
     }
   }
 }
