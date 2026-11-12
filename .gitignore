@@ -19,6 +19,8 @@ uv.lock
 *.crt
 *.pem
 span-ca-certs/
+# Throwaway certificates made for the TLS tests; no panel's.
+!tests/fixtures/tls/*.pem
 
 # Runtime token caches (local + HA config dir).
 .span_ebus/
