@@ -271,7 +271,7 @@ def decode_value(definition: PropertyDef | None, payload: bytes) -> Any:
         if datatype is DataType.JSON:
             return json.loads(text)
     except ValueError:
-        log.debug("unparseable %s for %s: %r", datatype.value, definition.key, text[:40])
+        log.debug("unparseable %s for %s (%d bytes)", datatype.value, definition.key, len(text))
         return None
     return text
 

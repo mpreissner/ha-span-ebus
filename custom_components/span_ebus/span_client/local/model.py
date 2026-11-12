@@ -886,9 +886,23 @@ _NO_RELAY_TARGETS = frozenset({"bess", "pv"})
 
 
 def feeds_storage_or_solar(c: CircuitFacts) -> bool:
+    """Whether the circuit must not be switched. Fails closed: a published
+    target whose kind is not known yet counts as storage or solar.
+    """
     if c.role is Role.STORAGE:
         return True
-    return c.feeds is not None and c.feeds.via_kind in _NO_RELAY_TARGETS
+    if c.feeds is None:
+        return False
+    return c.feeds.via_kind is None or c.feeds.via_kind in _NO_RELAY_TARGETS
+
+
+def relay_blocked(snapshot: Snapshot, device_id: str) -> bool:
+    """Whether a circuit's relay switch, if it exists, must go unavailable and
+    refuse commands: re-checked on every snapshot, since a link can arrive
+    after the switch was created.
+    """
+    circuit = snapshot.circuits.get(device_id)
+    return circuit is not None and feeds_storage_or_solar(circuit)
 
 
 def _pcs_flag(name: str) -> Callable[[PanelFacts], bool | None]:

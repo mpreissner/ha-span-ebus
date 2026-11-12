@@ -71,8 +71,12 @@ wrong breaker.
 
 On a panel added over its local API, a circuit that feeds a battery or solar
 inverter, or that the panel marks as storage, gets no switch: turning it off can
-cut backup power or fault the inverter. Its relay state is still shown as an
-attribute of the circuit's power sensor.
+cut backup power or fault the inverter. A circuit that feeds a device the panel
+has not identified yet is treated the same way. If the panel reports such a link
+after the switch already exists (or the switch came from an earlier version),
+the switch goes unavailable and refuses commands; it is not deleted, so your
+customisations survive. The relay state is still shown as an attribute of the
+circuit's power sensor.
 
 Turning a circuit **on** *releases* our own disconnect rather than forcing the
 relay closed, so the panel's reasons for holding a circuit open (backup reserve,

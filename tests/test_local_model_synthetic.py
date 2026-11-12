@@ -387,6 +387,7 @@ ROOT_SPECIAL.update(
         "shed-forecast/full-charge-total-time-remaining": {"datatype": "integer"},
         "shed-forecast/confidence": {"datatype": "enum", "format": "LOW,MEDIUM,HIGH"},
         "shed/policy": {"datatype": "json"},
+        "door/state": {"datatype": "enum", "format": "UNKNOWN,OPEN,CLOSED"},
     }
 )
 POLICY = {
@@ -438,10 +439,26 @@ def test_parse_shed_policy_rejects(value):
     assert model.parse_shed_policy(value) is None
 
 
-def test_shed_policy_rejection_never_logs_the_payload(caplog):
+@pytest.fixture
+def fresh_policy_log():
+    """Rejections log once per reason per process; start each test clean."""
+    model._policy_rejections_logged.clear()
+    yield
+    model._policy_rejections_logged.clear()
+
+
+def test_shed_policy_rejection_never_logs_the_payload(caplog, fresh_policy_log):
     caplog.set_level("DEBUG")
     model.parse_shed_policy('{"algorithm": "secret-site-123"}')
+    assert "soc-priority.v1" in caplog.text  # logged, by reason only
     assert "secret-site-123" not in caplog.text
+
+
+def test_shed_policy_rejection_logs_once_per_reason(caplog, fresh_policy_log):
+    caplog.set_level("DEBUG")
+    model.parse_shed_policy("not json")
+    model.parse_shed_policy("still not json")
+    assert caplog.text.count("not JSON") == 1
 
 
 def test_shed_forecast_sensors_and_attributes():
@@ -530,7 +547,7 @@ def _relay_tree(**circuit_values: str) -> homie.DeviceTree:
             },
             True,
         ),
-        ({"connection/feeds-device-id": "x-1"}, True),  # unknown target
+        ({"connection/feeds-device-id": "x-1"}, False),  # unknown target: fail closed
         ({"connection/feeds-device-type": "energy.ebus.device.bess"}, True),  # no id yet
         ({"connection/feeds-role": "STORAGE"}, False),
         ({"connection/feeds-role": "LOADS"}, True),
@@ -569,3 +586,59 @@ def test_link_facts_and_connection_attributes():
 def test_plain_location_string():
     s = snap(_relay_tree(**{"info/locations": "Kitchen"}))
     assert s.circuits[CIRCUIT].location == "Kitchen"
+
+
+@pytest.mark.parametrize(
+    ("published", "shown"), [("UNKNOWN", None), ("OPEN", True), ("CLOSED", False)]
+)
+def test_door(published, shown):
+    keys = (*ROOT_KEYS, "door/state")
+    s = snap(tree_with(root_keys=keys, values={PANEL: {"door/state": published}}))
+    assert row("door").value(s.panel) is shown
+
+
+def test_relay_guard_trips_when_a_link_arrives_after_the_switch():
+    """Snapshot 1 creates the switch; snapshot 2 brings the link. The entity
+    re-checks `relay_blocked` on every snapshot (unavailable, commands refused).
+    """
+    tree = _relay_tree()
+    first = snap(tree)
+    assert model.row_exists(first, row("breaker"), CIRCUIT)
+    assert not model.relay_blocked(first, CIRCUIT)
+    tree.apply(homie.value_topic(CIRCUIT, "connection/feeds-device-id"), b"x-1")
+    second = snap(tree)
+    assert model.relay_blocked(second, CIRCUIT)  # unresolved kind fails closed
+    assert not model.row_exists(second, row("breaker"), CIRCUIT)
+    tree.apply(homie.value_topic(CIRCUIT, "connection/feeds-device-type"), b"evse")
+    assert not model.relay_blocked(snap(tree), CIRCUIT)
+
+
+def test_relay_blocked_ignores_devices_that_are_not_circuits():
+    s = snap(_relay_tree(**{"connection/feeds-role": "STORAGE"}))
+    assert model.relay_blocked(s, CIRCUIT)
+    assert not model.relay_blocked(s, LUGS)
+    assert not model.relay_blocked(s, "nope")
+
+
+@pytest.mark.parametrize(
+    ("target_class", "published_type", "blocked"),
+    [
+        ("bess", None, True),  # kind only from the target's $description
+        ("evse", "energy.ebus.device.bess", False),  # the description wins
+        ("pv", "evse", True),
+    ],
+)
+def test_link_kind_from_the_targets_description(target_class, published_type, blocked):
+    target = "target-01"
+    values = {"connection/feeds-device-id": target}
+    if published_type is not None:
+        values["connection/feeds-device-type"] = published_type
+    tree = tree_with(
+        circuit_keys=LINK_KEYS,
+        extra_children={target: description(target_class, {}, parent=PANEL, root=PANEL)},
+        values={CIRCUIT: {"switch/relay": "CLOSED", "switch/relay-controllable": "true", **values}},
+    )
+    s = snap(tree)
+    assert s.circuits[CIRCUIT].feeds.via_kind == target_class
+    assert model.relay_blocked(s, CIRCUIT) is blocked
+    assert model.row_exists(s, row("breaker"), CIRCUIT) is not blocked

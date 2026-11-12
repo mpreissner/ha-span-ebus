@@ -26,6 +26,7 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
@@ -396,6 +397,8 @@ class SpanLocalEntity(Entity):
                 attrs = row.attrs(facts)
             if row.scope is Scope.CIRCUIT and self._look.suffix:
                 self._attr_name = f"{model.circuit_label(facts)} {self._look.suffix}"
+        if self._blocked(snapshot):
+            presence = Presence.UNAVAILABLE
         if presence is not Presence.VALUE:
             value = None
         if row.kind is ValueKind.CONTROL:
@@ -405,6 +408,10 @@ class SpanLocalEntity(Entity):
         changed = shown != self._shown
         self._shown = shown
         return changed
+
+    def _blocked(self, snapshot: Snapshot) -> bool:
+        """True when this entity must stay unavailable and refuse commands."""
+        return False
 
     def _present(self, value: Any) -> Any:
         if self._look.options is not None and value not in self._look.options:
@@ -440,6 +447,10 @@ class SpanLocalEntity(Entity):
         """Send a value; show it until the panel confirms or the window passes.
         An error leaves the state as it was.
         """
+        if self._blocked(self._transport.snapshot):
+            raise HomeAssistantError(
+                "This circuit feeds a battery or solar inverter; its relay is not switched"
+            )
         await self._transport.async_send_command(self._device_id, self._row.source, value)
         self._cancel_pending()
         self._pending = (value, time.monotonic() + CONFIRM_WINDOW)
