@@ -1,4 +1,4 @@
-"""SPAN Panel (eBus) integration — cloud push backend."""
+"""SPAN Panel (eBus) integration: the cloud push backend, and panels added locally."""
 
 from __future__ import annotations
 
@@ -8,12 +8,16 @@ import os
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
+from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_ACCESS_TOKEN,
+    CONF_CA_PEM,
+    CONF_CLIENT_NAME,
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_PANELS,
@@ -36,6 +40,7 @@ from .span_client.backend import (
     site_routes,
     stream_identity,
 )
+from .span_client.local import onboard
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -122,6 +127,14 @@ def _note_panels(hass: HomeAssistant, entry: SpanConfigEntry, plan: PanelPlan) -
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
+    if CONF_TOKENS not in entry.data:
+        # Added over the local API without the cloud. The local transport
+        # arrives in a later update; until then the entry loads with no entities.
+        _LOGGER.info("SPAN panel added locally; local telemetry arrives in a later update")
+        entry.runtime_data = []
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        return True
+
     token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
     await hass.async_add_executor_job(_write_token_file, token_path, entry.data[CONF_TOKENS])
 
@@ -185,7 +198,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> boo
         for coordinator in entry.runtime_data:
             await coordinator.async_shutdown()
         token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
-        await hass.async_add_executor_job(_remove_quietly, token_path)
+        if CONF_TOKENS in entry.data:
+            await hass.async_add_executor_job(_remove_quietly, token_path)
     return unloaded
 
 
@@ -199,6 +213,15 @@ async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> Non
     entry runs, so they are found by prefix.
     """
     ir.async_delete_issue(hass, DOMAIN, _new_panels_issue(entry))
+    if CONF_ACCESS_TOKEN in entry.data:
+        # Best effort: the panel keeps a client registration until it is removed.
+        await onboard.discard_client(
+            async_get_clientsession(hass),
+            entry.data[CONF_HOST],
+            entry.data[CONF_CA_PEM],
+            entry.data[CONF_ACCESS_TOKEN],
+            entry.data[CONF_CLIENT_NAME],
+        )
     await energy_store(hass, entry.entry_id).async_remove()
     storage = Path(hass.config.path(".storage"))
     prefix = f"{DOMAIN}.{entry.entry_id}."
