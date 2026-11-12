@@ -275,3 +275,17 @@ def test_subscribe_failure_is_not_a_connection():
         assert states == []
 
     asyncio.run(main())
+
+
+def test_drop_out_messages_on_paho_2_1():
+    # Home Assistant pins paho-mqtt 2.1, which has no Client.drop_out_messages.
+    client = SimpleNamespace(_out_message_mutex=threading.Lock(), _out_messages={1: "a", 2: "b"})
+    mqtt._drop_out_messages(client)  # type: ignore[arg-type]
+    assert client._out_messages == {}
+
+
+def test_drop_out_messages_uses_paho_2_2_when_present():
+    dropped: list[bool] = []
+    client = SimpleNamespace(drop_out_messages=lambda: dropped.append(True))
+    mqtt._drop_out_messages(client)  # type: ignore[arg-type]
+    assert dropped == [True]
