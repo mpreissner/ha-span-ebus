@@ -41,8 +41,15 @@ from span_client.local.mqtt import LocalMqtt
 
 CLIENT_NAME = "span-ebus-probe"
 IDENTIFYING = re.compile(
-    r"serial|mac|(^|-)ip(-|$)|ipv[46]|hostname|address|ssid|bssid", re.IGNORECASE
+    r"serial|mac|(^|-)ip(-|$)|ipv[46]|hostname|address|ssid|bssid"
+    r"|latitude|longitude|locality|region|postal|zip|street|city|country",
+    re.IGNORECASE,
 )
+
+
+def is_identifying(key: str) -> bool:
+    """Whether a property's value identifies the site, e.g. `info/latitude`."""
+    return bool(IDENTIFYING.search(key.split("/")[-1]))
 
 
 async def capture(
@@ -133,10 +140,9 @@ def redact(text: str, replacements: dict[str, str]) -> str:
     if not replacements:
         return text
     lookup = {old.lower(): new for old, new in replacements.items()}
-    pattern = re.compile(
-        "|".join(re.escape(old) for old in sorted(replacements, key=len, reverse=True)),
-        re.IGNORECASE,
-    )
+    # Whole tokens only, so an id inside a longer id is never half-replaced.
+    alternatives = "|".join(re.escape(old) for old in sorted(replacements, key=len, reverse=True))
+    pattern = re.compile(rf"(?<![A-Za-z0-9])(?:{alternatives})(?![A-Za-z0-9])", re.IGNORECASE)
     return pattern.sub(lambda match: lookup[match.group(0).lower()], text)
 
 
@@ -168,8 +174,7 @@ def main() -> int:
     # Values of identifying properties, anywhere in the tree.
     for device_id in tree.descriptions:
         for key, value in tree.values(device_id).items():
-            identifying = IDENTIFYING.search(key.split("/")[-1])
-            if identifying and isinstance(value, str) and len(value) >= 4:
+            if is_identifying(key) and isinstance(value, str) and len(value) >= 4:
                 secrets.add(value)
 
     replacements = dict(ids)
@@ -182,20 +187,30 @@ def main() -> int:
     capture_out = {}
     for topic in sorted(messages):
         payload = messages[topic]
-        try:
-            text = payload.decode("utf-8")
-        except UnicodeDecodeError:
-            text = payload.hex()
+        parsed = homie.parse_topic(topic)
+        if parsed is not None and parsed.key is not None and is_identifying(parsed.key):
+            # Whatever its type: latitude and longitude are numbers.
+            text = "<redacted>" if payload else ""
+        else:
+            try:
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                text = payload.hex()
         capture_out[redact(topic, replacements)] = redact(text, replacements)
 
     args.out.mkdir(parents=True, exist_ok=True)
+    # Each value is redacted exactly once: a second pass would rewrite
+    # placeholders that happen to contain a short secret.
     outputs = {
-        "capture.json": capture_out,
-        "schema.json": documents["schema"],
-        "status.json": documents["status"],
+        "capture.json": json.dumps(capture_out, indent=2, sort_keys=True),
+        "schema.json": redact(
+            json.dumps(documents["schema"], indent=2, sort_keys=True), replacements
+        ),
+        "status.json": redact(
+            json.dumps(documents["status"], indent=2, sort_keys=True), replacements
+        ),
     }
-    for name, data in outputs.items():
-        text = redact(json.dumps(data, indent=2, sort_keys=True), replacements)
+    for name, text in outputs.items():
         (args.out / name).write_text(text + "\n")
 
     classes: dict[str, int] = {}

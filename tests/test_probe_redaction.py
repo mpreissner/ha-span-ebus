@@ -18,7 +18,7 @@ def test_redact_ignores_case_and_prefers_longer_keys():
 
 
 def test_redact_does_not_rewrite_its_own_placeholders():
-    assert probe.redact("ab", {"a": "b", "b": "c"}) == "bc"
+    assert probe.redact("aa bb", {"aa": "bb", "bb": "cc"}) == "bb cc"
 
 
 def test_placeholders_cover_value_only_devices():
@@ -31,3 +31,14 @@ def test_placeholders_cover_value_only_devices():
     tree.apply("ebus/5/orphan-id/meter/active-power", b"5")
     names = probe.placeholders(tree)
     assert names == {"root-id": "panel", "kid": "circuit-01", "orphan-id": "unknown-01"}
+
+
+def test_redact_whole_tokens_only():
+    out = probe.redact("ab12 ab123 x-ab12-y", {"ab12": "circuit-02"})
+    assert out == "circuit-02 ab123 x-circuit-02-y"
+
+
+def test_location_properties_are_identifying():
+    for key in ("info/latitude", "info/longitude", "info/locality", "status/postal-code"):
+        assert probe.is_identifying(key)
+    assert not probe.is_identifying("meter/active-power")
