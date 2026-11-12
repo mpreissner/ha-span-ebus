@@ -45,19 +45,22 @@ IDENTIFYING = re.compile(
 )
 
 
-async def capture(host: str, seconds: float) -> tuple[dict[str, Any], dict[str, bytes], set[str]]:
+async def capture(
+    host: str, seconds: float, passphrase: str
+) -> tuple[dict[str, Any], dict[str, bytes], set[str]]:
     secrets: set[str] = set()
     messages: dict[str, bytes] = {}
-    async with aiohttp.ClientSession() as session:
+    # A fresh connection per request: the panel closes idle ones, and a
+    # reused dead one fails the POST with ServerDisconnectedError.
+    connector = aiohttp.TCPConnector(force_close=True)
+    async with aiohttp.ClientSession(connector=connector) as session:
         ca = await rest.SpanLocalApi(session, host).fetch_ca()
         print(f"Panel CA fingerprint: {tls.ca_fingerprint(ca)}")
         api = rest.SpanLocalApi(session, host, ca_pem=ca)
         status = await api.status()
         schema = await api.homie_schema()
         print(f"Firmware {status.firmware}, data model {schema.data_model_version}")
-        passphrase = getpass.getpass("Panel passphrase (not echoed): ")
         registration = await api.register(CLIENT_NAME, passphrase=passphrase)
-        del passphrase
         secrets |= {status.serial, registration.serial, registration.hostname}
         secrets |= {registration.broker_username, registration.broker_password or ""}
         secrets |= {registration.access_token, registration.hop_passphrase or ""}
@@ -144,8 +147,9 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=8.0)
     args = parser.parse_args()
 
+    passphrase = getpass.getpass("Panel passphrase (not echoed): ")
     try:
-        documents, messages, secrets = asyncio.run(capture(args.host, args.seconds))
+        documents, messages, secrets = asyncio.run(capture(args.host, args.seconds, passphrase))
     except rest.SpanLocalError as exc:
         print(f"Failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
