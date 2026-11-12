@@ -17,7 +17,14 @@
           "password": "Password"
         }
       },
-      "local": {
+      "local_pick": {
+        "title": "Choose your panel",
+        "description": "These SPAN panels were found on your network. Pick one, or enter an address yourself.",
+        "data": {
+          "panel": "Panel"
+        }
+      },
+      "local_host": {
         "title": "Find your panel",
         "description": "Enter the panel's IP address or hostname. The panel needs firmware r202639 or later.",
         "data": {
@@ -29,7 +36,7 @@
         "description": "This panel doesn't offer SPAN's local API yet; it arrives with firmware r202639. You can add your SPAN account over the cloud instead, or try another address.",
         "menu_options": {
           "cloud": "Use the cloud instead",
-          "local": "Try another address"
+          "local_host": "Try another address"
         }
       },
       "local_auth": {
@@ -122,6 +129,13 @@
   },
   "options": {
     "step": {
+      "transport": {
+        "title": "Connection",
+        "description": "Choose whether this panel may fall back to your SPAN account over the cloud when its local connection is lost.",
+        "data": {
+          "transport_mode": "Connection"
+        }
+      },
       "init": {
         "title": "Choose your panels",
         "description": "Tick the panels on your SPAN account that belong to this Home Assistant.",
@@ -151,7 +165,7 @@
     },
     "abort": {
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
-      "not_cloud_account": "Panels added locally have no options yet."
+      "not_cloud_account": "Panels added locally without a SPAN account have no options yet."
     }
   },
   "issues": {
@@ -159,9 +173,34 @@
       "title": "New SPAN panel found",
       "description": "{count} panel(s) on your SPAN account are not set up here. To add or dismiss them, open the SPAN Panel (eBus) integration, select Configure and tick the panels that belong to this Home Assistant."
     },
-    "local_pending": {
-      "title": "SPAN panel added locally: telemetry coming soon",
-      "description": "This panel was added over its local API without the cloud fallback. This version of the integration does not yet stream local telemetry, so the entry has no entities. They will appear after a later update, with nothing for you to do."
+    "transport_fallback": {
+      "title": "{title} is using the cloud",
+      "description": "Home Assistant lost its local connection to {title} over an hour ago and is reading the panel through the SPAN cloud. Check that the panel is powered and on your network; if its address changed, select Reconfigure on the entry. It moves back to the local connection by itself once that has been healthy for five minutes."
+    }
+  },
+  "selector": {
+    "local_pick": {
+      "options": {
+        "manual": "Enter an address"
+      }
+    },
+    "transport_mode": {
+      "options": {
+        "local_first": "Local, falling back to the cloud",
+        "local_only": "Local only"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "transport": {
+        "name": "Transport",
+        "state": {
+          "local": "Local",
+          "cloud": "Cloud",
+          "offline": "Offline"
+        }
+      }
     }
   }
 }

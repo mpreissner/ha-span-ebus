@@ -29,6 +29,13 @@ CONF_MQTTS_PORT = "mqtts_port"
 CONF_PANELS = "panels"
 CONF_DECLINED = "declined"
 CONF_FEEDS = "feeds"
+# A local panel's transport: `local_first` (the default) fails over to the
+# cloud when the entry has cloud credentials; `local_only` never does.
+CONF_TRANSPORT_MODE = "transport_mode"
+
+# Marks a reauth flow as the local broker's, in the flow's entry data: a linked
+# entry also has cloud tokens, which would otherwise route it to the cloud form.
+LOCAL_REAUTH = "local_reauth"
 
 # Where the auto-refreshing token file lives, relative to the HA config dir.
 TOKEN_DIR = ".span_ebus"

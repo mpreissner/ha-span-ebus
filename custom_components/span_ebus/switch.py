@@ -29,8 +29,7 @@ async def async_setup_entry(
     entry: SpanConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    for coordinator in entry.runtime_data:
-        _register(coordinator, async_add_entities)
+    entry.runtime_data.add_platform(lambda c: _register(c, async_add_entities))
 
 
 def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntitiesCallback) -> None:

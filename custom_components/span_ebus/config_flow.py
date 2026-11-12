@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
+from homeassistant.components import zeroconf as ha_zeroconf
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.core import callback
@@ -33,6 +34,8 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from zeroconf import IPVersion, ServiceStateChange
+from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo
 
 from .const import (
     CONF_ACCESS_TOKEN,
@@ -50,8 +53,10 @@ from .const import (
     CONF_PRIMARY_PANEL,
     CONF_SERIAL,
     CONF_TOKENS,
+    CONF_TRANSPORT_MODE,
     CONF_USER_ID,
     DOMAIN,
+    LOCAL_REAUTH,
     TOKEN_DIR,
 )
 from .span_client import cloud_auth, feeds
@@ -66,7 +71,8 @@ from .span_client.backend import (
     panel_plan,
     primary_panel_for,
 )
-from .span_client.local import onboard, tls
+from .span_client.local import discovery, onboard, tls
+from .span_client.local.health import Mode
 from .span_client.local.rest import NotFound, SpanLocalError, UnexpectedResponse
 
 if TYPE_CHECKING:
@@ -76,6 +82,12 @@ _LOGGER = logging.getLogger(__name__)
 
 CONF_CIRCUIT = "circuit"
 CONF_PASSPHRASE = "passphrase"
+
+# How long the add-panel picker listens for panels before giving up on mDNS.
+BROWSE_SECONDS = 3.0
+RESOLVE_MS = 1500
+CONF_PICK = "panel"
+PICK_MANUAL = "manual"
 
 # How long to wait for the first telemetry frame when validating the channel.
 # Generous: the subscribe is deliberately delayed a couple of seconds and the
@@ -106,6 +118,11 @@ STEP_PASSPHRASE_SCHEMA = vol.Schema(
 def _is_cloud_account(data: Mapping[str, Any]) -> bool:
     """A whole account added over the cloud, rather than one panel added locally."""
     return CONF_TOKENS in data and CONF_LOCAL_SERIAL not in data
+
+
+def _is_linked(data: Mapping[str, Any]) -> bool:
+    """A panel added locally with the cloud as its fallback."""
+    return CONF_TOKENS in data and CONF_LOCAL_SERIAL in data
 
 
 def _account_key(user_id: str | None, email: str) -> str:
@@ -322,6 +339,7 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         # The panel being added locally: where it is and its pinned CA, then,
         # once registered, the entry data for it.
         self._host = ""
+        self._candidates: list[discovery.Candidate] = []
         self._ca_pem = ""
         self._serial = ""
         self._local: dict[str, Any] | None = None
@@ -338,8 +356,8 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
     @classmethod
     @callback
     def async_supports_options_flow(cls, config_entry: ConfigEntry) -> bool:
-        """Options choose among the account's panels: cloud-only entries alone."""
-        return _is_cloud_account(config_entry.data)
+        """Cloud accounts choose their panels; linked panels choose their transport."""
+        return _is_cloud_account(config_entry.data) or _is_linked(config_entry.data)
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(step_id="user", menu_options=["local", "cloud"])
@@ -350,6 +368,38 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         return async_get_clientsession(self.hass)
 
     async def async_step_local(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Offer the panels found on the network; ask for an address if there are none."""
+        self._candidates = await self._discovered_panels()
+        if not self._candidates:
+            return await self.async_step_local_host()
+        return await self.async_step_local_pick()
+
+    async def async_step_local_pick(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            choice = user_input[CONF_PICK]
+            if choice == PICK_MANUAL:
+                return await self.async_step_local_host()
+            return await self.async_step_local_host({CONF_HOST: choice})
+        options = [SelectOptionDict(value=c.host, label=c.label) for c in self._candidates]
+        options.append(SelectOptionDict(value=PICK_MANUAL, label=PICK_MANUAL))
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_PICK, default=options[0]["value"]): SelectSelector(
+                    SelectSelectorConfig(
+                        options=options,
+                        mode=SelectSelectorMode.LIST,
+                        translation_key="local_pick",
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="local_pick", data_schema=schema)
+
+    async def async_step_local_host(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         placeholders = {"retry_after": "60"}
         if user_input is not None:
@@ -367,7 +417,9 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
             else:
                 if not onboard.firmware_supported(status.firmware):
                     return await self.async_step_local_unsupported()
-                await self.async_set_unique_id(status.serial)
+                # A discovery flow for this panel may be waiting; this one, which
+                # the user started, goes ahead, and finishing it ends the other.
+                await self.async_set_unique_id(status.serial, raise_on_progress=False)
                 # No host update here: only the pinned CA proves it is the same panel.
                 self._abort_if_unique_id_configured()
                 if self._cloud_runs_panel(status.serial):
@@ -375,16 +427,89 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
                 self._host, self._ca_pem, self._serial = host, ca_pem, status.serial
                 return await self.async_step_local_auth()
         return self.async_show_form(
-            step_id="local",
+            step_id="local_host",
             data_schema=self.add_suggested_values_to_schema(STEP_HOST_SCHEMA, user_input or {}),
             errors=errors,
             description_placeholders=placeholders,
         )
 
+    async def _discovered_panels(self) -> list[discovery.Candidate]:
+        """Panels on the network that aren't set up yet, best effort.
+
+        Two sources: discovery flows Home Assistant already started for
+        `_ebus._tcp` (probed, so their serial is known), and a short browse
+        for panels whose discovery was dismissed or never finished.
+        """
+        found: list[discovery.Candidate] = []
+        for flow in self._async_in_progress(include_uninitialized=True):
+            context = flow.get("context", {})
+            host = context.get("title_placeholders", {}).get("host")
+            if context.get("source") == "zeroconf" and host:
+                found.append(discovery.Candidate(host, "", serial=context.get("unique_id")))
+        try:
+            found.extend(await self._browse())
+        except Exception as err:  # noqa: BLE001 — the address form is the fallback
+            _LOGGER.debug("mDNS browse for SPAN panels failed: %s", err)
+        entries = self._async_current_entries(include_ignore=False)
+        return discovery.offerable(
+            found,
+            configured_hosts=[e.data[CONF_HOST] for e in entries if CONF_HOST in e.data],
+            configured_serials=[
+                serial
+                for e in entries
+                for serial in (e.unique_id, e.data.get(CONF_LOCAL_SERIAL))
+                if serial
+            ],
+        )
+
+    async def _browse(self) -> list[discovery.Candidate]:
+        """Ask Home Assistant's shared zeroconf for `_ebus._tcp` panels."""
+        aiozc = await ha_zeroconf.async_get_async_instance(self.hass)
+        names: set[str] = set()
+
+        def on_change(
+            zeroconf: Any, service_type: str, name: str, state_change: ServiceStateChange
+        ) -> None:
+            if state_change is not ServiceStateChange.Removed:
+                names.add(name)
+
+        browser = AsyncServiceBrowser(
+            aiozc.zeroconf, [discovery.SERVICE_TYPE], handlers=[on_change]
+        )
+        try:
+            await asyncio.sleep(BROWSE_SECONDS)
+        finally:
+            await browser.async_cancel()
+
+        async def resolve(name: str) -> list[discovery.Candidate]:
+            info = AsyncServiceInfo(discovery.SERVICE_TYPE, name)
+            if not await info.async_request(aiozc.zeroconf, RESOLVE_MS):
+                return []
+            label = discovery.instance_name(name)
+            return [
+                discovery.Candidate(address, label)
+                for address in info.parsed_scoped_addresses(IPVersion.V4Only)
+            ]
+
+        # All at once, so several panels cost one resolve timeout, not several;
+        # one that will not resolve is left out rather than spoiling the rest.
+        results = await asyncio.gather(
+            *(resolve(name) for name in sorted(names)), return_exceptions=True
+        )
+        found: list[discovery.Candidate] = []
+        for result in results:
+            if isinstance(result, BaseException):
+                _LOGGER.debug("could not resolve a discovered panel: %s", result)
+            else:
+                found.extend(result)
+        return found
+
     async def async_step_local_unsupported(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        return self.async_show_menu(step_id="local_unsupported", menu_options=["cloud", "local"])
+        return self.async_show_menu(
+            step_id="local_unsupported", menu_options=["cloud", "local_host"]
+        )
 
     def _cloud_runs_panel(self, serial: str) -> bool:
         """Whether a cloud account entry already runs this panel."""
@@ -729,7 +854,10 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
         self._reauth_entry_data = entry_data
-        if CONF_TOKENS not in entry_data and CONF_LOCAL_SERIAL in entry_data:
+        # A local-only entry has only the panel to reauthenticate; a linked one
+        # says which side failed.
+        local_only = CONF_TOKENS not in entry_data and CONF_LOCAL_SERIAL in entry_data
+        if local_only or entry_data.get(LOCAL_REAUTH):
             return await self.async_step_reauth_local()
         return await self.async_step_reauth_confirm()
 
@@ -812,6 +940,8 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
         return self.config_entry.data
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if _is_linked(self.config_entry.data):
+            return await self.async_step_transport()
         if not _is_cloud_account(self.config_entry.data):
             return self.async_abort(reason="not_cloud_account")
         errors: dict[str, str] = {}
@@ -841,6 +971,32 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
         return self.async_show_form(
             step_id="init", data_schema=_panels_schema(self._labels, self._ticked), errors=errors
         )
+
+    async def async_step_transport(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Whether a linked panel may fall back to the cloud."""
+        entry = self.config_entry
+        current = entry.options.get(CONF_TRANSPORT_MODE, Mode.LOCAL_FIRST)
+        if user_input is not None:
+            options = {**entry.options, CONF_TRANSPORT_MODE: user_input[CONF_TRANSPORT_MODE]}
+            # Reloading drops the broker link; only a real change is worth that.
+            if user_input[CONF_TRANSPORT_MODE] != str(current):
+                self.hass.config_entries.async_update_entry(entry, options=options)
+                self.hass.config_entries.async_schedule_reload(entry.entry_id)
+            return self.async_create_entry(data=options)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_TRANSPORT_MODE, default=str(current)): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[mode.value for mode in Mode],
+                        mode=SelectSelectorMode.LIST,
+                        translation_key=CONF_TRANSPORT_MODE,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="transport", data_schema=schema)
 
     async def async_step_confirm_remove(
         self, user_input: dict[str, Any] | None = None

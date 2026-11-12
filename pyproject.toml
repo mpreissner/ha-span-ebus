@@ -21,7 +21,8 @@ dev = [
     "requests>=2.31.0",
     "httpx[http2]>=0.27",
     "aiohttp>=3.10",
-    "paho-mqtt>=2.1",
+    # Pinned to what Home Assistant ships, so tests see the API it runs on.
+    "paho-mqtt==2.1.0",
 ]
 
 [tool.ruff]
