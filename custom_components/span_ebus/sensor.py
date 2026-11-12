@@ -23,6 +23,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
+    EntityCategory,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
@@ -30,15 +31,19 @@ from homeassistant.const import (
     UnitOfPower,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SpanConfigEntry
+from .const import CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER
 from .coordinator import STALE_AFTER_SECONDS, SpanCloudCoordinator
 from .energy import EnergyAccumulator
 from .span_client.backend import POWER_PROPERTY, SITE_NODE, is_main_feed_power, panel_overhead
 from .span_client.cloud_history import SITE_FLOW_ENERGY
+from .span_client.local.health import Transport
 from .span_client.models import NodeKind, PropertySpec
+from .transport import SpanTransportManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,8 +92,11 @@ async def async_setup_entry(
     entry: SpanConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    for coordinator in entry.runtime_data:
-        _register(coordinator, async_add_entities)
+    runtime = entry.runtime_data
+    if runtime.transport is not None:
+        async_add_entities([SpanTransportSensor(entry, runtime.transport)])
+    # Cloud coordinators can arrive later, on a local panel's first failover.
+    runtime.add_platform(lambda c: _register(c, async_add_entities))
 
 
 def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntitiesCallback) -> None:
@@ -344,3 +352,31 @@ class SpanPanelOverheadEnergySensor(CoordinatorEntity[SpanCloudCoordinator], Res
     @property
     def available(self) -> bool:
         return True
+
+
+class SpanTransportSensor(SensorEntity):
+    """Where a local panel's readings come from: local, cloud, or nowhere."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_translation_key = "transport"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, entry: SpanConfigEntry, transport: SpanTransportManager) -> None:
+        self._transport = transport
+        self._attr_options = [t.value for t in Transport]
+        serial = entry.data[CONF_LOCAL_SERIAL]
+        self._attr_unique_id = f"{serial}_transport"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, serial)},
+            name=entry.title,
+            manufacturer=MANUFACTURER,
+        )
+
+    @property
+    def native_value(self) -> str:
+        return self._transport.shown.value
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._transport.async_add_listener(self.async_write_ha_state))

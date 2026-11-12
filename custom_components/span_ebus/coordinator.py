@@ -13,6 +13,7 @@ slow one.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import threading
@@ -29,7 +30,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN, MANUFACTURER, MODEL
+from .const import CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER, MODEL
 from .energy import EnergyLedger
 from .span_client.backend import (
     CloudBackend,
@@ -182,40 +183,69 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         self._energy_listeners: list[Callable[[], None]] = []
         self._cancel_energy_poll: Callable[[], None] | None = None
         self._energy_failures = 0
+        self._running = False
+        # Start and stop await I/O; a stop during a start must not interleave.
+        self._lifecycle = asyncio.Lock()
 
     # --- lifecycle ---------------------------------------------------------
 
     async def async_start(self) -> None:
-        """Start the backend thread. Non-blocking; frames arrive shortly after."""
-        self.data = {}
-        self._ledger.load(await self._energy_store.async_load())
-        self._backend.start(self._on_schema, self._on_reading)
-        self._cancel_grace = async_call_later(self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent)
-        self._cancel_stale_check = async_track_time_interval(
-            self.hass, self._check_staleness, STALE_CHECK_INTERVAL
-        )
-        # The first poll only marks where the meters stand; it is the second one
-        # that adds anything, which is why nothing here polls immediately.
-        self._cancel_energy_poll = async_track_time_interval(
-            self.hass, self._poll_energy, ENERGY_POLL_INTERVAL
-        )
+        """Start the backend thread. Non-blocking; frames arrive shortly after.
+
+        Callable again after `async_stop`: a linked entry stops its cloud on
+        failback and starts it on the next failover.
+        """
+        async with self._lifecycle:
+            if self._running:
+                return
+            if self.data is None:
+                self.data = {}
+            self._ledger.load(await self._energy_store.async_load())
+            self._backend.start(self._on_schema, self._on_reading)
+            self._running = True
+            self._cancel_grace = async_call_later(
+                self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent
+            )
+            self._cancel_stale_check = async_track_time_interval(
+                self.hass, self._check_staleness, STALE_CHECK_INTERVAL
+            )
+            # The first poll only marks where the meters stand; it is the second
+            # one that adds anything, which is why nothing here polls immediately.
+            self._cancel_energy_poll = async_track_time_interval(
+                self.hass, self._poll_energy, ENERGY_POLL_INTERVAL
+            )
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
-        if self._cancel_grace is not None:
-            self._cancel_grace()
-            self._cancel_grace = None
-        if self._cancel_stale_check is not None:
-            self._cancel_stale_check()
-            self._cancel_stale_check = None
-        if self._cancel_energy_poll is not None:
-            self._cancel_energy_poll()
-            self._cancel_energy_poll = None
-        # Force the delayed save out: unloading an entry is not a Home Assistant
-        # stop, so nothing else will flush it, and a lost write means the totals
-        # restart from an old mark and re-count what came after it.
-        await self._energy_store.async_save(self._ledger.as_dict())
-        await self.hass.async_add_executor_job(self._backend.stop)
+        await self.async_stop()
+
+    async def async_stop(self) -> None:
+        """Stop streaming but stay usable: `async_start` resumes it.
+
+        Entities go unavailable, since the stream is no longer live.
+        """
+        async with self._lifecycle:
+            # Once only: a shared site stream counts its attached panels.
+            if not self._running:
+                return
+            for cancel in (self._cancel_grace, self._cancel_stale_check, self._cancel_energy_poll):
+                if cancel is not None:
+                    cancel()
+            self._cancel_grace = self._cancel_stale_check = self._cancel_energy_poll = None
+            try:
+                # Force the delayed save out: unloading an entry is not a Home
+                # Assistant stop, so nothing else will flush it, and a lost write
+                # means the totals restart from an old mark and re-count what
+                # came after it.
+                await self._energy_store.async_save(self._ledger.as_dict())
+            finally:
+                try:
+                    await self.hass.async_add_executor_job(self._backend.stop)
+                finally:
+                    self._running = False
+                    self._last_frame = None
+                    self._reported_live = True
+                    self.async_update_listeners()
 
     # --- authentication ----------------------------------------------------
 
@@ -299,11 +329,17 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         serial = board.serial if board else self.serial
         return DeviceInfo(
             identifiers={(DOMAIN, self.serial)},
-            name=self._device_name or f"SPAN {self.model} {serial}",
+            name=self._device_name or self._linked_name() or f"SPAN {self.model} {serial}",
             manufacturer=MANUFACTURER,
             model=self.model if serial else None,
             serial_number=serial,
         )
+
+    def _linked_name(self) -> str | None:
+        """A panel added locally is named by its entry, whichever transport is live."""
+        if self.serial == self.entry.data.get(CONF_LOCAL_SERIAL):
+            return self.entry.title
+        return None
 
     @callback
     def register_entity_adder(
