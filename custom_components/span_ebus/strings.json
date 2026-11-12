@@ -200,7 +200,144 @@
           "cloud": "Cloud",
           "offline": "Offline"
         }
+      },
+      "panel_status": {
+        "name": "Panel status",
+        "state": {
+          "init": "Initializing",
+          "ready": "Ready",
+          "disconnected": "Disconnected",
+          "sleeping": "Sleeping",
+          "lost": "Lost",
+          "alert": "Alert",
+          "unknown": "Unknown"
+        }
+      },
+      "current_power": {
+        "name": "Current power"
+      },
+      "main_consumed_energy": {
+        "name": "Main meter consumed energy"
+      },
+      "main_produced_energy": {
+        "name": "Main meter produced energy"
+      },
+      "main_net_energy": {
+        "name": "Main meter net energy"
+      },
+      "feedthrough_power": {
+        "name": "Feedthrough power"
+      },
+      "feedthrough_imported_energy": {
+        "name": "Feedthrough imported energy"
+      },
+      "feedthrough_exported_energy": {
+        "name": "Feedthrough exported energy"
+      },
+      "grid_power": {
+        "name": "Grid power"
+      },
+      "site_power": {
+        "name": "Site power"
+      },
+      "pv_power": {
+        "name": "PV power"
+      },
+      "battery_power": {
+        "name": "Battery power"
+      },
+      "frequency": {
+        "name": "Frequency"
+      },
+      "voltage_a": {
+        "name": "L1 voltage"
+      },
+      "voltage_b": {
+        "name": "L2 voltage"
+      },
+      "busbar_current": {
+        "name": "Busbar current"
+      },
+      "upstream_current_a": {
+        "name": "Upstream current L1"
+      },
+      "upstream_current_b": {
+        "name": "Upstream current L2"
+      },
+      "feedthrough_current_a": {
+        "name": "Feedthrough current L1"
+      },
+      "feedthrough_current_b": {
+        "name": "Feedthrough current L2"
+      },
+      "main_breaker_rating": {
+        "name": "Main breaker rating"
+      },
+      "service_rating": {
+        "name": "Service rating"
+      },
+      "upstream_protection_rating": {
+        "name": "Upstream protection rating"
+      },
+      "main_relay": {
+        "name": "Main relay",
+        "state": {
+          "unknown": "Unknown",
+          "open": "Open",
+          "closed": "Closed"
+        }
+      },
+      "vendor_cloud": {
+        "name": "Vendor cloud",
+        "state": {
+          "unknown": "Unknown",
+          "unconnected": "Not connected",
+          "connected": "Connected"
+        }
+      },
+      "software_version": {
+        "name": "Software version"
+      },
+      "pcs_import_limit": {
+        "name": "PCS import limit"
+      },
+      "pcs_binding_constraint": {
+        "name": "PCS binding constraint",
+        "state": {
+          "fsr": "FSR",
+          "doe": "DOE",
+          "voltage": "Voltage",
+          "off_grid": "Off-grid",
+          "requested": "Requested",
+          "operator": "Operator",
+          "none": "None",
+          "unknown": "Unknown"
+        }
       }
+    },
+    "select": {
+      "priority": {
+        "name": "Priority",
+        "state": {
+          "off_grid": "Shed when off-grid",
+          "soc_threshold": "Shed at battery threshold",
+          "never": "Never shed"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "local_unavailable": {
+      "message": "The panel is not reachable on its local API right now, so the command was not sent."
+    },
+    "not_settable": {
+      "message": "The panel does not accept changes to this setting."
+    },
+    "bad_value": {
+      "message": "The panel does not accept that value for this setting."
+    },
+    "command_not_sent": {
+      "message": "The command could not be sent to the panel. Check its connection and try again."
     }
   }
 }
