@@ -4,6 +4,7 @@ so no broker is needed.
 """
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -176,16 +177,61 @@ def test_reconnect_does_not_resend_unacknowledged_commands():
     asyncio.run(main())
 
 
-def test_publish_timeout_drops_the_queued_message():
+def test_publish_timeout_leaves_other_publishes_alone():
+    """Dropping paho's queue on one timeout would strand every other publish."""
+
     async def main():
         client, _, _ = make()
         client._connected = True
         dropped = []
-        client._client.publish = lambda *a, **k: FakeInfo(3)
         client._client.drop_out_messages = lambda: dropped.append(True) or []
+        mids = iter([3, 4])
+        client._client.publish = lambda *a, **k: FakeInfo(next(mids))
+        slow = asyncio.create_task(client.publish("a/set", "OPEN", timeout=0.01))
+        other = asyncio.create_task(client.publish("b/set", "OPEN", timeout=5))
         with pytest.raises(rest.OutcomeUnknown):
-            await client.publish("t/set", "OPEN", timeout=0.01)
-        assert dropped
+            await slow
+        client._handle_publish(client._client, None, 4, 0, None)
+        await other
+        assert dropped == []
+
+    asyncio.run(main())
+
+
+def test_stop_makes_pending_publishes_outcome_unknown():
+    async def main():
+        client, _, _ = make()
+        client._connected = True
+        client._client.disconnect = lambda: None
+        client._client.publish = lambda *a, **k: FakeInfo(8)
+        task = asyncio.create_task(client.publish("t/set", "OPEN"))
+        await asyncio.sleep(0)
+        await client.stop()
+        with pytest.raises(rest.OutcomeUnknown):
+            await task
+
+    asyncio.run(main())
+
+
+def test_cancel_during_connect_closes_the_late_socket():
+    async def main():
+        client, _, _ = make()
+        release = threading.Event()
+        disconnects = []
+        client._client.connect = lambda *a: release.wait(5)
+        client._client.disconnect = lambda: disconnects.append(True)
+        task = asyncio.create_task(client._connect())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert disconnects == []
+        release.set()
+        for _ in range(100):
+            if disconnects:
+                break
+            await asyncio.sleep(0.01)
+        assert disconnects == [True]
 
     asyncio.run(main())
 

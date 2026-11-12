@@ -262,9 +262,10 @@ class SpanLocalApi:
         return clients
 
     async def delete_client(self, name: str) -> None:
-        if "/" in name:
-            # It would address a different path; client names never contain one.
-            raise ValueError("client name cannot contain '/'")
+        if "/" in name or name in {"", ".", ".."}:
+            # These would address a different path. Anything else, `?`, `#`
+            # and `%` included, is escaped by yarl as literal text.
+            raise ValueError("not a deletable client name")
         await self._request("DELETE", f"/auth/clients/{name}")
 
     async def rotate_passphrase(self) -> RotatedPassphrase:

@@ -166,13 +166,22 @@ def test_ca_fetch_never_carries_the_token():
     assert run(scenario) == [None]
 
 
-def test_delete_client_rejects_a_slash():
+@pytest.mark.parametrize("name", ["../passphrase", "..", ".", ""])
+def test_delete_client_rejects_other_paths(name):
     async def scenario(panel, make_api):
         with pytest.raises(ValueError):
-            await make_api(ca_pem=CA, access_token=TOKEN).delete_client("../passphrase")
+            await make_api(ca_pem=CA, access_token=TOKEN).delete_client(name)
         return panel.requests
 
     assert run(scenario) == []
+
+
+def test_delete_client_escapes_odd_names():
+    async def scenario(panel, make_api):
+        await make_api(ca_pem=CA, access_token=TOKEN).delete_client("a?b#c")
+        return panel.requests
+
+    assert run(scenario) == [("DELETE", "/api/v2/auth/clients/a?b#c", None)]
 
 
 def test_nothing_but_the_ca_goes_out_unpinned():

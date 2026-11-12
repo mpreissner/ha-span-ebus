@@ -40,16 +40,45 @@ from span_client.local import homie, rest, tls
 from span_client.local.mqtt import LocalMqtt
 
 CLIENT_NAME = "span-ebus-probe"
-IDENTIFYING = re.compile(
-    r"serial|mac|(^|-)ip(-|$)|ipv[46]|hostname|address|ssid|bssid"
-    r"|latitude|longitude|locality|region|postal|zip|street|city|country",
-    re.IGNORECASE,
-)
+# Matched against the hyphen-separated words of a property name, so `city`
+# catches `info/city` but not `nameplate-capacity`.
+IDENTIFYING = frozenset(
+    {
+        "serial", "mac", "ip", "ipv4", "ipv6", "hostname", "address", "ssid", "bssid",
+        "latitude", "longitude", "locality", "region", "postal", "zip", "street", "city",
+        "country",
+    }
+)  # fmt: skip
+# Properties whose value is one or more device ids, comma-separated.
+DEVICE_REFERENCE = re.compile(r"(-device-ids?|grid-forming-entity)$")
 
 
-def is_identifying(key: str) -> bool:
-    """Whether a property's value identifies the site, e.g. `info/latitude`."""
-    return bool(IDENTIFYING.search(key.split("/")[-1]))
+def is_identifying(key: str, *, root: bool = False) -> bool:
+    """Whether a property's value identifies the site, e.g. `info/latitude`.
+
+    On the panel itself `info/name` is the user's name for the site.
+    """
+    if root and key == "info/name":
+        return True
+    return not IDENTIFYING.isdisjoint(key.split("/")[-1].lower().split("-"))
+
+
+def referenced_ids(messages: dict[str, bytes]) -> set[str]:
+    """Device ids named in values, e.g. a subpanel's `fed-by-device-id`."""
+    found: set[str] = set()
+    for topic, payload in messages.items():
+        parsed = homie.parse_topic(topic)
+        if parsed is None or parsed.key is None or not DEVICE_REFERENCE.search(parsed.key):
+            continue
+        text = payload.decode("utf-8", errors="replace").strip("\x00")
+        found |= {part.strip() for part in text.split(",") if part.strip()}
+    return found
+
+
+def survivors(text: str, private: set[str]) -> int:
+    """How many private values still appear anywhere in `text`, ignoring case."""
+    lowered = text.lower()
+    return sum(1 for value in private if value.lower() in lowered)
 
 
 async def capture(
@@ -164,6 +193,11 @@ def main() -> int:
     for topic, payload in messages.items():
         tree.apply(topic, payload)
     ids = placeholders(tree)
+    # Ids named in values but not published here: the other panel of a
+    # feed-through pair, a battery the panel knows of, and so on.
+    for index, device_id in enumerate(sorted(referenced_ids(messages) - set(ids)), start=1):
+        if len(device_id) >= 4:
+            ids[device_id] = f"external-{index:02d}"
 
     # Open question: does the Homie panel serial match the REST serial?
     root_ids = [i for i, name in ids.items() if name == "panel"]
@@ -172,9 +206,11 @@ def main() -> int:
     print(f"Homie info/serial-number equals REST serial: {homie_serial == rest_serial}")
 
     # Values of identifying properties, anywhere in the tree.
+    roots = set(tree.roots())
     for device_id in tree.descriptions:
         for key, value in tree.values(device_id).items():
-            if is_identifying(key) and isinstance(value, str) and len(value) >= 4:
+            identifying = is_identifying(key, root=device_id in roots)
+            if identifying and isinstance(value, str) and len(value) >= 4:
                 secrets.add(value)
 
     replacements = dict(ids)
@@ -188,7 +224,11 @@ def main() -> int:
     for topic in sorted(messages):
         payload = messages[topic]
         parsed = homie.parse_topic(topic)
-        if parsed is not None and parsed.key is not None and is_identifying(parsed.key):
+        if (
+            parsed is not None
+            and parsed.key is not None
+            and is_identifying(parsed.key, root=parsed.device_id in roots)
+        ):
             # Whatever its type: latitude and longitude are numbers.
             text = "<redacted>" if payload else ""
         else:
@@ -210,6 +250,13 @@ def main() -> int:
             json.dumps(documents["status"], indent=2, sort_keys=True), replacements
         ),
     }
+    # Whole-token matching could miss an id glued to other text; refuse to
+    # write anything rather than leak it.
+    private = {old for old, new in replacements.items() if old != new and len(old) >= 4}
+    for name, text in outputs.items():
+        if count := survivors(text, private):
+            print(f"Refusing to write: {count} private value(s) survive in {name}", file=sys.stderr)
+            return 1
     for name, text in outputs.items():
         (args.out / name).write_text(text + "\n")
 

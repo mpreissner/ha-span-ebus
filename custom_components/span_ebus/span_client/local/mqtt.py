@@ -130,7 +130,8 @@ class LocalMqtt:
         self._client.drop_out_messages()
         await self._stop_misc()
         self._set_connected(False)
-        self._fail_pending(CannotConnect("connection closed"))
+        # Already sent, so the panel may still act on them.
+        self._fail_pending(OutcomeUnknown("connection closed before acknowledgement"))
 
     async def _supervise(self) -> None:
         backoff = BACKOFF_MIN
@@ -159,10 +160,16 @@ class LocalMqtt:
         loop = self._require_loop()
         self._disconnected.clear()
         self._connack = loop.create_future()
+        connecting = loop.run_in_executor(
+            None, self._client.connect, self._host, self._port, KEEPALIVE
+        )
         try:
-            await loop.run_in_executor(
-                None, self._client.connect, self._host, self._port, KEEPALIVE
-            )
+            # Shielded, so a cancel (stop) leaves `connecting` to finish...
+            await asyncio.shield(connecting)
+        except asyncio.CancelledError:
+            # ...and whatever socket the executor thread opens is closed.
+            connecting.add_done_callback(self._close_late_socket)
+            raise
         except (OSError, ssl.SSLError) as exc:
             # The message can include the address, so only the class is kept.
             raise CannotConnect(f"broker unreachable: {type(exc).__name__}") from None
@@ -176,6 +183,10 @@ class LocalMqtt:
             # Cancelled (stop) or refused: never leave a half-open socket.
             self._client.disconnect()
             raise
+
+    def _close_late_socket(self, connecting: asyncio.Future[Any]) -> None:
+        if not connecting.cancelled() and connecting.exception() is None:
+            self._client.disconnect()
 
     async def _misc_loop(self) -> None:
         while True:
@@ -200,7 +211,7 @@ class LocalMqtt:
         message was sent but not acknowledged, by timeout or a lost
         connection: the panel may still act on it, so the caller must not
         assume it failed. An unacknowledged message is never resent after a
-        reconnect; a stale command (a relay opened a minute late) is worse
+        reconnect (see `_handle_connect`); a stale command (a relay opened a minute late) is worse
         than a lost one.
         """
         if not self._connected:
@@ -215,8 +226,9 @@ class LocalMqtt:
         try:
             await asyncio.wait_for(future, timeout)
         except TimeoutError:
-            # Remove it from paho's queue so a reconnect cannot resend it.
-            self._client.drop_out_messages()
+            # Not dropped from paho's queue here: that would drop every other
+            # in-flight message too, and leak paho's in-flight count. The
+            # drop in `_handle_connect` already stops a resend on reconnect.
             raise OutcomeUnknown("no acknowledgement from the panel broker") from None
         finally:
             self._pending.pop(info.mid, None)

@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
 from span_client.local import homie
 
 _PATH = Path(__file__).resolve().parents[1] / "tools" / "probe_local.py"
@@ -42,3 +43,34 @@ def test_location_properties_are_identifying():
     for key in ("info/latitude", "info/longitude", "info/locality", "status/postal-code"):
         assert probe.is_identifying(key)
     assert not probe.is_identifying("meter/active-power")
+
+
+@pytest.mark.parametrize(
+    ("key", "root", "identifying"),
+    [
+        ("info/city", False, True),
+        ("info/ip-address", False, True),
+        ("info/nameplate-capacity", False, False),
+        ("info/mac", False, True),
+        ("info/machine-type", False, False),
+        ("info/name", True, True),
+        ("info/name", False, False),
+    ],
+)
+def test_identifying_matches_whole_words(key, root, identifying):
+    assert probe.is_identifying(key, root=root) is identifying
+
+
+def test_referenced_ids_split_lists():
+    messages = {
+        "ebus/5/lugs-1/connection/fed-by-device-id": b"other-panel",
+        "ebus/5/panel/bess/grid-forming-entity": b"bess-a, bess-b",
+        "ebus/5/panel/connection/feeds-device-ids": b"x1,x2",
+        "ebus/5/panel/info/name": b"Home",
+    }
+    assert probe.referenced_ids(messages) == {"other-panel", "bess-a", "bess-b", "x1", "x2"}
+
+
+def test_survivors_catch_ids_glued_to_text():
+    assert probe.survivors("prefixnt-1234-abcdsuffix", {"NT-1234-ABCD"}) == 1
+    assert probe.survivors("clean", {"NT-1234-ABCD"}) == 0
