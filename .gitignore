@@ -30,3 +30,8 @@ span_id.txt
 span-capture.txt
 
 .claude/
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
+.mempalace/
