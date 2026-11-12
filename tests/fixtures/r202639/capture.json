@@ -630,6 +630,6 @@
   "ebus/5/nt-0000-test/status/cloud-connection": "UNKNOWN",
   "ebus/5/nt-0000-test/status/ethernet": "true",
   "ebus/5/nt-0000-test/status/postal-code": "<redacted>",
-  "ebus/5/nt-0000-test/status/time-zone": "America/New_York",
+  "ebus/5/nt-0000-test/status/time-zone": "Etc/UTC",
   "ebus/5/nt-0000-test/status/wifi": "false"
 }

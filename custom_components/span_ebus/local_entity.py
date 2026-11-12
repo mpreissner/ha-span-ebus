@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import (
     EntityCategory,
@@ -22,6 +23,7 @@ from homeassistant.const import (
     UnitOfEnergy,
     UnitOfFrequency,
     UnitOfPower,
+    UnitOfTime,
 )
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
@@ -61,7 +63,7 @@ class Presentation:
     """How one row looks in Home Assistant."""
 
     unit: str | None = None
-    device_class: SensorDeviceClass | None = None
+    device_class: SensorDeviceClass | BinarySensorDeviceClass | None = None
     state_class: SensorStateClass | None = None
     category: EntityCategory | None = None
     options: tuple[str, ...] | None = None
@@ -94,6 +96,10 @@ _VOLTAGE = Presentation(
 _ENERGY_IN = Presentation(unit=_KWH, device_class=SensorDeviceClass.ENERGY, state_class=_INC)
 _ENERGY_NET = Presentation(
     unit=_KWH, device_class=SensorDeviceClass.ENERGY, state_class=_TOTAL, enabled=False
+)
+
+_DURATION = Presentation(
+    unit=UnitOfTime.MINUTES, device_class=SensorDeviceClass.DURATION, state_class=_MEAS
 )
 
 
@@ -151,6 +157,13 @@ PRESENTATION: dict[str, Presentation] = {
     "pcs_binding_constraint": _enum(
         "fsr", "doe", "voltage", "off_grid", "requested", "operator", "none", "unknown"
     ),
+    "door": Presentation(device_class=BinarySensorDeviceClass.DOOR, category=_D),
+    "ethernet": Presentation(device_class=BinarySensorDeviceClass.CONNECTIVITY, category=_D),
+    "wifi": Presentation(device_class=BinarySensorDeviceClass.CONNECTIVITY, category=_D),
+    "pcs_active": Presentation(device_class=BinarySensorDeviceClass.RUNNING, category=_D),
+    "pcs_enabled": Presentation(category=_D, enabled=False),
+    "time_to_priority_shed": _DURATION,
+    "total_time_remaining": _DURATION,
     # circuits
     "power": Presentation(
         unit=_W, device_class=SensorDeviceClass.POWER, state_class=_MEAS, suffix="power"

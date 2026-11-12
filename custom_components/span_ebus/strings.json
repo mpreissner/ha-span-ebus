@@ -192,6 +192,23 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "door": {
+        "name": "Door"
+      },
+      "ethernet": {
+        "name": "Ethernet"
+      },
+      "wifi": {
+        "name": "Wi-Fi"
+      },
+      "pcs_active": {
+        "name": "PCS active"
+      },
+      "pcs_enabled": {
+        "name": "PCS enabled"
+      }
+    },
     "sensor": {
       "transport": {
         "name": "Transport",
@@ -313,6 +330,12 @@
           "none": "None",
           "unknown": "Unknown"
         }
+      },
+      "time_to_priority_shed": {
+        "name": "Time to priority shed"
+      },
+      "total_time_remaining": {
+        "name": "Total time remaining"
       }
     },
     "select": {

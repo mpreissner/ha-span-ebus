@@ -46,7 +46,7 @@ IDENTIFYING = frozenset(
     {
         "serial", "mac", "ip", "ipv4", "ipv6", "hostname", "address", "ssid", "bssid",
         "latitude", "longitude", "locality", "region", "postal", "zip", "street", "city",
-        "country",
+        "country", "zone",
     }
 )  # fmt: skip
 # Properties whose value is one or more device ids, comma-separated.

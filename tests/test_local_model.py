@@ -118,13 +118,33 @@ def test_entities_the_fixture_triggers(snapshot):
     assert snapshot.panel.main_breaker_rating is not None
 
 
-def test_every_row_reads_a_property_the_fixture_describes(snapshot):
-    """Grounding: the property keys rows need exist somewhere in the capture."""
+# Rows for properties the MAIN 40 capture does not describe; grounded in
+# synthetic tests instead.
+SYNTHETIC_ONLY_ROWS = frozenset({"time_to_priority_shed", "total_time_remaining"})
+
+
+def _capture_described(snapshot: model.Snapshot) -> set[str]:
     described = set(snapshot.panel.described)
     for facts in (*snapshot.lugs.values(), *snapshot.circuits.values()):
         described |= facts.described
+    return described
+
+
+def test_every_row_reads_a_property_the_fixture_describes(snapshot):
+    """Grounding: the property keys rows need exist somewhere in the capture."""
+    described = _capture_described(snapshot)
     for row in model.ROWS:
-        assert set(row.needs) <= described, row.key
+        if row.key not in SYNTHETIC_ONLY_ROWS:
+            assert set(row.needs) <= described, row.key
+
+
+def test_synthetic_only_rows_are_real_and_really_absent(snapshot):
+    """The exemption list names real rows, each one the capture cannot ground."""
+    described = _capture_described(snapshot)
+    by_key = {row.key: row for row in model.ROWS}
+    assert set(by_key) >= SYNTHETIC_ONLY_ROWS
+    for key in SYNTHETIC_ONLY_ROWS:
+        assert not set(by_key[key].needs) <= described, key
 
 
 def test_clearing_a_value_gives_none_not_zero():
@@ -159,3 +179,102 @@ def test_store_round_trip_matches_the_live_snapshot():
 
 def test_scopes_cover_every_row():
     assert {row.scope for row in model.ROWS} == set(Scope)
+
+
+# --- 4b-1: panel extras, circuit links, relay rule --------------------------------------
+
+ROWS_4A = frozenset(
+    {
+        "breaker", "breaker_rating", "busbar_current", "consumed_energy", "current",
+        "current_power", "feedthrough_current_a", "feedthrough_current_b", "frequency",
+        "grid_power", "main_breaker_rating", "main_consumed_energy", "main_net_energy",
+        "main_produced_energy", "net_energy", "panel_status", "pcs_binding_constraint",
+        "pcs_import_limit", "power", "priority", "produced_energy", "service_rating",
+        "site_power", "software_version", "upstream_current_a", "upstream_current_b",
+        "vendor_cloud", "voltage_a", "voltage_b",
+    }
+)  # fmt: skip
+ROOT_BINARY = frozenset({"door", "ethernet", "wifi", "pcs_active", "pcs_enabled"})
+
+
+def test_nothing_on_the_capture_is_unmapped(snapshot):
+    assert snapshot.unmapped == frozenset()
+
+
+def test_root_binary_sensors(snapshot):
+    panel = snapshot.panel
+    rows = {row.key: row for row in model.ROWS}
+    shown = {key: rows[key].value(panel) for key in ROOT_BINARY}
+    assert shown == {
+        "door": False,
+        "ethernet": True,
+        "wifi": False,
+        "pcs_active": True,
+        "pcs_enabled": True,
+    }
+    assert all(rows[key].platform == "binary_sensor" for key in ROOT_BINARY)
+    assert rows["pcs_enabled"].kind is model.ValueKind.STATIC
+    # pcs/active and pcs/enabled stay attributes of the import limit too.
+    attrs = rows["pcs_import_limit"].attrs(panel)
+    assert attrs["active"] is True and attrs["enabled"] is True
+
+
+def test_capture_rows_are_4a_plus_the_root_binary_sensors(snapshot):
+    keys = {row.key for row, _ in existing(snapshot)}
+    assert keys == ROWS_4A | ROOT_BINARY
+    breakers = [d for row, d in existing(snapshot) if row.key == "breaker"]
+    assert len(breakers) == 29 - len(NO_CONTROLS)
+
+
+def test_row_keys_are_unique():
+    keys = [row.key for row in model.ROWS]
+    assert len(keys) == len(set(keys))
+
+
+def test_binary_sensor_uids(snapshot):
+    uids = {
+        model.row_uid(row, "KEY", device_id)
+        for row, device_id in existing(snapshot)
+        if row.platform == "binary_sensor"
+    }
+    assert uids == {
+        "KEY_distribution-enclosure/door/state",
+        "KEY_distribution-enclosure/status/ethernet",
+        "KEY_distribution-enclosure/status/wifi",
+        "KEY_distribution-enclosure/pcs/active",
+        "KEY_distribution-enclosure/pcs/enabled",
+    }
+
+
+def test_unpublished_connections_change_no_attributes(snapshot):
+    """connection/* and info/locations are described but unpublished on the capture."""
+    rows = {row.key: row for row in model.ROWS}
+    new = {"backed_up", "unit_count", "location"}
+    for circuit in snapshot.circuits.values():
+        assert circuit.feeds is None and circuit.fed_by is None
+        assert circuit.backed_up is None and circuit.location is None
+        assert not set(rows["power"].attrs(circuit)) & new
+    for lugs in snapshot.lugs.values():
+        assert lugs.feeds is None and lugs.fed_by is None
+        assert rows["current_power"].attrs(lugs) == {}
+
+
+def test_lugs_connection_attributes_once_published():
+    tree = capture_tree()
+    tree.apply(homie.value_topic("lugs-01", "connection/backed-up"), b"NOT_BACKED_UP")
+    tree.apply(homie.value_topic("lugs-01", "connection/count"), b"2")
+    lugs = model.build_snapshot(tree, PANEL).upstream
+    row = next(r for r in model.ROWS if r.key == "current_power")
+    assert row.attrs(lugs) == {"backed_up": "not_backed_up", "unit_count": 2}
+
+
+def test_time_zone_is_pii_and_kept_out_of_the_store():
+    tree = capture_tree()
+    assert "status/time-zone" in model.PII_KEYS
+    assert tree.value(PANEL, "status/time-zone") is not None
+    assert "status/time-zone" not in model.store_payload(tree)["values"][PANEL]
+    assert "status/time-zone" not in model.build_snapshot(tree, PANEL).panel.described
+
+
+def test_fixture_time_zone_is_redacted():
+    assert capture_tree().value(PANEL, "status/time-zone") == "Etc/UTC"

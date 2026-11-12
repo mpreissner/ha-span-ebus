@@ -50,6 +50,10 @@ minute if it falls back to its cellular connection — with:
   power reading rather than read back from the panel;
 - **the main feed** and the **site flows** SPAN reports (grid, home, …).
 
+"Grid" means what feeds this panel: the power at its main feed, under SPAN's
+own name for it. If solar or storage is installed upstream of the panel, it is
+not your utility import.
+
 Circuit entity ids are keyed on SPAN's internal circuit identifier rather than its
 label or panel space, so renaming a circuit in the SPAN app keeps its history.
 
@@ -64,6 +68,11 @@ screen. A circuit only gets one if the panel actually told us how to address its
 relay, so nothing appears for the main feed, the panel's own metering, or a
 circuit we could not resolve — better a missing switch than one that commands the
 wrong breaker.
+
+On a panel added over its local API, a circuit that feeds a battery or solar
+inverter, or that the panel marks as storage, gets no switch: turning it off can
+cut backup power or fault the inverter. Its relay state is still shown as an
+attribute of the circuit's power sensor.
 
 Turning a circuit **on** *releases* our own disconnect rather than forcing the
 relay closed, so the panel's reasons for holding a circuit open (backup reserve,

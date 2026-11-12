@@ -5,6 +5,8 @@ made-up ids and values, because the captured panel has no solar, remote CT,
 battery or PV flows.
 """
 
+import json
+
 import pytest
 from span_client.local import homie, model
 from span_client.local.debounce import Coalescer, clamp_interval
@@ -364,3 +366,206 @@ def test_stop_cancels_the_pending_flush():
 )
 def test_clamp_interval(value, expected):
     assert clamp_interval(value, 1.0) == expected
+
+
+# --- 4b-1: shed forecast and policy (SYNTHETIC) -------------------------------------------
+
+SHED_KEYS = (
+    *ROOT_KEYS,
+    "shed-forecast/time-to-priority-shed",
+    "shed-forecast/total-time-remaining",
+    "shed-forecast/full-charge-time-to-priority-shed",
+    "shed-forecast/full-charge-total-time-remaining",
+    "shed-forecast/confidence",
+    "shed/policy",
+)
+ROOT_SPECIAL.update(
+    {
+        "shed-forecast/time-to-priority-shed": {"datatype": "integer"},
+        "shed-forecast/total-time-remaining": {"datatype": "integer"},
+        "shed-forecast/full-charge-time-to-priority-shed": {"datatype": "integer"},
+        "shed-forecast/full-charge-total-time-remaining": {"datatype": "integer"},
+        "shed-forecast/confidence": {"datatype": "enum", "format": "LOW,MEDIUM,HIGH"},
+        "shed/policy": {"datatype": "json"},
+    }
+)
+POLICY = {
+    "algorithm": "soc-priority.v1",
+    "parameters": {"soc-threshold-shed": 20, "soc-threshold-release": 30.5},
+}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        POLICY,
+        json.dumps(POLICY),
+        {"version": "soc-priority.v1", **POLICY["parameters"]},
+    ],
+)
+def test_parse_shed_policy_accepts(value):
+    assert model.parse_shed_policy(value) == model.ShedPolicy(20.0, 30.5)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "not json",
+        "[1, 2]",
+        {"algorithm": "soc-priority.v2", "parameters": POLICY["parameters"]},
+        {"algorithm": "soc-priority.v1", "parameters": "x"},
+        {
+            "algorithm": "soc-priority.v1",
+            "parameters": {"soc-threshold-shed": 120, "soc-threshold-release": 30},
+        },
+        {
+            "algorithm": "soc-priority.v1",
+            "parameters": {"soc-threshold-shed": -1, "soc-threshold-release": 30},
+        },
+        {
+            "algorithm": "soc-priority.v1",
+            "parameters": {"soc-threshold-shed": True, "soc-threshold-release": 30},
+        },
+        {
+            "algorithm": "soc-priority.v1",
+            "parameters": {"soc-threshold-shed": "20", "soc-threshold-release": 30},
+        },
+        {"algorithm": "soc-priority.v1", "parameters": {"soc-threshold-shed": 20}},
+    ],
+)
+def test_parse_shed_policy_rejects(value):
+    assert model.parse_shed_policy(value) is None
+
+
+def test_shed_policy_rejection_never_logs_the_payload(caplog):
+    caplog.set_level("DEBUG")
+    model.parse_shed_policy('{"algorithm": "secret-site-123"}')
+    assert "secret-site-123" not in caplog.text
+
+
+def test_shed_forecast_sensors_and_attributes():
+
+    tree = tree_with(
+        root_keys=SHED_KEYS,
+        values={
+            PANEL: {
+                "shed-forecast/time-to-priority-shed": "95",
+                "shed-forecast/total-time-remaining": "240",
+                "shed-forecast/full-charge-time-to-priority-shed": "400",
+                "shed-forecast/full-charge-total-time-remaining": "900",
+                "shed-forecast/confidence": "HIGH",
+                "shed/policy": json.dumps(POLICY),
+            }
+        },
+    )
+    s = snap(tree)
+    panel = s.panel
+    assert model.row_exists(s, row("time_to_priority_shed"), PANEL)
+    assert row("time_to_priority_shed").value(panel) == 95
+    assert row("total_time_remaining").value(panel) == 240
+    assert row("time_to_priority_shed").attrs(panel) == {
+        "full_charge_time_to_priority_shed": 400,
+        "confidence": "high",
+        "soc_threshold_shed": 20.0,
+        "soc_threshold_release": 30.5,
+    }
+    assert row("total_time_remaining").attrs(panel) == {
+        "full_charge_total_time_remaining": 900,
+        "confidence": "high",
+    }
+    assert "shed/policy" not in {u.key for u in s.unmapped}
+
+
+def test_shed_forecast_absent_without_the_capability():
+    s = snap(tree_with())
+    assert s.panel.shed_forecast is None and s.panel.shed_policy is None
+    assert not model.row_exists(s, row("time_to_priority_shed"), PANEL)
+
+
+# --- 4b-1: circuit links and the relay rule (SYNTHETIC) -----------------------------------
+
+LINK_KEYS = (
+    *CIRCUIT_KEYS,
+    "connection/feeds-device-id",
+    "connection/feeds-device-type",
+    "connection/feeds-device-status",
+    "connection/backed-up",
+    "connection/count",
+    "info/locations",
+)
+CIRCUIT_SPECIAL.update(
+    {
+        "connection/feeds-device-id": {"datatype": "string"},
+        "connection/feeds-device-type": {"datatype": "string"},
+        "connection/feeds-device-status": {"datatype": "enum", "format": "OK,LOST,DEGRADED"},
+        "connection/backed-up": {"datatype": "enum", "format": "BACKED_UP,NOT_BACKED_UP"},
+        "connection/count": {"datatype": "integer"},
+        "info/locations": {"datatype": "string"},
+    }
+)
+
+
+def _relay_tree(**circuit_values: str) -> homie.DeviceTree:
+    values = {"switch/relay": "CLOSED", "switch/relay-controllable": "true", **circuit_values}
+    return tree_with(circuit_keys=LINK_KEYS, values={CIRCUIT: values})
+
+
+@pytest.mark.parametrize(
+    ("values", "has_breaker"),
+    [
+        ({}, True),
+        (
+            {
+                "connection/feeds-device-id": "x-1",
+                "connection/feeds-device-type": "energy.ebus.device.bess",
+            },
+            False,
+        ),
+        ({"connection/feeds-device-id": "x-1", "connection/feeds-device-type": "PV"}, False),
+        (
+            {
+                "connection/feeds-device-id": "x-1",
+                "connection/feeds-device-type": "energy.ebus.device.evse",
+            },
+            True,
+        ),
+        ({"connection/feeds-device-id": "x-1"}, True),  # unknown target
+        ({"connection/feeds-device-type": "energy.ebus.device.bess"}, True),  # no id yet
+        ({"connection/feeds-role": "STORAGE"}, False),
+        ({"connection/feeds-role": "LOADS"}, True),
+    ],
+)
+def test_relay_rule(values, has_breaker):
+    s = snap(_relay_tree(**values))
+    assert s.circuits[CIRCUIT].has_switch
+    assert model.row_exists(s, row("breaker"), CIRCUIT) is has_breaker
+    # The relay state stays visible as an attribute either way.
+    assert row("power").attrs(s.circuits[CIRCUIT])["relay_state"] == "CLOSED"
+
+
+def test_link_facts_and_connection_attributes():
+    s = snap(
+        _relay_tree(
+            **{
+                "connection/feeds-device-id": "x-1",
+                "connection/feeds-device-type": "energy.ebus.device.bess",
+                "connection/feeds-device-status": "DEGRADED",
+                "connection/backed-up": "BACKED_UP",
+                "connection/count": "3",
+                "info/locations": '["Garage", " Shed ", ""]',
+            }
+        )
+    )
+    circuit = s.circuits[CIRCUIT]
+    assert circuit.feeds == model.Link(via_kind="bess", via_id="x-1", status="DEGRADED")
+    assert circuit.fed_by is None
+    attrs = row("power").attrs(circuit)
+    assert attrs["backed_up"] == "backed_up"
+    assert attrs["unit_count"] == 3
+    assert attrs["location"] == "Garage, Shed"
+
+
+def test_plain_location_string():
+    s = snap(_relay_tree(**{"info/locations": "Kitchen"}))
+    assert s.circuits[CIRCUIT].location == "Kitchen"
