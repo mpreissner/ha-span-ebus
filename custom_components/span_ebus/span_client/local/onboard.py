@@ -25,6 +25,7 @@ from .mqtt import LocalMqtt
 from .rest import (
     AuthFailed,
     CannotConnect,
+    OutcomeUnknown,
     PanelNotReady,
     PanelStatus,
     RateLimited,
@@ -72,7 +73,8 @@ async def probe_panel(
     """Fetch and pin the panel CA, then read its status through it.
 
     Returns the status and the CA. A panel without the v2 API raises
-    UnexpectedResponse (the CA endpoint 404s).
+    NotFound (the CA endpoint 404s); anything else that isn't the API
+    raises UnexpectedResponse.
     """
     ca_pem = await SpanLocalApi(session, host, port=port).fetch_ca()
     status = await SpanLocalApi(session, host, ca_pem=ca_pem, port=port).status()
@@ -98,22 +100,35 @@ async def register_client(
     passphrase: str,
     *,
     port: int = 443,
-) -> Registration:
-    """Register `name` with the passphrase.
+    unconfirmed: list[str] | None = None,
+) -> tuple[Registration, str]:
+    """Register `name` with the passphrase; the registration and its name.
 
     Retried once when the panel drops the connection: it closes idle
     keep-alive connections, and a POST on a dead one fails before it is
     sent. Each attempt gets its own `SpanLocalApi`, and so its own TLS
-    context and connection.
+    context and connection, and the retry a fresh name, since the first
+    POST may have landed after all.
+
+    Every name whose outcome is unknown (a lost connection, a timeout or a
+    504) is appended to `unconfirmed`, so the caller can remove it with the
+    token a later registration brings.
     """
     for attempt in (1, 2):
         api = SpanLocalApi(session, host, ca_pem=ca_pem, port=port)
         try:
-            return await api.register(name, passphrase=passphrase, description="Home Assistant")
-        except CannotConnect:
-            if attempt == 2:
+            registration = await api.register(
+                name, passphrase=passphrase, description="Home Assistant"
+            )
+        except (CannotConnect, OutcomeUnknown) as exc:
+            if unconfirmed is not None:
+                unconfirmed.append(name)
+            if attempt == 2 or isinstance(exc, OutcomeUnknown):
                 raise
             log.debug("register lost its connection; retrying once")
+            name = new_client_name()
+        else:
+            return registration, name
     raise AssertionError("unreachable")
 
 
@@ -126,11 +141,14 @@ async def discard_client(
     *,
     port: int = 443,
 ) -> None:
-    """Best effort: remove a registration that will not be used."""
-    api = SpanLocalApi(session, host, ca_pem=ca_pem, access_token=access_token, port=port)
+    """Best effort: remove a registration that will not be used.
+
+    Never raises: it runs on entry removal, which must finish regardless.
+    """
     try:
+        api = SpanLocalApi(session, host, ca_pem=ca_pem, access_token=access_token, port=port)
         await api.delete_client(name)
-    except (SpanLocalError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 — cleanup is best effort
         log.debug("could not remove an unused client registration: %s", type(exc).__name__)
 
 
@@ -202,6 +220,6 @@ def form_error(exc: BaseException) -> tuple[str, dict[str, str]]:
         return "broker_auth", {}
     if isinstance(exc, NotReadyInTime):
         return "no_ready_state", {}
-    if isinstance(exc, CannotConnect):
+    if isinstance(exc, (CannotConnect, OutcomeUnknown)):
         return "panel_unreachable", {}
     return "unknown", {}

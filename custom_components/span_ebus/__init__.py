@@ -20,6 +20,7 @@ from .const import (
     CONF_CLIENT_NAME,
     CONF_DECLINED,
     CONF_DEVICE_UUID,
+    CONF_LOCAL_SERIAL,
     CONF_PANELS,
     CONF_PRIMARY_PANEL,
     CONF_SERIAL,
@@ -106,6 +107,10 @@ def _new_panels_issue(entry: SpanConfigEntry) -> str:
     return f"new_panels_{entry.entry_id}"
 
 
+def _local_pending_issue(entry: SpanConfigEntry) -> str:
+    return f"local_pending_{entry.entry_id}"
+
+
 def _note_panels(hass: HomeAssistant, entry: SpanConfigEntry, plan: PanelPlan) -> None:
     """Tell the user about panels the stored list doesn't account for."""
     if plan.departed:
@@ -131,6 +136,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         # Added over the local API without the cloud. The local transport
         # arrives in a later update; until then the entry loads with no entities.
         _LOGGER.info("SPAN panel added locally; local telemetry arrives in a later update")
+        # Say so where the user looks, so an entry with no entities isn't
+        # mistaken for a broken one.
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            _local_pending_issue(entry),
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="local_pending",
+        )
         entry.runtime_data = []
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         return True
@@ -170,7 +185,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         if CONF_PANELS not in entry.options:
             options = {**entry.options, CONF_PANELS: list(plan.chosen)}
             hass.config_entries.async_update_entry(entry, options=options)
-        _note_panels(hass, entry, plan)
+        if CONF_LOCAL_SERIAL not in entry.data:
+            # A local panel's cloud fallback is that one panel by design; the
+            # account's other panels are not news.
+            _note_panels(hass, entry, plan)
         coordinators = [
             coordinator
             for site in plan.running
@@ -213,6 +231,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> Non
     entry runs, so they are found by prefix.
     """
     ir.async_delete_issue(hass, DOMAIN, _new_panels_issue(entry))
+    ir.async_delete_issue(hass, DOMAIN, _local_pending_issue(entry))
     if CONF_ACCESS_TOKEN in entry.data:
         # Best effort: the panel keeps a client registration until it is removed.
         await onboard.discard_client(

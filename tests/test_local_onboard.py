@@ -81,13 +81,14 @@ def test_host_with_another_ca_does_not_match():
 
 def test_register_client():
     async def scenario(panel, make_api):
-        registration = await onboard.register_client(
+        registration, name = await onboard.register_client(
             make_api()._session, HOST, CA, "ha-span-ebus-test", PASSPHRASE, port=port_of(make_api)
         )
-        return registration, panel.requests
+        return registration, name, panel.requests
 
-    registration, requests = run(scenario)
+    registration, name, requests = run(scenario)
     assert registration.access_token == TOKEN
+    assert name == "ha-span-ebus-test"
     assert requests[0][2]["name"] == "ha-span-ebus-test"
 
 
@@ -101,11 +102,33 @@ def test_register_retries_a_dropped_connection_once(monkeypatch):
         return rest.Registration.from_body(REGISTER_BODY)
 
     monkeypatch.setattr(rest.SpanLocalApi, "register", flaky)
-    registration = asyncio.run(
-        onboard.register_client(None, HOST, CA, "n", PASSPHRASE)  # type: ignore[arg-type]
+    unconfirmed: list[str] = []
+    registration, name = asyncio.run(
+        onboard.register_client(None, HOST, CA, "n", PASSPHRASE, unconfirmed=unconfirmed)  # type: ignore[arg-type]
     )
     assert registration.access_token == TOKEN
-    assert calls == ["n", "n"]
+    # The first POST may have landed: the retry uses a fresh name, and the
+    # first is reported for removal.
+    assert calls[0] == "n"
+    assert calls[1] == name != "n"
+    assert unconfirmed == ["n"]
+
+
+def test_register_gateway_timeout_is_not_retried(monkeypatch):
+    calls: list[str] = []
+
+    async def lost(self, name, *, passphrase=None, description=None):
+        calls.append(name)
+        raise rest.OutcomeUnknown("504")
+
+    monkeypatch.setattr(rest.SpanLocalApi, "register", lost)
+    unconfirmed: list[str] = []
+    with pytest.raises(rest.OutcomeUnknown):
+        asyncio.run(
+            onboard.register_client(None, HOST, CA, "n", PASSPHRASE, unconfirmed=unconfirmed)  # type: ignore[arg-type]
+        )
+    assert calls == ["n"]
+    assert unconfirmed == ["n"]
 
 
 def test_register_gives_up_after_the_retry(monkeypatch):
@@ -147,6 +170,19 @@ def test_discard_client_swallows_failures():
         await onboard.discard_client(session, HOST, CA, TOKEN, "..", port=port)
 
     run(scenario)  # neither raises
+
+
+def test_discard_client_survives_a_bad_ca():
+    asyncio.run(onboard.discard_client(None, HOST, "not a pem", TOKEN, "x"))  # type: ignore[arg-type]
+
+
+def test_probe_of_a_panel_without_the_api_is_not_found(monkeypatch):
+    async def missing(self):
+        raise rest.NotFound("GET /certificate/ca: HTTP 404")
+
+    monkeypatch.setattr(rest.SpanLocalApi, "fetch_ca", missing)
+    with pytest.raises(rest.NotFound):
+        asyncio.run(onboard.probe_panel(None, HOST))  # type: ignore[arg-type]
 
 
 # --- broker step ------------------------------------------------------------
@@ -248,6 +284,7 @@ def test_broker_login_failure_still_stops(error):
         (rest.PanelNotReady("no"), "panel_not_ready", {}),
         (rest.AuthFailed("no"), "broker_auth", {}),
         (rest.CannotConnect("no"), "panel_unreachable", {}),
+        (rest.OutcomeUnknown("no"), "panel_unreachable", {}),
         (onboard.NotReadyInTime("no"), "no_ready_state", {}),
         (rest.UnexpectedResponse("no"), "unknown", {}),
     ],

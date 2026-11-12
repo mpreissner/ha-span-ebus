@@ -5,7 +5,7 @@
         "title": "SPAN Panel (eBus)",
         "description": "How do you want to add SPAN?",
         "menu_options": {
-          "local": "A panel on my network (recommended, firmware r202639 or later)",
+          "local": "A panel on my network (firmware r202639 or later)",
           "cloud": "My SPAN account, over the cloud"
         }
       },
@@ -101,7 +101,8 @@
       "panel_unreachable": "Could not reach the panel at that address.",
       "no_ready_state": "Connected to the panel, but it didn't report ready in time. Try again.",
       "ca_mismatch": "The device at that address isn't this panel, or couldn't be reached.",
-      "unknown": "Unexpected error. Check the logs and try again."
+      "unknown": "Unexpected error. Check the logs and try again.",
+      "not_a_panel": "The device at that address doesn't look like a SPAN panel."
     },
     "abort": {
       "already_configured": "This SPAN panel or account is already configured.",
@@ -111,6 +112,7 @@
       "reconfigure_successful": "The panel address was updated.",
       "not_local": "Only panels added over the local API have an address to change.",
       "cloud_account_configured": "This SPAN account is already set up over the cloud. Remove that entry first, then add the panel locally.",
+      "panel_configured_locally": "A panel on this SPAN account is already set up locally, with this account as its cloud fallback. Remove that entry first to add the whole account over the cloud.",
       "panel_not_on_account": "This panel isn't on that SPAN account.",
       "cannot_connect": "Could not reach the panel.",
       "not_supported": "This panel's firmware doesn't offer the local API yet.",
@@ -156,6 +158,10 @@
     "new_panels": {
       "title": "New SPAN panel found",
       "description": "{count} panel(s) on your SPAN account are not set up here. To add or dismiss them, open the SPAN Panel (eBus) integration, select Configure and tick the panels that belong to this Home Assistant."
+    },
+    "local_pending": {
+      "title": "SPAN panel added locally: telemetry coming soon",
+      "description": "This panel was added over its local API without the cloud fallback. This version of the integration does not yet stream local telemetry, so the entry has no entities. They will appear after a later update, with nothing for you to do."
     }
   }
 }
