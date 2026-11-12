@@ -16,8 +16,11 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SpanConfigEntry
 from .coordinator import SpanCloudCoordinator
+from .local_entity import SpanLocalEntity, async_setup_local
 from .span_client.backend import RELAY_PROPERTY
+from .span_client.local.model import Row
 from .span_client.models import PropertySpec
+from .transport import SpanTransportManager
 
 # SPAN's own vocabulary: a closed relay is an energized circuit.
 STATE_CLOSED = "CLOSED"
@@ -29,7 +32,12 @@ async def async_setup_entry(
     entry: SpanConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    entry.runtime_data.add_platform(lambda c: _register(c, async_add_entities))
+    runtime = entry.runtime_data
+    if runtime.transport is not None:
+        async_setup_local(
+            entry, runtime.transport, async_add_entities, "switch", SpanLocalRelaySwitch
+        )
+    runtime.add_platform(lambda c: _register(c, async_add_entities))
 
 
 def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntitiesCallback) -> None:
@@ -92,3 +100,29 @@ class SpanRelaySwitch(CoordinatorEntity[SpanCloudCoordinator], SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_send_command(self._key, STATE_OPEN)
+
+
+class SpanLocalRelaySwitch(SpanLocalEntity, SwitchEntity):
+    """One breaker's relay, set over the panel's local API."""
+
+    _attr_device_class = SwitchDeviceClass.SWITCH
+
+    def __init__(
+        self, entry: SpanConfigEntry, transport: SpanTransportManager, row: Row, device_id: str
+    ) -> None:
+        super().__init__(entry, transport, row, device_id)
+
+    @property
+    def is_on(self) -> bool | None:
+        """True when closed; None for UNKNOWN or anything else, never a guess."""
+        if self._value == STATE_CLOSED:
+            return True
+        if self._value == STATE_OPEN:
+            return False
+        return None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._async_command(STATE_CLOSED)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._async_command(STATE_OPEN)

@@ -159,6 +159,15 @@ def set_topic(device_id: str, key: str) -> str:
     return f"{HOMIE_PREFIX}/{device_id}/{key}/set"
 
 
+def value_topic(device_id: str, key: str) -> str:
+    """The topic a device publishes `<capability>/<property>` on."""
+    return f"{HOMIE_PREFIX}/{device_id}/{key}"
+
+
+def description_topic(device_id: str) -> str:
+    return f"{HOMIE_PREFIX}/{device_id}/$description"
+
+
 def parse_description(device_id: str, payload: str | bytes | dict[str, Any]) -> DeviceDescription:
     """Parse one device's `$description`.
 
@@ -354,6 +363,13 @@ class DeviceTree:
         description = self.descriptions.get(device_id)
         definition = description.properties.get(key) if description else None
         return decode_value(definition, raw)
+
+    def payloads(self, device_id: str) -> dict[str, bytes]:
+        """A device's undecoded values, as they arrived."""
+        return dict(self._raw.get(device_id, {}))
+
+    def devices_with_values(self) -> list[str]:
+        return list(self._raw)
 
     def values(self, device_id: str) -> dict[str, Any]:
         return {key: self.value(device_id, key) for key in self._raw.get(device_id, {})}

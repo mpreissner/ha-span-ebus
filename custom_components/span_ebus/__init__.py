@@ -45,11 +45,11 @@ from .span_client.backend import (
 )
 from .span_client.local import onboard
 from .span_client.local.health import Mode
-from .transport import SpanTransportManager, fallback_issue_id
+from .transport import SpanTransportManager, fallback_issue_id, local_tree_store
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS: list[Platform] = [Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
 
 # One coordinator per panel. A site has one stream: a panel alone on its site takes
 # all of it, and panels sharing a site take their split of it, since circuit
@@ -273,6 +273,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> Non
             entry.data[CONF_CLIENT_NAME],
         )
     await energy_store(hass, entry.entry_id).async_remove()
+    await local_tree_store(hass, entry.entry_id).async_remove()
     storage = Path(hass.config.path(".storage"))
     prefix = f"{DOMAIN}.{entry.entry_id}."
     await hass.async_add_executor_job(_remove_by_prefix, storage, prefix)
