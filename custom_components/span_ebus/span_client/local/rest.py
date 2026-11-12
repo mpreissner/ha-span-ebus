@@ -262,6 +262,9 @@ class SpanLocalApi:
         return clients
 
     async def delete_client(self, name: str) -> None:
+        if "/" in name:
+            # It would address a different path; client names never contain one.
+            raise ValueError("client name cannot contain '/'")
         await self._request("DELETE", f"/auth/clients/{name}")
 
     async def rotate_passphrase(self) -> RotatedPassphrase:
@@ -273,8 +276,8 @@ class SpanLocalApi:
         """
         try:
             body = await self._request("PUT", "/auth/passphrase")
-        except (TimeoutError, CannotConnect) as exc:
-            raise OutcomeUnknown("no answer to passphrase rotation") from exc
+        except (TimeoutError, CannotConnect):
+            raise OutcomeUnknown("no answer to passphrase rotation") from None
         try:
             return RotatedPassphrase(
                 broker_password=str(body["ebusBrokerPassword"]),
@@ -309,10 +312,11 @@ class SpanLocalApi:
         if context is None:
             raise SpanLocalError("no pinned CA; call fetch_ca first")
         headers = {}
-        if self._token:
+        if auth:
+            # Only on authenticated calls: never on the unpinned CA fetch.
+            if not self._token:
+                raise AuthFailed("not registered")
             headers["Authorization"] = f"Bearer {self._token}"
-        elif auth:
-            raise AuthFailed("not registered")
 
         try:
             async with self._session.request(
@@ -326,7 +330,10 @@ class SpanLocalApi:
                 if resp.status >= 400:
                     await _raise_for(resp, method, path)
                 if as_text:
-                    return await resp.text()
+                    try:
+                        return await resp.text()
+                    except UnicodeDecodeError:
+                        raise UnexpectedResponse(f"{method} {path}: body is not text") from None
                 if resp.content_length == 0:
                     return {}
                 try:
@@ -340,7 +347,8 @@ class SpanLocalApi:
         except aiohttp.ClientError as exc:
             # Includes TLS verification failures. The message names the error
             # class only: some aiohttp messages embed the host.
-            raise CannotConnect(f"{method} {path}: {type(exc).__name__}") from exc
+            # No chained cause either, since HA logs tracebacks.
+            raise CannotConnect(f"{method} {path}: {type(exc).__name__}") from None
 
 
 async def _raise_for(resp: aiohttp.ClientResponse, method: str, path: str) -> None:

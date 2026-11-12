@@ -61,6 +61,7 @@ async def capture(host: str, seconds: float) -> tuple[dict[str, Any], dict[str, 
         secrets |= {status.serial, registration.serial, registration.hostname}
         secrets |= {registration.broker_username, registration.broker_password or ""}
         secrets |= {registration.access_token, registration.hop_passphrase or ""}
+        broker: LocalMqtt | None = None
         try:
             broker = LocalMqtt(
                 host=host,
@@ -74,8 +75,9 @@ async def capture(host: str, seconds: float) -> tuple[dict[str, Any], dict[str, 
             await broker.connect_once()
             print(f"Connected to the broker; listening for {seconds:.0f} s")
             await asyncio.sleep(seconds)
-            await broker.stop()
         finally:
+            if broker is not None:
+                await broker.stop()
             await api.delete_client(CLIENT_NAME)
             print("Temporary client removed")
         documents = {
@@ -113,17 +115,26 @@ def placeholders(tree: homie.DeviceTree) -> dict[str, str]:
             counts[device_class] = counts.get(device_class, 0) + 1
             names[description.device_id] = f"{device_class}-{counts[device_class]:02d}"
     # Anything published but never described still gets a placeholder.
-    for device_id in set(tree.states) - set(names):
+    for device_id in sorted((set(tree.states) | set(tree._raw)) - set(names)):
         counts["unknown"] = counts.get("unknown", 0) + 1
         names[device_id] = f"unknown-{counts['unknown']:02d}"
     return names
 
 
 def redact(text: str, replacements: dict[str, str]) -> str:
-    # Longest first, so `<serial>-lugs-up` is replaced before `<serial>`.
-    for old in sorted(replacements, key=len, reverse=True):
-        text = text.replace(old, replacements[old])
-    return text
+    """Replace every key, ignoring case, longest first in a single pass.
+
+    Longest first, so `<serial>-lugs-up` wins over `<serial>`; one pass, so a
+    placeholder is never itself rewritten.
+    """
+    if not replacements:
+        return text
+    lookup = {old.lower(): new for old, new in replacements.items()}
+    pattern = re.compile(
+        "|".join(re.escape(old) for old in sorted(replacements, key=len, reverse=True)),
+        re.IGNORECASE,
+    )
+    return pattern.sub(lambda match: lookup[match.group(0).lower()], text)
 
 
 def main() -> int:

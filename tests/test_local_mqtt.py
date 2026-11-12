@@ -120,7 +120,7 @@ def test_publish_when_disconnected():
     asyncio.run(main())
 
 
-def test_disconnect_fails_pending_publishes():
+def test_disconnect_makes_pending_publishes_outcome_unknown():
     async def main():
         client, _, states = make()
         client._set_connected(True)
@@ -128,7 +128,7 @@ def test_disconnect_fails_pending_publishes():
         task = asyncio.create_task(client.publish("t/set", "OPEN"))
         await asyncio.sleep(0)
         client._handle_disconnect(client._client, None, None, 7, None)
-        with pytest.raises(rest.CannotConnect):
+        with pytest.raises(rest.OutcomeUnknown):
             await task
         assert states == [True, False]
         assert client._disconnected.is_set()
@@ -156,5 +156,76 @@ def test_messages_are_forwarded():
         msg = SimpleNamespace(topic="ebus/5/x/$state", payload=b"ready", retain=True)
         client._handle_message(client._client, None, msg)
         assert messages == [("ebus/5/x/$state", b"ready", True)]
+
+    asyncio.run(main())
+
+
+def test_reconnect_does_not_resend_unacknowledged_commands():
+    """paho resends queued QoS 1 publishes after CONNACK; ours must not be."""
+
+    async def main():
+        client, _, _ = make()
+        paho_client = client._client
+        paho_client._out_messages[5] = SimpleNamespace(mid=5)
+        paho_client.subscribe = lambda topics: (MQTTErrorCode.MQTT_ERR_SUCCESS, 1)
+        client._connack = asyncio.get_running_loop().create_future()
+        client._handle_connect(paho_client, None, None, 0, None)
+        await client._connack
+        assert len(paho_client._out_messages) == 0
+
+    asyncio.run(main())
+
+
+def test_publish_timeout_drops_the_queued_message():
+    async def main():
+        client, _, _ = make()
+        client._connected = True
+        dropped = []
+        client._client.publish = lambda *a, **k: FakeInfo(3)
+        client._client.drop_out_messages = lambda: dropped.append(True) or []
+        with pytest.raises(rest.OutcomeUnknown):
+            await client.publish("t/set", "OPEN", timeout=0.01)
+        assert dropped
+
+    asyncio.run(main())
+
+
+def test_connack_after_stop_is_not_reported():
+    async def main():
+        client, _, states = make()
+        disconnects = []
+        client._client.disconnect = lambda: disconnects.append(True)
+        await client.stop()
+        client._connack = asyncio.get_running_loop().create_future()
+        client._handle_connect(client._client, None, None, 0, None)
+        assert states == []
+        assert not client.connected
+        assert len(disconnects) == 2  # once by stop, once for the late CONNACK
+
+    asyncio.run(main())
+
+
+def test_stop_closes_a_half_open_connection():
+    async def main():
+        client, _, _ = make()
+        disconnects = []
+        client._client.disconnect = lambda: disconnects.append(True)
+        assert not client._client.is_connected()
+        await client.stop()
+        assert disconnects
+
+    asyncio.run(main())
+
+
+def test_subscribe_failure_is_not_a_connection():
+    async def main():
+        client, _, states = make()
+        client._client.subscribe = lambda topics: (MQTTErrorCode.MQTT_ERR_NO_CONN, None)
+        client._client.disconnect = lambda: None
+        client._connack = asyncio.get_running_loop().create_future()
+        client._handle_connect(client._client, None, None, 0, None)
+        with pytest.raises(rest.CannotConnect):
+            await client._connack
+        assert states == []
 
     asyncio.run(main())

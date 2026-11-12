@@ -51,6 +51,7 @@ class FakePanel:
         self.rotate_status = 200
         self.rate_limited = False
         self.requests: list[tuple[str, str, dict[str, Any] | None]] = []
+        self.auth_headers: list[str | None] = []
         self.app = web.Application(middlewares=[self.record])
         r = self.app.router
         r.add_get("/api/v2/certificate/ca", self.ca)
@@ -66,6 +67,7 @@ class FakePanel:
     async def record(self, request: web.Request, handler: Callable[..., Awaitable[Any]]) -> Any:
         body = await request.json() if request.can_read_body else None
         self.requests.append((request.method, request.path, body))
+        self.auth_headers.append(request.headers.get("Authorization"))
         if self.rate_limited:
             return web.json_response(
                 {"detail": "slow down"}, status=429, headers={"Retry-After": "42"}
@@ -154,6 +156,23 @@ def test_fetch_ca_then_pinned_calls():
     assert schema.schema_hash == "sha256:0123456789abcdef"
     assert schema.homie_version == 5
     assert "circuit" in schema.device_classes
+
+
+def test_ca_fetch_never_carries_the_token():
+    async def scenario(panel, make_api):
+        await make_api(access_token=TOKEN).fetch_ca()
+        return panel.auth_headers
+
+    assert run(scenario) == [None]
+
+
+def test_delete_client_rejects_a_slash():
+    async def scenario(panel, make_api):
+        with pytest.raises(ValueError):
+            await make_api(ca_pem=CA, access_token=TOKEN).delete_client("../passphrase")
+        return panel.requests
+
+    assert run(scenario) == []
 
 
 def test_nothing_but_the_ca_goes_out_unpinned():

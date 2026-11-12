@@ -115,6 +115,7 @@ class LocalMqtt:
         CannotConnect. Call `stop` afterwards either way.
         """
         self._loop = asyncio.get_running_loop()
+        self._stopping = False
         await self._connect()
 
     async def stop(self) -> None:
@@ -123,8 +124,10 @@ class LocalMqtt:
             self._supervisor.cancel()
             await asyncio.gather(self._supervisor, return_exceptions=True)
             self._supervisor = None
-        if self._client.is_connected():
-            self._client.disconnect()
+        # Not only when connected: a stop during the handshake must still close
+        # the socket, or a late CONNACK would report a connection after stop.
+        self._client.disconnect()
+        self._client.drop_out_messages()
         await self._stop_misc()
         self._set_connected(False)
         self._fail_pending(CannotConnect("connection closed"))
@@ -141,6 +144,8 @@ class LocalMqtt:
                 return
             except CannotConnect as exc:
                 log.debug("broker connect failed: %s", exc)
+            except Exception:
+                log.exception("unexpected error connecting to the panel broker")
             else:
                 backoff = BACKOFF_MIN
                 await self._disconnected.wait()
@@ -167,6 +172,10 @@ class LocalMqtt:
         except TimeoutError:
             self._client.disconnect()
             raise CannotConnect("no CONNACK from broker") from None
+        except BaseException:
+            # Cancelled (stop) or refused: never leave a half-open socket.
+            self._client.disconnect()
+            raise
 
     async def _misc_loop(self) -> None:
         while True:
@@ -188,8 +197,11 @@ class LocalMqtt:
         """Publish and wait for the broker's acknowledgement.
 
         Raises CannotConnect when not connected, and OutcomeUnknown when the
-        message was sent but not acknowledged in time: the panel may still
-        act on it, so the caller must not assume it failed.
+        message was sent but not acknowledged, by timeout or a lost
+        connection: the panel may still act on it, so the caller must not
+        assume it failed. An unacknowledged message is never resent after a
+        reconnect; a stale command (a relay opened a minute late) is worse
+        than a lost one.
         """
         if not self._connected:
             raise CannotConnect("not connected to the panel broker")
@@ -203,6 +215,8 @@ class LocalMqtt:
         try:
             await asyncio.wait_for(future, timeout)
         except TimeoutError:
+            # Remove it from paho's queue so a reconnect cannot resend it.
+            self._client.drop_out_messages()
             raise OutcomeUnknown("no acknowledgement from the panel broker") from None
         finally:
             self._pending.pop(info.mid, None)
@@ -218,6 +232,13 @@ class LocalMqtt:
     def _handle_connect(
         self, client: paho.Client, _userdata: Any, _flags: Any, reason: Any, _props: Any
     ) -> None:
+        # paho resends unacknowledged QoS 1 publishes once this returns; their
+        # callers already got OutcomeUnknown, so drop them.
+        client.drop_out_messages()
+        if self._stopping:
+            # A CONNACK that raced stop(): close instead of reporting it.
+            client.disconnect()
+            return
         code = int(getattr(reason, "value", reason))
         if code != 0:
             error: Exception = (
@@ -229,7 +250,10 @@ class LocalMqtt:
             return
         result, _mid = client.subscribe([(topic, 1) for topic in self._subscriptions])
         if result is not MQTTErrorCode.MQTT_ERR_SUCCESS:
-            log.debug("subscribe failed: %s", result.name)
+            log.warning("subscribing to the panel broker failed (%s)", result.name)
+            client.disconnect()
+            self._resolve_connack(CannotConnect(f"subscribe failed: {result.name}"))
+            return
         self._set_connected(True)
         self._resolve_connack(None)
 
@@ -239,7 +263,7 @@ class LocalMqtt:
         log.debug("broker disconnected (%s)", getattr(reason, "value", reason))
         self._set_connected(False)
         self._resolve_connack(CannotConnect("broker closed the connection"))
-        self._fail_pending(CannotConnect("connection lost before acknowledgement"))
+        self._fail_pending(OutcomeUnknown("connection lost before acknowledgement"))
         self._disconnected.set()
 
     def _handle_message(self, _client: paho.Client, _userdata: Any, msg: paho.MQTTMessage) -> None:
@@ -277,23 +301,33 @@ class LocalMqtt:
     # paho calls these from whichever thread touches the socket, which during
     # `connect` is the executor, so each one hops to the loop.
 
+    def _on_loop(self, func: Callable[..., Any], *args: Any) -> None:
+        loop = self._require_loop()
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            func(*args)
+        else:
+            loop.call_soon_threadsafe(func, *args)
+
     def _socket_open(self, client: paho.Client, _userdata: Any, sock: Any) -> None:
-        self._require_loop().call_soon_threadsafe(
-            self._require_loop().add_reader, sock, client.loop_read, MAX_PACKETS_PER_READ
-        )
+        self._on_loop(self._require_loop().add_reader, sock, client.loop_read, MAX_PACKETS_PER_READ)
 
     def _socket_close(self, _client: paho.Client, _userdata: Any, sock: Any) -> None:
+        self._on_loop(self._remove_socket, sock)
+
+    def _remove_socket(self, sock: Any) -> None:
         loop = self._require_loop()
-        loop.call_soon_threadsafe(loop.remove_reader, sock)
-        loop.call_soon_threadsafe(loop.remove_writer, sock)
+        loop.remove_reader(sock)
+        loop.remove_writer(sock)
 
     def _socket_register_write(self, client: paho.Client, _userdata: Any, sock: Any) -> None:
-        loop = self._require_loop()
-        loop.call_soon_threadsafe(loop.add_writer, sock, client.loop_write)
+        self._on_loop(self._require_loop().add_writer, sock, client.loop_write)
 
     def _socket_unregister_write(self, _client: paho.Client, _userdata: Any, sock: Any) -> None:
-        loop = self._require_loop()
-        loop.call_soon_threadsafe(loop.remove_writer, sock)
+        self._on_loop(self._require_loop().remove_writer, sock)
 
     def _require_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is None:

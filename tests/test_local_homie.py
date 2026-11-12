@@ -256,3 +256,67 @@ def test_cleared_description_removes_device():
     tree = loaded_tree()
     tree.apply(f"ebus/5/{MID}/$description", b"")
     assert MID not in tree.descriptions
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"type": "energy.ebus.device.circuit", "nodes": [1]},
+        {"type": "energy.ebus.device.circuit", "nodes": {"x": {"properties": [1]}}},
+        {"type": "energy.ebus.device.circuit", "children": 3},
+        {"type": "energy.ebus.device.circuit", "children": "abc"},
+        {"type": "energy.ebus.device.circuit", "children": [1, 2]},
+    ],
+)
+def test_malformed_description_is_value_error(doc):
+    with pytest.raises(ValueError):
+        homie.parse_description("d", doc)
+
+
+def test_non_string_description_fields_are_dropped():
+    doc = {
+        "type": 7,
+        "name": ["x"],
+        "parent": {},
+        "nodes": {"x": {"properties": {"y": {"datatype": "enum", "format": 5, "unit": 1}}}},
+    }
+    desc = homie.parse_description("d", doc)
+    assert (desc.type, desc.name, desc.parent) == ("", None, None)
+    assert desc.properties["x/y"].enum_values == ()
+    assert desc.properties["x/y"].unit is None
+
+
+@pytest.mark.parametrize("datatype", [DataType.INTEGER, DataType.FLOAT, DataType.BOOLEAN])
+def test_nul_is_not_a_number(datatype):
+    assert homie.decode_value(prop(datatype), b"\x00") is None
+
+
+def test_empty_string_is_sent_as_nul_not_cleared():
+    assert homie.encode_value(prop(DataType.STRING), "") == "\x00"
+
+
+@pytest.mark.parametrize(
+    ("datatype", "value"),
+    [
+        (DataType.STRING, None),
+        (DataType.FLOAT, None),
+        (DataType.FLOAT, "x"),
+        (DataType.INTEGER, []),
+    ],
+)
+def test_encode_bad_values_are_value_error(datatype, value):
+    with pytest.raises(ValueError):
+        homie.encode_value(prop(datatype), value)
+
+
+def test_empty_state_clears_it():
+    tree = loaded_tree()
+    tree.apply(f"ebus/5/{CIRCUIT}/$state", b"")
+    assert CIRCUIT not in tree.states
+
+
+def test_cleared_description_drops_values():
+    tree = loaded_tree()
+    tree.apply(f"ebus/5/{CIRCUIT}/meter/active-power", b"5")
+    tree.apply(f"ebus/5/{CIRCUIT}/$description", b"")
+    assert tree.values(CIRCUIT) == {}

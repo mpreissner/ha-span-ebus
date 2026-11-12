@@ -176,36 +176,50 @@ def parse_description(device_id: str, payload: str | bytes | dict[str, Any]) -> 
     if not isinstance(doc, dict):
         raise ValueError("$description is not an object")
 
+    nodes = doc.get("nodes") or {}
+    if not isinstance(nodes, dict):
+        raise ValueError("$description nodes is not an object")
     properties: dict[str, PropertyDef] = {}
-    for capability, node in (doc.get("nodes") or {}).items():
+    for capability, node in nodes.items():
         if not isinstance(node, dict):
             continue
-        for prop_id, prop in (node.get("properties") or {}).items():
+        props = node.get("properties") or {}
+        if not isinstance(props, dict):
+            raise ValueError("$description properties is not an object")
+        for prop_id, prop in props.items():
             if not isinstance(prop, dict):
                 continue
             definition = PropertyDef(
                 capability=capability,
                 property_id=prop_id,
-                name=str(prop.get("name") or prop_id),
+                name=_opt_text(prop.get("name")) or prop_id,
                 datatype=_datatype(prop.get("datatype"), capability, prop_id),
-                unit=prop.get("unit") or None,
-                settable=bool(prop.get("settable", False)),
-                retained=bool(prop.get("retained", True)),
-                format=prop.get("format"),
+                unit=_opt_text(prop.get("unit")),
+                settable=prop.get("settable") is True,
+                retained=prop.get("retained") is not False,
+                format=_opt_text(prop.get("format")),
             )
             properties[definition.key] = definition
 
+    children = doc.get("children") or []
+    if not isinstance(children, list) or not all(isinstance(c, str) for c in children):
+        raise ValueError("$description children is not a list of ids")
     version = doc.get("version")
     return DeviceDescription(
         device_id=device_id,
-        type=str(doc.get("type") or ""),
-        name=doc.get("name"),
-        version=version if isinstance(version, int) else None,
-        children=tuple(str(c) for c in doc.get("children") or ()),
-        parent=doc.get("parent"),
-        root=doc.get("root"),
+        type=_opt_text(doc.get("type")) or "",
+        name=_opt_text(doc.get("name")),
+        version=version if isinstance(version, int) and not isinstance(version, bool) else None,
+        children=tuple(children),
+        parent=_opt_text(doc.get("parent")),
+        root=_opt_text(doc.get("root")),
         properties=properties,
     )
+
+
+def _opt_text(value: Any) -> str | None:
+    """A non-empty string, or None for anything else."""
+    return value if isinstance(value, str) and value else None
 
 
 def _datatype(raw: Any, capability: str, prop_id: str) -> DataType:
@@ -227,7 +241,10 @@ def decode_value(definition: PropertyDef | None, payload: bytes) -> Any:
     if payload == b"":
         return None
     if payload == b"\x00":
-        return ""
+        # An empty string; meaningless for numbers, booleans and the like.
+        if definition is None or definition.datatype is DataType.STRING:
+            return ""
+        return None
     text = payload.decode("utf-8", errors="replace")
     if definition is None:
         return text
@@ -252,7 +269,18 @@ def decode_value(definition: PropertyDef | None, payload: bytes) -> Any:
 
 def encode_value(definition: PropertyDef, value: Any) -> str:
     """Format a value for a `/set` publish. Raises ValueError if it does not fit."""
+    if value is None:
+        raise ValueError(f"{definition.key} needs a value")
     datatype = definition.datatype
+    try:
+        text = _encode(definition, datatype, value)
+    except (TypeError, OverflowError):
+        raise ValueError(f"{definition.key} cannot take {type(value).__name__}") from None
+    # An empty payload would clear the property; Homie sends "" as one NUL.
+    return text or "\x00"
+
+
+def _encode(definition: PropertyDef, datatype: DataType, value: Any) -> str:
     if datatype is DataType.BOOLEAN:
         if not isinstance(value, bool):
             raise ValueError(f"{definition.key} expects a boolean")
@@ -292,10 +320,17 @@ class DeviceTree:
         if parsed is None:
             return None
         if parsed.kind is TopicKind.STATE:
-            self.states[parsed.device_id] = DeviceState.parse(payload.decode("utf-8", "replace"))
+            if payload == b"":
+                self.states.pop(parsed.device_id, None)
+            else:
+                self.states[parsed.device_id] = DeviceState.parse(
+                    payload.decode("utf-8", "replace")
+                )
         elif parsed.kind is TopicKind.DESCRIPTION:
             if payload == b"":
+                # The device is gone; its values go with it.
                 self.descriptions.pop(parsed.device_id, None)
+                self._raw.pop(parsed.device_id, None)
             else:
                 try:
                     self.descriptions[parsed.device_id] = parse_description(
