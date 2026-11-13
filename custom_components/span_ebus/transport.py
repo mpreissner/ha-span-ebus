@@ -19,6 +19,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,16 @@ from .const import (
     LOCAL_REAUTH,
 )
 from .span_client import cloud_auth
+from .span_client.backend import SITE_NODE
+from .span_client.fallback import IMPORTED_ENERGY, RegisterContinuation, resolve
+from .span_client.link import (
+    HistoryTarget,
+    PanelLink,
+    feeds_from_kinds,
+    link_from_options,
+    link_to_options,
+    match_circuits,
+)
 from .span_client.local import homie, model
 from .span_client.local.debounce import Coalescer, clamp_interval
 from .span_client.local.health import (
@@ -121,6 +132,14 @@ class SpanTransportManager:
         )
         self._cloud: list[SpanCloudCoordinator] | None = None
         self._cloud_running = False
+        # Which cloud circuit and feed stand for which local one. Read once
+        # here; refreshed in place, and in the options, on each cloud start.
+        self.link: PanelLink | None = link_from_options(entry.options)
+        self._cloud_unsubs: list[CALLBACK_TYPE] = []
+        self._link_refreshed = False
+        # One per upstream lugs device: its imported-energy register carried
+        # across a spell on the cloud.
+        self._continuations: dict[str, RegisterContinuation] = {}
         self._cloud_retry_at = 0.0
         self._cloud_failures = 0
         self._reauth_logged = False
@@ -129,7 +148,8 @@ class SpanTransportManager:
         self._cancel_tick: CALLBACK_TYPE | None = None
         self._listeners: list[CALLBACK_TYPE] = []
         self.shown = Transport.OFFLINE
-        # Unique ids are built on this; PR 5 may point it at a cloud key.
+        # Unique ids are built on this. It stays the serial when a cloud link is
+        # added, so linking never renames an entity.
         self.panel_key: str = self.serial
         self.snapshot: model.Snapshot = model.EMPTY
         self._model_listeners: list[ModelListener] = []
@@ -281,6 +301,7 @@ class SpanTransportManager:
                 for coordinator in coordinators:
                     self._runtime.add_coordinator(coordinator)
                 self._cloud = coordinators
+            self._listen_to_cloud()
             for coordinator in self._cloud:
                 if self._stopped:
                     return
@@ -308,11 +329,103 @@ class SpanTransportManager:
         if not self._cloud_running or self._cloud is None:
             return
         self._cloud_running = False
+        self._unlisten_to_cloud()
         for coordinator in self._cloud:
             try:
                 await coordinator.async_stop()
             except Exception:  # one panel's failure must not keep the rest streaming
                 _LOGGER.exception("could not stop a SPAN cloud stream")
+
+    @callback
+    def _listen_to_cloud(self) -> None:
+        """Wake the local entities on each cloud update while the cloud is shown.
+
+        Once per start: a failed start that is retried does not stack listeners.
+        """
+        if self._cloud_unsubs or not self._cloud:
+            return
+        self._link_refreshed = False
+        self._cloud_unsubs = [c.async_add_listener(self._on_cloud_update) for c in self._cloud]
+
+    @callback
+    def _unlisten_to_cloud(self) -> None:
+        unsubs, self._cloud_unsubs = self._cloud_unsubs, []
+        for unsub in unsubs:
+            unsub()
+
+    @callback
+    def _on_cloud_update(self) -> None:
+        if self._stopped:
+            return
+        if not self._link_refreshed and self.link is not None:
+            self._async_refresh_link()
+        if self.shown is not Transport.CLOUD:
+            return
+        # A fresh snapshot for the local entities, which read the fallback,
+        # and a nudge for those that read only the transport (derived rows).
+        self._coalescer.mark()
+        for listener in list(self._listeners):
+            listener()
+
+    # --- the link -----------------------------------------------------------
+
+    def _panel_coordinator(self) -> SpanCloudCoordinator | None:
+        """The coordinator streaming the linked panel: by key, else the only one."""
+        cloud = self._cloud or []
+        link = self.link
+        if link is not None:
+            for coordinator in cloud:
+                if coordinator.cloud_key == link.cloud_key:
+                    return coordinator
+        return cloud[0] if cloud else None
+
+    @callback
+    def _async_refresh_link(self) -> None:
+        """Re-match circuits and feeds against what the cloud now says.
+
+        Runs once per cloud start, as soon as the panel's schema is in. The
+        options are written only when something changed, and nothing reloads:
+        the new link is used from here on.
+        """
+        link = self.link
+        panel = self._panel_coordinator()
+        if link is None or panel is None or panel.schema is None:
+            return
+        circuits, feeders = panel.traits()
+        if not circuits or not self.snapshot.circuits:
+            return  # either side not read yet: try again on the next update
+        self._link_refreshed = True
+        matched, unmatched_local, unmatched_cloud = match_circuits(
+            self.snapshot.circuits, circuits.values()
+        )
+        history = link.site_history
+        for coordinator in self._cloud or ():
+            target = coordinator.site_history_target()
+            if target is not None:
+                history = HistoryTarget(target[0], target[1], SITE_NODE)
+                break
+        count = len(panel.site.panels) if panel.site is not None else 0
+        fresh = replace(
+            link,
+            circuits=matched,
+            feeds=feeds_from_kinds(feeders),
+            unmatched_local=unmatched_local,
+            unmatched_cloud=unmatched_cloud,
+            site_history=history,
+            site_panel_count=count or link.site_panel_count,
+        )
+        if fresh == link:
+            return
+        self.link = fresh
+        # Counts only: the ids are private.
+        _LOGGER.info(
+            "cloud fallback matched %d of %d local circuits",
+            len(matched),
+            len(self.snapshot.circuits),
+        )
+        self._hass.config_entries.async_update_entry(
+            self._entry, options=link_to_options(self._entry.options, fresh)
+        )
 
     # --- the Transport sensor ---------------------------------------------
 
@@ -335,6 +448,9 @@ class SpanTransportManager:
         if shown is self.shown:
             return
         self.shown = shown
+        if shown is Transport.CLOUD:
+            for continuation in self._continuations.values():
+                continuation.cloud_started()
         self._coalescer.mark()
         for listener in list(self._listeners):
             listener()
@@ -352,11 +468,90 @@ class SpanTransportManager:
 
         return remove
 
-    def fallback_value(self, scope: model.Scope, device_id: str, key: str) -> Any:
-        """The cloud's reading for a local entity while on the fallback. PR 5 fills
-        this in from the link map; until then the cloud never supplies one.
+    def _fallback_ready(self) -> bool:
+        return (
+            self.link is not None
+            and self.switch.mode is Mode.LOCAL_FIRST
+            and self._cloud_running
+            and bool(self._cloud)
+            and self.shown is Transport.CLOUD
+        )
+
+    def _cloud_data(self) -> dict[str, Any]:
+        """The readings the fallback maps from: every coordinator's site values,
+        under the linked panel's own (a shared site's flows may stream apart).
         """
-        return model.NO_FALLBACK
+        data: dict[str, Any] = {}
+        for coordinator in self._cloud or ():
+            data.update(
+                (key, reading)
+                for key, reading in (coordinator.data or {}).items()
+                if key.startswith(f"{SITE_NODE}/")
+            )
+        panel = self._panel_coordinator()
+        if panel is not None:
+            data.update(panel.data or {})
+        return data
+
+    def _cloud_energy(self, key: str) -> float | None:
+        panel = self._panel_coordinator()
+        ordered = [panel] if panel is not None else []
+        ordered += [c for c in self._cloud or () if c is not panel]
+        for coordinator in ordered:
+            total = coordinator.energy_total(key)
+            if total is not None:
+                return total
+        return None
+
+    def fallback_value(self, scope: model.Scope, device_id: str, key: str) -> Any:
+        """The cloud's reading for a local entity while on the fallback, in the
+        local row's frame. NO_FALLBACK unless the cloud is live and shown and the
+        row maps; None where it maps but the cloud has no reading yet.
+        """
+        link = self.link
+        if (
+            link is None
+            or not self._fallback_ready()
+            or not any(c.stream_is_live for c in self._cloud or ())
+        ):
+            return model.NO_FALLBACK
+        circuit = self.snapshot.circuits.get(device_id) if scope is model.Scope.CIRCUIT else None
+        return resolve(
+            link,
+            self._cloud_data(),
+            scope,
+            device_id,
+            key,
+            producer=circuit is not None and circuit.role in model.PRODUCERS,
+            energy=self._cloud_energy,
+        )
+
+    def continue_energy(
+        self, scope: model.Scope, device_id: str, source: str, local_value: Any
+    ) -> Any:
+        """The panel's imported-energy register, carried across a spell on the cloud.
+
+        Every other energy row, and this one without a link, on a shared site or
+        with the fallback off, shows its local value as it is.
+        """
+        link = self.link
+        if (
+            scope is not model.Scope.UPSTREAM
+            or source != IMPORTED_ENERGY
+            or link is None
+            or not link.single_panel_site
+            or self.switch.mode is not Mode.LOCAL_FIRST
+        ):
+            return local_value
+        continuation = self._continuations.setdefault(device_id, RegisterContinuation())
+        if self.shown is Transport.LOCAL:
+            return continuation.local(
+                float(local_value) if isinstance(local_value, int | float) else None
+            )
+        if self.shown is Transport.CLOUD and self._cloud_running:
+            shown = continuation.cloud(self._cloud_energy("site/grid"))
+            return local_value if shown is None else shown
+        return local_value
 
     def _call_soon(self, action: Callable[[], None]) -> Callable[[], None]:
         handle = self._hass.loop.call_soon(action)

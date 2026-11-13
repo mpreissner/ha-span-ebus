@@ -100,6 +100,8 @@ class Role(StrEnum):
 
 
 _PRODUCERS = frozenset({Role.SOLAR, Role.GENERATOR})
+# Circuits whose local power reads + while producing.
+PRODUCERS = _PRODUCERS
 
 
 # --- facts ----------------------------------------------------------------------------
@@ -949,7 +951,9 @@ def presence(
         return Presence.UNAVAILABLE
     up = shown is Transport.LOCAL and device_state in UP_STATES
     if kind is ValueKind.CONTROL:
-        return Presence.VALUE if up and has_value else Presence.UNAVAILABLE
+        # On the cloud a control shows the cloud's state, read-only.
+        on_cloud = shown is Transport.CLOUD and fallback_has_value
+        return Presence.VALUE if (up and has_value) or on_cloud else Presence.UNAVAILABLE
     if kind is ValueKind.STATIC:
         if up or has_value:
             return Presence.VALUE

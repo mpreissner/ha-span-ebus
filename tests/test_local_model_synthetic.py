@@ -308,6 +308,15 @@ def test_presence_on_the_cloud_uses_the_fallback_reading():
     assert model.presence(_M, fallback_has_value=False, **kw) is _U
 
 
+def test_a_control_on_the_cloud_shows_the_cloud_state():
+    kw = {"shown": _C, "device_state": None, "has_value": False}
+    assert model.presence(_K, fallback_has_value=True, **kw) is _V
+    assert model.presence(_K, fallback_has_value=False, **kw) is _X
+    # Offline never shows one, whatever the cloud last said.
+    assert model.presence(_K, shown=_O, device_state=None, has_value=False,
+                          fallback_has_value=True) is _X  # fmt: skip
+
+
 # --- the debounce window ---------------------------------------------------------------
 
 

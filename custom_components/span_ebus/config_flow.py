@@ -34,6 +34,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.util import dt as dt_util
 from zeroconf import IPVersion, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo
 
@@ -69,7 +70,17 @@ from .span_client.backend import (
     panel_circuits,
     panel_labels,
     panel_plan,
+    panel_traits,
     primary_panel_for,
+)
+from .span_client.link import (
+    LINKED_MINOR_VERSION,
+    UNLINKED_MINOR_VERSION,
+    PanelLink,
+    feeds_from_kinds,
+    link_to_options,
+    match_circuits,
+    options_without_link,
 )
 from .span_client.local import discovery, onboard, tls
 from .span_client.local.health import Mode
@@ -204,6 +215,20 @@ def _panel_options(
         CONF_DECLINED: [key for key in labels if key not in ticked],
         CONF_FEEDS: answers,
     }
+
+
+def _new_link(cloud_key: str, serial: str, site: SiteInfo) -> PanelLink:
+    """A fresh link record; its circuits and feeds are filled in from traits."""
+    return PanelLink(
+        cloud_key=cloud_key,
+        local_serial=serial,
+        site_panel_count=len(site.panels),
+        linked_at=dt_util.utcnow().isoformat(),
+    )
+
+
+def _remove_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
 
 
 def _sites_from_token_store(token_path: Path) -> list[SiteInfo]:
@@ -356,8 +381,9 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
     @classmethod
     @callback
     def async_supports_options_flow(cls, config_entry: ConfigEntry) -> bool:
-        """Cloud accounts choose their panels; linked panels choose their transport."""
-        return _is_cloud_account(config_entry.data) or _is_linked(config_entry.data)
+        """Cloud accounts choose their panels; local panels add, tune or drop
+        their cloud fallback."""
+        return _is_cloud_account(config_entry.data) or CONF_LOCAL_SERIAL in config_entry.data
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(step_id="user", menu_options=["local", "cloud"])
@@ -685,8 +711,17 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         found = find_panel(sites, local[CONF_LOCAL_SERIAL])
         if found is None:
             return self.async_abort(reason="panel_not_on_account")
-        data = {**local, **cloud, CONF_SERIAL: local[CONF_LOCAL_SERIAL]}
-        options = _panel_options(panel_labels(sites), [found[1].key], {})
+        site, panel = found
+        serial = local[CONF_LOCAL_SERIAL]
+        data = {**local, **cloud, CONF_SERIAL: serial}
+        # Circuits are matched on the first cloud start, once the local tree
+        # is in; until then the link carries only who is who.
+        options = link_to_options(
+            _panel_options(panel_labels(sites), [panel.key], {}),
+            _new_link(panel.key, serial, site),
+        )
+        # Read by async_create_entry: a linked entry is made at 1.2.
+        self.MINOR_VERSION = LINKED_MINOR_VERSION
         return self._create(data, options)
 
     # --- cloud ------------------------------------------------------------------
@@ -929,6 +964,8 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
     def __init__(self) -> None:
         super().__init__()
         self._chosen: list[str] = []
+        # "Add cloud fallback": what the sign-in found, kept for the confirm step.
+        self._add: dict[str, Any] = {}
 
     def _token_path(self) -> Path:
         return Path(self.hass.config.path(TOKEN_DIR)) / f"{self.config_entry.entry_id}.json"
@@ -941,7 +978,9 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if _is_linked(self.config_entry.data):
-            return await self.async_step_transport()
+            return await self.async_step_linked()
+        if CONF_LOCAL_SERIAL in self.config_entry.data:
+            return await self.async_step_cloud_add()
         if not _is_cloud_account(self.config_entry.data):
             return self.async_abort(reason="not_cloud_account")
         errors: dict[str, str] = {}
@@ -997,6 +1036,165 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
             }
         )
         return self.async_show_form(step_id="transport", data_schema=schema)
+
+    async def async_step_linked(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="linked", menu_options=["transport", "cloud_remove"])
+
+    # --- a local panel's cloud fallback -------------------------------------
+
+    def _local_circuits(self) -> dict[str, Any]:
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        transport = runtime.transport if runtime is not None else None
+        return dict(transport.snapshot.circuits) if transport is not None else {}
+
+    async def async_step_cloud_add(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Sign in to the SPAN account this panel is on, to use it as a fallback."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            serial = self.config_entry.data[CONF_LOCAL_SERIAL]
+            try:
+                tokens = await self.hass.async_add_executor_job(
+                    cloud_auth.authenticate, user_input[CONF_EMAIL], user_input[CONF_PASSWORD]
+                )
+            except cloud_auth.CloudAuthError:
+                errors["base"] = "invalid_auth"
+            except Exception:
+                _LOGGER.exception("unexpected error authenticating to SPAN cloud")
+                errors["base"] = "cannot_connect"
+            else:
+                # The password is discarded here; only the tokens are kept.
+                result = await self._cloud_add_found(user_input[CONF_EMAIL], tokens, serial)
+                if isinstance(result, str):
+                    errors["base"] = result
+                else:
+                    return result
+        return self.async_show_form(
+            step_id="cloud_add",
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_USER_SCHEMA,
+                {CONF_EMAIL: user_input[CONF_EMAIL]} if user_input else {},
+            ),
+            errors=errors,
+        )
+
+    async def _cloud_add_found(
+        self, email: str, tokens: cloud_auth.CloudTokens, serial: str
+    ) -> ConfigFlowResult | str:
+        """Find the panel on the account and match its circuits; a form error key
+        if the account can't be read.
+        """
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            if _is_cloud_account(entry.data) and _account_has_panel(entry, serial):
+                return self.async_abort(reason="panel_on_cloud_entry")
+        try:
+            sites = await self.hass.async_add_executor_job(discover_sites, tokens.access_token)
+        except Exception as err:  # noqa: BLE001 — shown as a form error
+            _LOGGER.debug("could not list SPAN panels: %s", type(err).__name__)
+            return "cannot_connect"
+        found = find_panel(sites, serial)
+        if found is None:
+            return self.async_abort(reason="panel_not_on_account")
+        site, panel = found
+        user_id = _user_id_from_access_token(tokens.access_token)
+        device_uuid = _new_device_uuid()
+        link = _new_link(panel.key, serial, site)
+        try:
+            circuits, feeders = await self.hass.async_add_executor_job(
+                lambda: panel_traits(
+                    tokens.access_token,
+                    site,
+                    panel,
+                    user_id=user_id,
+                    device_uuid=device_uuid,
+                    primary_panel=None,
+                )
+            )
+        except Exception as err:  # noqa: BLE001 — matched on the first cloud start instead
+            _LOGGER.debug("could not read the panel's circuits: %s", type(err).__name__)
+        else:
+            matched, unmatched_local, unmatched_cloud = match_circuits(
+                self._local_circuits(), circuits.values()
+            )
+            link = dataclasses.replace(
+                link,
+                circuits=matched,
+                feeds=feeds_from_kinds(feeders),
+                unmatched_local=unmatched_local,
+                unmatched_cloud=unmatched_cloud,
+            )
+        self._add = {
+            "data": {
+                CONF_EMAIL: email,
+                CONF_TOKENS: dataclasses.asdict(tokens),
+                CONF_USER_ID: user_id,
+                CONF_DEVICE_UUID: device_uuid,
+                CONF_SERIAL: serial,
+            },
+            "link": link,
+            "labels": panel_labels(sites),
+        }
+        return await self.async_step_cloud_add_confirm()
+
+    async def async_step_cloud_add_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        link: PanelLink = self._add["link"]
+        if user_input is None:
+            total = len(self._local_circuits())
+            return self.async_show_form(
+                step_id="cloud_add_confirm",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "matched": str(len(link.circuits)),
+                    "total": str(total),
+                    "unmatched": str(max(total - len(link.circuits), 0)),
+                },
+            )
+        entry = self.config_entry
+        data = {**entry.data, **self._add["data"]}
+        options = {
+            **link_to_options(entry.options, link),
+            **_panel_options(self._add["labels"], [link.cloud_key], {}),
+            CONF_TRANSPORT_MODE: Mode.LOCAL_FIRST.value,
+        }
+        self.hass.config_entries.async_update_entry(
+            entry, data=data, options=options, minor_version=LINKED_MINOR_VERSION
+        )
+        self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_create_entry(data=options)
+
+    async def async_step_cloud_remove(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Drop the account: the panel runs over its local API alone."""
+        if user_input is None:
+            return self.async_show_form(step_id="cloud_remove", data_schema=vol.Schema({}))
+        entry = self.config_entry
+        dropped = {
+            CONF_TOKENS,
+            CONF_EMAIL,
+            CONF_USER_ID,
+            CONF_DEVICE_UUID,
+            CONF_SERIAL,
+            CONF_PRIMARY_PANEL,
+        }
+        data = {key: value for key, value in entry.data.items() if key not in dropped}
+        options = {
+            key: value
+            for key, value in options_without_link(entry.options).items()
+            if key not in (CONF_PANELS, CONF_DECLINED, CONF_FEEDS)
+        }
+        options[CONF_TRANSPORT_MODE] = Mode.LOCAL_ONLY.value
+        # Unloading leaves the token file once the tokens are gone from the data.
+        token_path = self._token_path()
+        await self.hass.async_add_executor_job(_remove_file, token_path)
+        self.hass.config_entries.async_update_entry(
+            entry, data=data, options=options, minor_version=UNLINKED_MINOR_VERSION
+        )
+        self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_create_entry(data=options)
 
     async def async_step_confirm_remove(
         self, user_input: dict[str, Any] | None = None

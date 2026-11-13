@@ -1095,6 +1095,41 @@ def panel_circuits(
     The snapshot answers the subscribe directly, so this needs no stream. It asks
     for the channel the way a stream does, and a running stream shares it.
     """
+    return parse_trait_snapshot(
+        _panel_snapshot(
+            access_token, site, panel, user_id=user_id, device_uuid=device_uuid,
+            primary_panel=primary_panel,
+        )
+    )  # fmt: skip
+
+
+def panel_traits(
+    access_token: str,
+    site: SiteInfo,
+    panel: PanelInfo,
+    *,
+    user_id: str | None,
+    device_uuid: str,
+    primary_panel: str | None,
+) -> tuple[dict[int, CircuitInfo], dict[int, int]]:
+    """Blocking: as `panel_circuits`, with the feeder kinds of the same snapshot."""
+    snapshot = _panel_snapshot(
+        access_token, site, panel, user_id=user_id, device_uuid=device_uuid,
+        primary_panel=primary_panel,
+    )  # fmt: skip
+    return parse_trait_snapshot(snapshot), parse_feeder_kinds(snapshot)
+
+
+def _panel_snapshot(
+    access_token: str,
+    site: SiteInfo,
+    panel: PanelInfo,
+    *,
+    user_id: str | None,
+    device_uuid: str,
+    primary_panel: str | None,
+) -> bytes:
+    """Blocking: the trait snapshot of one panel, split from its site's if shared."""
     identity = stream_identity(
         site, device_uuid=device_uuid, serial=None, primary_panel=primary_panel
     )
@@ -1109,8 +1144,8 @@ def panel_circuits(
         snapshot = grpc.subscribe_and_get_traits(request)
     routes = site_routes(site, None)
     if routes is None:
-        return parse_trait_snapshot(snapshot)
-    return parse_trait_snapshot(split_snapshot(snapshot, routes, set()).get(panel.key, b""))
+        return snapshot
+    return split_snapshot(snapshot, routes, set()).get(panel.key, b"")
 
 
 def pin_panels(sites: list[SiteInfo], recorded: Iterable[str]) -> list[SiteInfo]:
@@ -1501,6 +1536,22 @@ class CloudBackend:
                 )
                 samples.extend(energy_samples(series, targets, self._energy_flows))
         return samples
+
+    def traits(self) -> tuple[dict[int, CircuitInfo], dict[int, int]]:
+        """The circuits and feeder kinds of the last trait snapshot.
+
+        Both are replaced whole on the backend's thread, so reading them from
+        another thread sees one snapshot's or the next's, never a mix of a dict.
+        """
+        return self._circuits, self._feeders
+
+    def site_history_target(self) -> tuple[str, int] | None:
+        """The resource and instance SPAN keeps the site's history under, once seen."""
+        for resource, instances in self._energy_targets.items():
+            for instance, node in instances.items():
+                if node == SITE_NODE:
+                    return resource, instance
+        return None
 
     def _requester_id(self, access_token: str) -> str:
         """Who a write says it is: this user's SPAN id.

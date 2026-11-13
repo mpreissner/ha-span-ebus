@@ -44,6 +44,7 @@ from .span_client.backend import (
     site_routes,
     stream_identity,
 )
+from .span_client.link import migration_ok
 from .span_client.local import model, onboard
 from .span_client.local.health import Mode
 from .transport import SpanTransportManager, fallback_issue_id, local_tree_store
@@ -148,6 +149,14 @@ def _transport_mode(entry: SpanConfigEntry) -> Mode:
         return Mode(entry.options.get(CONF_TRANSPORT_MODE, Mode.LOCAL_FIRST))
     except ValueError:
         return Mode.LOCAL_FIRST
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
+    """Minor 2 marks a linked entry and needs no reshaping; a newer major is refused."""
+    if not migration_ok(entry.version, entry.minor_version):
+        _LOGGER.error("entry from a newer major version; this release can't run it")
+        return False
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:

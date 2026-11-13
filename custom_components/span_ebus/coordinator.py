@@ -41,6 +41,7 @@ from .span_client.backend import (
     panel_identity,
     stream_identity,
 )
+from .span_client.cloud_traits import CircuitInfo
 from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
@@ -162,6 +163,10 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
             if site and site.lead.serial and site.lead.key != site.lead.serial:
                 self._board = site.lead
         self._serial = identity.serial
+        # The picker key of the panel this streams, as a link records it.
+        self.cloud_key: str | None = (
+            panel.key if panel is not None else site.lead.key if site is not None else None
+        )
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
         self._flush_scheduled = False
@@ -334,6 +339,14 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
             model=self.model if serial else None,
             serial_number=serial,
         )
+
+    def traits(self) -> tuple[dict[int, CircuitInfo], dict[int, int]]:
+        """The circuits and feeder kinds the backend last read from SPAN."""
+        return self._backend.traits()
+
+    def site_history_target(self) -> tuple[str, int] | None:
+        """Where SPAN keeps the site's metered history, once a frame has named it."""
+        return self._backend.site_history_target()
 
     def _linked_name(self) -> str | None:
         """A panel added locally is named by its entry, whichever transport is live."""

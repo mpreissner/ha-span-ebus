@@ -157,15 +157,42 @@
         "data": {
           "circuit": "Circuit"
         }
+      },
+      "linked": {
+        "title": "Cloud fallback",
+        "menu_options": {
+          "transport": "Connection",
+          "cloud_remove": "Remove cloud fallback"
+        }
+      },
+      "cloud_add": {
+        "title": "Add cloud fallback",
+        "description": "Optional. If the local connection fails, Home Assistant reads the panel through your SPAN account until it recovers. Controls stay local only. While the local connection works, Home Assistant only contacts your account to fill gaps in solar, battery and site energy after an outage.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "cloud_add_confirm": {
+        "title": "Add cloud fallback",
+        "description": "Found this panel on your SPAN account. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to add the fallback. No new entities are created."
+      },
+      "cloud_remove": {
+        "title": "Remove cloud fallback",
+        "description": "Home Assistant forgets your SPAN account for this panel and runs it over the local connection only. Entities and their history stay."
       }
     },
     "error": {
       "no_panels": "Choose at least one panel.",
-      "feed_cycle": "Panels can't feed each other. Check the answers for a loop."
+      "feed_cycle": "Panels can't feed each other. Check the answers for a loop.",
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Could not reach the SPAN cloud. Please try again."
     },
     "abort": {
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
-      "not_cloud_account": "Panels added locally without a SPAN account have no options yet."
+      "not_cloud_account": "Panels added locally without a SPAN account have no options yet.",
+      "panel_not_on_account": "This panel isn't on that SPAN account.",
+      "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first."
     }
   },
   "issues": {

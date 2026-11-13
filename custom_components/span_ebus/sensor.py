@@ -122,7 +122,9 @@ async def async_setup_entry(
         async_setup_local(entry, runtime.transport, async_add_entities, "sensor", _local_sensor)
         async_track_panel_device(hass, entry, runtime.transport)
         _setup_derived(entry, runtime.transport, async_add_entities)
-    # Cloud coordinators can arrive later, on a local panel's first failover.
+        # A local entry's cloud is its fallback: the local entities read it, and
+        # it creates none of its own.
+        return
     runtime.add_platform(lambda c: _register(c, async_add_entities))
 
 
@@ -522,10 +524,8 @@ class _SpanDerivedSensor(SensorEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(self._transport.async_add_model_listener(self._on_snapshot))
-        # TODO(5a): while CLOUD no local snapshot arrives, so nothing wakes these
-        # rows to read the fallback. 5a must call `_on_transport` (or `_refresh`
-        # with the current snapshot) on each cloud coordinator update, e.g. by
-        # notifying the transport manager's listeners, which this subscribes to.
+        # While on the cloud no local snapshot arrives; the transport notifies
+        # its listeners on each cloud update instead.
         self.async_on_remove(self._transport.async_add_listener(self._on_transport))
         self._refresh(self._transport.snapshot)
 
