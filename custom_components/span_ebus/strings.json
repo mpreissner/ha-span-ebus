@@ -96,7 +96,7 @@
       },
       "cloud_pick_panel": {
         "title": "Which panel is this?",
-        "description": "Your SPAN account lists no panel with this panel's serial. Pick the one that is this panel, and Home Assistant will check that its circuits sit on the same breaker spaces.",
+        "description": "Your SPAN account lists no panel with this panel's serial. Pick the one that is this panel, and Home Assistant will check that its circuits sit on the same breaker spaces. Or keep this panel local only, with no cloud fallback.",
         "data": {
           "panel": "Panel"
         }
@@ -104,6 +104,9 @@
       "cloud_pick_confirm": {
         "title": "Check the panel",
         "description": "The SPAN account lists this panel under a different serial. Check that it's the same panel. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to finish setup."
+      },
+      "cloud_pick_check": {
+        "title": "Checking the panel"
       }
     },
     "error": {
@@ -120,7 +123,11 @@
       "no_ready_state": "Connected to the panel, but it didn't report ready in time. Try again.",
       "ca_mismatch": "The device at that address isn't this panel, or couldn't be reached.",
       "unknown": "Unexpected error. Check the logs and try again.",
-      "not_a_panel": "The device at that address doesn't look like a SPAN panel."
+      "not_a_panel": "The device at that address doesn't look like a SPAN panel.",
+      "panel_not_on_account": "That panel isn't on this SPAN account. Pick another.",
+      "panel_on_cloud_entry": "That panel already runs here as part of a SPAN account added over the cloud. Pick another, or keep this panel local only.",
+      "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Pick another, or keep this panel local only.",
+      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again, or keep this panel local only."
     },
     "abort": {
       "already_configured": "This SPAN panel or account is already configured.",
@@ -134,12 +141,12 @@
       "panel_not_on_account": "This panel isn't on that SPAN account.",
       "cannot_connect": "Could not reach the panel.",
       "not_supported": "This panel's firmware doesn't offer the local API yet.",
-      "unknown": "Unexpected error.",
-      "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Try again and pick another, or use this panel locally only.",
-      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again later, or use this panel locally only.",
-      "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first."
+      "unknown": "Unexpected error."
     },
-    "flow_title": "{host}"
+    "flow_title": "{host}",
+    "progress": {
+      "check_circuits": "Reading this panel's circuits and the ones SPAN lists for the panel you picked. This takes up to 20 seconds."
+    }
   },
   "options": {
     "step": {
@@ -242,6 +249,11 @@
       "options": {
         "local_first": "Local, falling back to the cloud",
         "local_only": "Local only"
+      }
+    },
+    "cloud_pick_panel": {
+      "options": {
+        "local_only": "Keep this panel local only"
       }
     }
   },

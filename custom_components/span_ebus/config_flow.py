@@ -239,6 +239,21 @@ def _pick_schema(labels: dict[str, str]) -> vol.Schema:
     return vol.Schema({vol.Required(PICKED_PANEL): _select(labels)})
 
 
+# Setup's pick also offers to skip the cloud and keep the panel local only.
+PICK_LOCAL_ONLY = "local_only"
+
+
+def _setup_pick_schema(labels: dict[str, str]) -> vol.Schema:
+    options = [SelectOptionDict(value=key, label=label) for key, label in labels.items()]
+    options.append(SelectOptionDict(value=PICK_LOCAL_ONLY, label=PICK_LOCAL_ONLY))
+    selector = SelectSelector(
+        SelectSelectorConfig(
+            options=options, mode=SelectSelectorMode.LIST, translation_key="cloud_pick_panel"
+        )
+    )
+    return vol.Schema({vol.Required(PICKED_PANEL): selector})
+
+
 def _matched_link(
     link: PanelLink,
     local: Mapping[str, Any],
@@ -719,6 +734,8 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
     @callback
     def async_remove(self) -> None:
         """A flow left before its entry was made: unregister its client."""
+        if (task := self._pick.get("task")) is not None:
+            task.cancel()
         if self._local is None or self._committed:
             return
         local, self._local = self._local, None
@@ -777,21 +794,66 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
     async def async_step_cloud_pick_panel(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Which of the account's panels this one is, when no serial matches."""
+        """Which of the account's panels this one is, when no serial matches.
+
+        A pick that fails comes back here with the error, and the panel's
+        registration is kept: the user can pick again or keep it local only.
+        """
         local, pick = self._local, self._pick
         if local is None or not pick:
             return self.async_abort(reason="unknown")
         sites: list[SiteInfo] = pick["sites"]
-        if user_input is None:
-            return self.async_show_form(
-                step_id="cloud_pick_panel", data_schema=_pick_schema(panel_labels(sites))
+        if user_input is not None:
+            choice = user_input[PICKED_PANEL]
+            if choice == PICK_LOCAL_ONLY:
+                return await self.async_step_local_only()
+            found = find_panel(sites, choice)
+            if found is None:
+                pick["error"] = ("panel_not_on_account", {})
+            elif self._cloud_runs_panel(found[1].key):
+                pick["error"] = ("panel_on_cloud_entry", {})
+            else:
+                pick["task"] = self.hass.async_create_task(
+                    self._check_pick(*found), f"{DOMAIN} check picked panel"
+                )
+                return await self.async_step_cloud_pick_check()
+        error, placeholders = pick.pop("error", (None, {}))
+        return self.async_show_form(
+            step_id="cloud_pick_panel",
+            data_schema=_setup_pick_schema(panel_labels(sites)),
+            errors={"base": error} if error else None,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_cloud_pick_check(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show progress while the picked panel's circuits are read (5-20 s)."""
+        task: asyncio.Task[tuple[str | None, dict[str, str], PanelLink | None]] | None = (
+            self._pick.get("task")
+        )
+        if task is None:
+            return self.async_abort(reason="unknown")
+        if not task.done():
+            return self.async_show_progress(
+                step_id="cloud_pick_check",
+                progress_action="check_circuits",
+                progress_task=task,
             )
-        found = find_panel(sites, user_input[PICKED_PANEL])
-        if found is None:
-            return self.async_abort(reason="panel_not_on_account")
-        site, panel = found
-        if self._cloud_runs_panel(panel.key):
-            return self.async_abort(reason="panel_on_cloud_entry")
+        del self._pick["task"]
+        error, placeholders, link = task.result()
+        if error is not None or link is None:
+            self._pick["error"] = (error or "panel_unverified", placeholders)
+            return self.async_show_progress_done(next_step_id="cloud_pick_panel")
+        self._pick.update(link=link, placeholders=placeholders)
+        return self.async_show_progress_done(next_step_id="cloud_pick_confirm")
+
+    async def _check_pick(
+        self, site: SiteInfo, panel: PanelInfo
+    ) -> tuple[str | None, dict[str, str], PanelLink | None]:
+        """(error key or None, placeholders, link): never raises."""
+        local, pick = self._local, self._pick
+        assert local is not None  # noqa: S101 — checked by the step that starts this
         cloud = pick["cloud"]
         try:
             # No entry yet, so no transport: read the circuits straight off
@@ -817,17 +879,14 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
             )
         except Exception as err:  # noqa: BLE001 — without circuits there's no check
             _LOGGER.debug("could not read circuits to check the panel: %s", type(err).__name__)
-            return self.async_abort(reason="panel_unverified")
+            return "panel_unverified", {}, None
         link = _matched_link(
             _new_link(panel.key, local[CONF_LOCAL_SERIAL], site), local_circuits, circuits, feeders
         )
         placeholders = _match_placeholders(link, len(local_circuits))
         if not circuits_verified(len(link.circuits), len(local_circuits)):
-            return self.async_abort(
-                reason="panel_circuits_mismatch", description_placeholders=placeholders
-            )
-        pick.update(link=link, placeholders=placeholders)
-        return await self.async_step_cloud_pick_confirm()
+            return "panel_circuits_mismatch", placeholders, None
+        return None, placeholders, link
 
     async def async_step_cloud_pick_confirm(
         self, user_input: dict[str, Any] | None = None
