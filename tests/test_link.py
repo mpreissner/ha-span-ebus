@@ -14,6 +14,7 @@ from span_client.link import (
     HistoryTarget,
     PanelLink,
     circuits_verified,
+    classify_feeds,
     feeds_from_kinds,
     link_from_options,
     link_to_options,
@@ -240,3 +241,41 @@ def test_a_picked_panel_keeps_its_own_cloud_key_and_the_local_serial():
     assert read is not None
     assert read.cloud_key == "XC-AAAA-0000"
     assert read.local_serial == "nt-0000-test"
+
+
+# --- feed classification by value ---------------------------------------------------
+
+
+def test_feeder_kind_wins_over_value():
+    kinds = {7: FEEDER_FEEDTHROUGH, 8: None}
+    feeds = classify_feeds(kinds, {7: 3000.0, 8: 400.0}, upstream_w=3000.0, downstream_w=400.0)
+    assert feeds[7] == DOWNSTREAM
+    assert feeds[8] == DOWNSTREAM
+
+
+def test_separated_feeds_classify_by_value():
+    feeds = classify_feeds({}, {7: -2950.0, 8: 410.0}, upstream_w=3000.0, downstream_w=400.0)
+    assert feeds == {7: UPSTREAM, 8: DOWNSTREAM}
+
+
+def test_lugs_within_100_w_classify_nothing():
+    feeds = classify_feeds({}, {7: 450.0, 8: 400.0}, upstream_w=450.0, downstream_w=380.0)
+    assert feeds == {}
+
+
+def test_a_feed_in_neither_band_stays_unclassified():
+    feeds = classify_feeds({}, {7: 3000.0, 8: 1500.0}, upstream_w=3000.0, downstream_w=400.0)
+    assert feeds == {7: UPSTREAM}
+
+
+def test_no_local_lugs_classifies_by_kind_only():
+    assert classify_feeds({}, {7: 10.0, 8: 20.0}, upstream_w=None, downstream_w=None) == {}
+
+
+def test_a_lone_feed_is_upstream_without_values():
+    assert classify_feeds({7: None}, {}, upstream_w=None, downstream_w=None) == {7: UPSTREAM}
+
+
+def test_without_downstream_lugs_only_upstream_is_checked():
+    feeds = classify_feeds({}, {7: 1000.0, 8: 60.0}, upstream_w=1020.0, downstream_w=None)
+    assert feeds == {7: UPSTREAM}
