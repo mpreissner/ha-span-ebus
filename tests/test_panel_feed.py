@@ -118,6 +118,50 @@ def test_find_panel_answers_to_any_of_its_ids():
     assert cloud.find_panel([SHARED, ALONE], "XC-GONE") is None
 
 
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [
+        ("xc-aaaa", "XC-AAAA", True),
+        (" XC-AAAA ", "xc-aaaa", True),
+        ("XC-AAAA", "XC-AAAA", True),
+        ("xc-aaaa", "XC-BBBB", False),
+        (None, "XC-AAAA", False),
+        ("", "", False),
+        (None, None, False),
+    ],
+)
+def test_same_serial(a, b, same):
+    assert cloud.same_serial(a, b) is same
+
+
+def test_a_serial_answers_in_either_case():
+    # The panel's own API spells its serial in lowercase, SPAN's cloud in uppercase.
+    assert A.answers_to("xc-aaaa")
+    assert A.answers_to("XC-AAAA")
+    assert not A.answers_to("xc-bbbb")
+    assert not A.answers_to(None)
+
+
+def test_hardware_ids_stay_exact():
+    assert A.answers_to("gw-a")
+    assert not A.answers_to("GW-A")
+
+
+def test_a_stored_key_still_answers_to_its_serial_in_either_case():
+    kept = replace(A, stored_key="gw-a")
+    assert kept.key == "gw-a"
+    assert kept.answers_to("xc-aaaa")
+
+
+def test_a_lowercase_local_serial_finds_its_cloud_panel():
+    # Both the setup path and the "Add cloud fallback" step look the panel up this way.
+    assert cloud.find_panel([SHARED, ALONE], "xc-cccc") == (ALONE, C)
+    assert cloud.find_panel([SHARED, ALONE], "xc-bbbb") == (SHARED, B)
+    # The link is keyed by the cloud's own spelling, never the local one.
+    _, panel = cloud.find_panel([SHARED, ALONE], "xc-cccc")
+    assert panel.key == "XC-CCCC"
+
+
 class FakeGrpc:
     requests: ClassVar[list[bytes]] = []
 

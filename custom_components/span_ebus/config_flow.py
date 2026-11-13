@@ -72,6 +72,7 @@ from .span_client.backend import (
     panel_plan,
     panel_traits,
     primary_panel_for,
+    same_serial,
 )
 from .span_client.link import (
     LINKED_MINOR_VERSION,
@@ -150,9 +151,8 @@ def _same_account(data: Mapping[str, Any], user_id: str | None, email: str) -> b
 
 def _account_has_panel(entry: ConfigEntry, serial: str) -> bool:
     """Whether a cloud account entry already runs the panel with this serial."""
-    wanted = serial.lower()
     keys = [entry.data.get(CONF_SERIAL), *entry.options.get(CONF_PANELS, [])]
-    return any(isinstance(key, str) and key.lower() == wanted for key in keys)
+    return any(isinstance(key, str) and same_serial(key, serial) for key in keys)
 
 
 def _user_id_from_access_token(access_token: str) -> str | None:

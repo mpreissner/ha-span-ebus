@@ -691,6 +691,16 @@ PANEL_MODELS = {
 _KIND_GATEWAY = 5
 
 
+def same_serial(a: str | None, b: str | None) -> bool:
+    """Whether two spellings name the same panel serial.
+
+    The panel reports its serial in lowercase and SPAN's cloud in uppercase.
+    """
+    if not a or not b:
+        return False
+    return a.strip().casefold() == b.strip().casefold()
+
+
 @dataclass(frozen=True)
 class PanelInfo:
     """One panelboard from GetSitesForUser."""
@@ -715,8 +725,13 @@ class PanelInfo:
 
         A key recorded before the serial was known is the hardware id, and the
         panel is still the same panel once SPAN reports the serial.
+
+        A serial matches whatever its case: the panel's own API spells it in
+        lowercase and SPAN's cloud in uppercase. Hardware and site ids are exact.
         """
-        return key is not None and key in (self.key, self.serial, self.hardware_id)
+        if key is None:
+            return False
+        return key in (self.key, self.hardware_id) or same_serial(key, self.serial)
 
 
 @dataclass(frozen=True)

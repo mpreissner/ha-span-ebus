@@ -39,6 +39,7 @@ from .span_client.backend import (
     SiteStream,
     device_name,
     panel_identity,
+    same_serial,
     stream_identity,
 )
 from .span_client.cloud_traits import CircuitInfo
@@ -350,7 +351,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
 
     def _linked_name(self) -> str | None:
         """A panel added locally is named by its entry, whichever transport is live."""
-        if self.serial == self.entry.data.get(CONF_LOCAL_SERIAL):
+        if same_serial(self.serial, self.entry.data.get(CONF_LOCAL_SERIAL)):
             return self.entry.title
         return None
 
