@@ -43,6 +43,7 @@ from .span_client.backend import (
     stream_identity,
 )
 from .span_client.cloud_traits import CircuitInfo
+from .span_client.link import link_from_options
 from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
@@ -350,8 +351,17 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         return self._backend.site_history_target()
 
     def _linked_name(self) -> str | None:
-        """A panel added locally is named by its entry, whichever transport is live."""
-        if same_serial(self.serial, self.entry.data.get(CONF_LOCAL_SERIAL)):
+        """A panel added locally is named by its entry, whichever transport is live.
+
+        SPAN can list the panel under a serial unlike its own, so the link's
+        cloud key counts as well as the serial.
+        """
+        if CONF_LOCAL_SERIAL not in self.entry.data:
+            return None
+        if same_serial(self.serial, self.entry.data[CONF_LOCAL_SERIAL]):
+            return self.entry.title
+        link = link_from_options(self.entry.options)
+        if link is not None and self.cloud_key is not None and self.cloud_key == link.cloud_key:
             return self.entry.title
         return None
 

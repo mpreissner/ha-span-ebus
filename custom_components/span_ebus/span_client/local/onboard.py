@@ -15,12 +15,12 @@ import contextlib
 import logging
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import aiohttp
 
-from . import homie
+from . import homie, model
 from .mqtt import LocalMqtt
 from .rest import (
     AuthFailed,
@@ -40,6 +40,8 @@ log = logging.getLogger(__name__)
 # The first firmware with the v2 API and the eBus broker.
 MIN_FIRMWARE = 202639
 READY_TIMEOUT = 15.0
+# How long to gather the broker's retained topics when reading the circuits.
+CIRCUIT_READ_SECONDS = 5.0
 CLIENT_PREFIX = "ha-span-ebus-"
 
 
@@ -206,6 +208,51 @@ async def wait_until_ready(
     if root is None:  # cleared between the event and here
         raise NotReadyInTime("no panel reported ready")
     return root
+
+
+def panel_root(tree: homie.DeviceTree, serial: str) -> str:
+    """The panel's root device: its serial, or the only root if that differs."""
+    if serial in tree.states or serial in tree.descriptions:
+        return serial
+    roots = tree.roots()
+    return roots[0] if len(roots) == 1 else serial
+
+
+async def read_circuits(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str | None,
+    ca_pem: str,
+    client_id: str,
+    serial: str,
+    seconds: float = CIRCUIT_READ_SECONDS,
+    mqtt_factory: MqttFactory = LocalMqtt,
+) -> Mapping[str, model.CircuitFacts]:
+    """Log in to the broker, gather what it holds, and return the panel's circuits.
+
+    For checking a cloud panel picked by hand before there is an entry, and so
+    a transport, to read them from. Raises AuthFailed or CannotConnect from the
+    login. The connection is always closed again.
+    """
+    tree = homie.DeviceTree()
+    broker = mqtt_factory(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        ca_pem=ca_pem,
+        client_id=client_id,
+        on_message=lambda topic, payload, _retained: tree.apply(topic, payload),
+    )
+    try:
+        await broker.connect_once()
+        await asyncio.sleep(seconds)
+    finally:
+        with contextlib.suppress(Exception):
+            await broker.stop()
+    return model.build_snapshot(tree, panel_root(tree, serial)).circuits
 
 
 def form_error(exc: BaseException) -> tuple[str, dict[str, str]]:

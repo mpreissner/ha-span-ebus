@@ -13,6 +13,7 @@ from span_client.link import (
     UPSTREAM,
     HistoryTarget,
     PanelLink,
+    circuits_verified,
     feeds_from_kinds,
     link_from_options,
     link_to_options,
@@ -211,3 +212,31 @@ def test_unlinked_entry_keeps_the_local_panel_and_drops_the_account():
     # The originals are left alone.
     assert CONF_TOKENS in data
     assert CONF_LINKS in options
+
+
+@pytest.mark.parametrize(
+    ("matched", "total", "ok"),
+    [
+        (0, 0, False),
+        (0, 10, False),
+        (4, 10, False),
+        (5, 10, True),
+        (10, 10, True),
+        (2, 3, True),
+        (1, 3, False),
+    ],
+)
+def test_circuits_verified_needs_half_the_local_circuits(matched, total, ok):
+    assert circuits_verified(matched, total) is ok
+
+
+def test_a_picked_panel_keeps_its_own_cloud_key_and_the_local_serial():
+    # SPAN can list a panel under a serial unlike the one it reports itself;
+    # picked by hand, the link is keyed by the cloud's and remembers the local.
+    picked = PanelLink(cloud_key="XC-AAAA-0000", local_serial="nt-0000-test")
+    options = link_to_options({}, picked)
+    assert set(options[CONF_LINKS]) == {"XC-AAAA-0000"}
+    read = link_from_options(options)
+    assert read is not None
+    assert read.cloud_key == "XC-AAAA-0000"
+    assert read.local_serial == "nt-0000-test"

@@ -162,6 +162,13 @@ def test_a_lowercase_local_serial_finds_its_cloud_panel():
     assert panel.key == "XC-CCCC"
 
 
+def test_a_serial_sharing_only_the_model_prefix_finds_nothing():
+    # SPAN can list a panel under a serial that differs from the one the panel
+    # reports; the flow then asks which panel it is rather than guessing.
+    assert cloud.find_panel([SHARED, ALONE], "xc-czzz") is None
+    assert cloud.find_panel([SHARED, ALONE], "XC-") is None
+
+
 class FakeGrpc:
     requests: ClassVar[list[bytes]] = []
 

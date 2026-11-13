@@ -112,6 +112,15 @@ def match_circuits(
     return matched, unmatched_local, unmatched_cloud
 
 
+def circuits_verified(matched: int, local_total: int) -> bool:
+    """Whether a panel picked by hand is shown to be this one by its circuits.
+
+    At least half the local circuits must have a cloud circuit on the same
+    spaces. A panel with no local circuits proves nothing, so it fails.
+    """
+    return local_total > 0 and 2 * matched >= local_total
+
+
 def feeds_from_kinds(kinds: Mapping[int, int]) -> dict[int, str]:
     """Which cloud feed supplies the panel and which feeds a panel downstream.
 

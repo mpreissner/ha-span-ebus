@@ -65,6 +65,7 @@ from .const import (
 from .span_client import cloud_auth, feeds
 from .span_client.backend import (
     CloudBackend,
+    PanelInfo,
     SiteInfo,
     device_keys,
     discover_sites,
@@ -80,6 +81,7 @@ from .span_client.link import (
     LINKED_MINOR_VERSION,
     UNLINKED_MINOR_VERSION,
     PanelLink,
+    circuits_verified,
     feeds_from_kinds,
     link_to_options,
     match_circuits,
@@ -229,6 +231,41 @@ def _new_link(cloud_key: str, serial: str, site: SiteInfo) -> PanelLink:
     )
 
 
+# The panel the user picks when SPAN lists none under the local serial.
+PICKED_PANEL = "panel"
+
+
+def _pick_schema(labels: dict[str, str]) -> vol.Schema:
+    return vol.Schema({vol.Required(PICKED_PANEL): _select(labels)})
+
+
+def _matched_link(
+    link: PanelLink,
+    local: Mapping[str, Any],
+    circuits: Mapping[int, Any],
+    feeders: Mapping[int, int],
+) -> PanelLink:
+    """The link with the cloud's circuits matched to the local ones by space."""
+    matched, unmatched_local, unmatched_cloud = match_circuits(local, circuits.values())
+    return dataclasses.replace(
+        link,
+        circuits=matched,
+        feeds=feeds_from_kinds(feeders),
+        unmatched_local=unmatched_local,
+        unmatched_cloud=unmatched_cloud,
+    )
+
+
+def _match_placeholders(link: PanelLink, total: int) -> dict[str, str]:
+    """Counts only: circuit and panel ids are private."""
+    matched = len(link.circuits)
+    return {
+        "matched": str(matched),
+        "total": str(total),
+        "unmatched": str(max(total - matched, 0)),
+    }
+
+
 def _sites_from_token_store(token_path: Path) -> list[SiteInfo]:
     return discover_sites(cloud_auth.access_token_from_store(token_path))
 
@@ -367,6 +404,8 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         self._serial = ""
         self._local: dict[str, Any] | None = None
         self._committed = False
+        # Setup with the cloud when SPAN lists no panel under the local serial.
+        self._pick: dict[str, Any] = {}
         # Names registered whose outcome was never confirmed; removed with
         # the token of the registration that does succeed.
         self._unconfirmed: list[str] = []
@@ -708,19 +747,99 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
             return "cannot_connect"
         found = find_panel(sites, local[CONF_LOCAL_SERIAL])
         if found is None:
-            return self.async_abort(reason="panel_not_on_account")
+            # SPAN can list a panel under a serial unlike its own: let the
+            # user say which one it is, and check that by its circuits.
+            if not panel_labels(sites):
+                return self.async_abort(reason="panel_not_on_account")
+            self._pick = {"cloud": cloud, "token": token, "sites": sites}
+            return await self.async_step_cloud_pick_panel()
         site, panel = found
-        serial = local[CONF_LOCAL_SERIAL]
-        data = {**local, **cloud, CONF_SERIAL: serial}
         # Circuits are matched on the first cloud start, once the local tree
         # is in; until then the link carries only who is who.
-        options = link_to_options(
-            _panel_options(panel_labels(sites), [panel.key], {}),
-            _new_link(panel.key, serial, site),
+        return self._create_linked(
+            local, cloud, sites, _new_link(panel.key, local[CONF_LOCAL_SERIAL], site)
         )
+
+    def _create_linked(
+        self,
+        local: dict[str, Any],
+        cloud: dict[str, Any],
+        sites: list[SiteInfo],
+        link: PanelLink,
+    ) -> ConfigFlowResult:
+        """Make the local entry with `link` as its cloud fallback."""
+        data = {**local, **cloud, CONF_SERIAL: local[CONF_LOCAL_SERIAL]}
+        options = link_to_options(_panel_options(panel_labels(sites), [link.cloud_key], {}), link)
         # Read by async_create_entry: a linked entry is made at 1.2.
         self.MINOR_VERSION = LINKED_MINOR_VERSION
         return self._create(data, options)
+
+    async def async_step_cloud_pick_panel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Which of the account's panels this one is, when no serial matches."""
+        local, pick = self._local, self._pick
+        if local is None or not pick:
+            return self.async_abort(reason="unknown")
+        sites: list[SiteInfo] = pick["sites"]
+        if user_input is None:
+            return self.async_show_form(
+                step_id="cloud_pick_panel", data_schema=_pick_schema(panel_labels(sites))
+            )
+        found = find_panel(sites, user_input[PICKED_PANEL])
+        if found is None:
+            return self.async_abort(reason="panel_not_on_account")
+        site, panel = found
+        cloud = pick["cloud"]
+        try:
+            # No entry yet, so no transport: read the circuits straight off
+            # the broker with the client just registered.
+            local_circuits = await onboard.read_circuits(
+                host=local[CONF_HOST],
+                port=local[CONF_MQTTS_PORT],
+                username=local[CONF_BROKER_USERNAME],
+                password=local.get(CONF_BROKER_PASSWORD),
+                ca_pem=local[CONF_CA_PEM],
+                client_id=local[CONF_CLIENT_NAME],
+                serial=local[CONF_LOCAL_SERIAL],
+            )
+            circuits, feeders = await self.hass.async_add_executor_job(
+                lambda: panel_traits(
+                    pick["token"],
+                    site,
+                    panel,
+                    user_id=cloud.get(CONF_USER_ID),
+                    device_uuid=cloud[CONF_DEVICE_UUID],
+                    primary_panel=None,
+                )
+            )
+        except Exception as err:  # noqa: BLE001 — without circuits there's no check
+            _LOGGER.debug("could not read circuits to check the panel: %s", type(err).__name__)
+            return self.async_abort(reason="panel_unverified")
+        link = _matched_link(
+            _new_link(panel.key, local[CONF_LOCAL_SERIAL], site), local_circuits, circuits, feeders
+        )
+        placeholders = _match_placeholders(link, len(local_circuits))
+        if not circuits_verified(len(link.circuits), len(local_circuits)):
+            return self.async_abort(
+                reason="panel_circuits_mismatch", description_placeholders=placeholders
+            )
+        pick.update(link=link, placeholders=placeholders)
+        return await self.async_step_cloud_pick_confirm()
+
+    async def async_step_cloud_pick_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        local, pick = self._local, self._pick
+        if local is None or "link" not in pick:
+            return self.async_abort(reason="unknown")
+        if user_input is None:
+            return self.async_show_form(
+                step_id="cloud_pick_confirm",
+                data_schema=vol.Schema({}),
+                description_placeholders=pick["placeholders"],
+            )
+        return self._create_linked(local, pick["cloud"], pick["sites"], pick["link"])
 
     # --- cloud ------------------------------------------------------------------
 
@@ -1075,24 +1194,68 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
             errors=errors,
         )
 
+    def _on_cloud_entry(self, key: str) -> bool:
+        """Whether a cloud account entry already runs the panel with this key."""
+        return any(
+            _is_cloud_account(entry.data) and _account_has_panel(entry, key)
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+        )
+
     async def _cloud_add_found(
         self, email: str, tokens: cloud_auth.CloudTokens, serial: str
     ) -> ConfigFlowResult | str:
         """Find the panel on the account and match its circuits; a form error key
         if the account can't be read.
         """
-        for entry in self.hass.config_entries.async_entries(DOMAIN):
-            if _is_cloud_account(entry.data) and _account_has_panel(entry, serial):
-                return self.async_abort(reason="panel_on_cloud_entry")
+        if self._on_cloud_entry(serial):
+            return self.async_abort(reason="panel_on_cloud_entry")
         try:
             sites = await self.hass.async_add_executor_job(discover_sites, tokens.access_token)
         except Exception as err:  # noqa: BLE001 — shown as a form error
             _LOGGER.debug("could not list SPAN panels: %s", type(err).__name__)
             return "cannot_connect"
+        self._add = {"email": email, "tokens": tokens, "serial": serial, "sites": sites}
         found = find_panel(sites, serial)
         if found is None:
+            # SPAN can list a panel under a serial unlike its own: let the
+            # user say which one it is, and check that by its circuits.
+            if not panel_labels(sites):
+                return self.async_abort(reason="panel_not_on_account")
+            return await self.async_step_cloud_pick_panel()
+        return await self._cloud_add_panel(*found, picked=False)
+
+    async def async_step_cloud_pick_panel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Which of the account's panels this one is, when no serial matches."""
+        sites: list[SiteInfo] | None = self._add.get("sites")
+        if not sites:
             return self.async_abort(reason="panel_not_on_account")
-        site, panel = found
+        if user_input is None:
+            return self.async_show_form(
+                step_id="cloud_pick_panel", data_schema=_pick_schema(panel_labels(sites))
+            )
+        found = find_panel(sites, user_input[PICKED_PANEL])
+        if found is None:
+            return self.async_abort(reason="panel_not_on_account")
+        return await self._cloud_add_panel(*found, picked=True)
+
+    async def _cloud_add_panel(
+        self, site: SiteInfo, panel: PanelInfo, *, picked: bool
+    ) -> ConfigFlowResult:
+        """Match the panel's circuits and ask to confirm.
+
+        A panel picked by hand must show it is this one by its circuits, so
+        it is refused when they can't be read or too few match.
+        """
+        if self._on_cloud_entry(panel.key):
+            return self.async_abort(reason="panel_on_cloud_entry")
+        email: str = self._add["email"]
+        tokens: cloud_auth.CloudTokens = self._add["tokens"]
+        serial: str = self._add["serial"]
+        local = self._local_circuits()
+        if picked and not local:
+            return self.async_abort(reason="panel_unverified")
         user_id = _user_id_from_access_token(tokens.access_token)
         device_uuid = _new_device_uuid()
         link = _new_link(panel.key, serial, site)
@@ -1109,17 +1272,15 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
             )
         except Exception as err:  # noqa: BLE001 — matched on the first cloud start instead
             _LOGGER.debug("could not read the panel's circuits: %s", type(err).__name__)
+            if picked:
+                return self.async_abort(reason="panel_unverified")
         else:
-            matched, unmatched_local, unmatched_cloud = match_circuits(
-                self._local_circuits(), circuits.values()
-            )
-            link = dataclasses.replace(
-                link,
-                circuits=matched,
-                feeds=feeds_from_kinds(feeders),
-                unmatched_local=unmatched_local,
-                unmatched_cloud=unmatched_cloud,
-            )
+            link = _matched_link(link, local, circuits, feeders)
+            if picked and not circuits_verified(len(link.circuits), len(local)):
+                return self.async_abort(
+                    reason="panel_circuits_mismatch",
+                    description_placeholders=_match_placeholders(link, len(local)),
+                )
         self._add = {
             "data": {
                 CONF_EMAIL: email,
@@ -1129,24 +1290,32 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
                 CONF_SERIAL: serial,
             },
             "link": link,
-            "labels": panel_labels(sites),
+            "labels": panel_labels(self._add["sites"]),
         }
+        if picked:
+            return await self.async_step_cloud_pick_confirm()
         return await self.async_step_cloud_add_confirm()
 
     async def async_step_cloud_add_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        return self._cloud_add_confirm("cloud_add_confirm", user_input)
+
+    async def async_step_cloud_pick_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """As cloud_add_confirm, saying the account lists the panel differently."""
+        return self._cloud_add_confirm("cloud_pick_confirm", user_input)
+
+    def _cloud_add_confirm(
+        self, step_id: str, user_input: dict[str, Any] | None
+    ) -> ConfigFlowResult:
         link: PanelLink = self._add["link"]
         if user_input is None:
-            total = len(self._local_circuits())
             return self.async_show_form(
-                step_id="cloud_add_confirm",
+                step_id=step_id,
                 data_schema=vol.Schema({}),
-                description_placeholders={
-                    "matched": str(len(link.circuits)),
-                    "total": str(total),
-                    "unmatched": str(max(total - len(link.circuits), 0)),
-                },
+                description_placeholders=_match_placeholders(link, len(self._local_circuits())),
             )
         entry = self.config_entry
         data = {**entry.data, **self._add["data"]}
