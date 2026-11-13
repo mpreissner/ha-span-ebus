@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -43,7 +44,7 @@ from .span_client.backend import (
     site_routes,
     stream_identity,
 )
-from .span_client.local import onboard
+from .span_client.local import model, onboard
 from .span_client.local.health import Mode
 from .transport import SpanTransportManager, fallback_issue_id, local_tree_store
 
@@ -254,6 +255,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> boo
         if CONF_TOKENS in entry.data:
             await hass.async_add_executor_job(_remove_quietly, token_path)
     return unloaded
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: SpanConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Let the user delete a device only once the panel no longer reports it.
+
+    Never the panel itself, and never on a cloud entry.
+    """
+    runtime = getattr(entry, "runtime_data", None)
+    transport = runtime.transport if runtime is not None else None
+    if transport is None:
+        return False
+    identifiers = frozenset(i for domain, i in device_entry.identifiers if domain == DOMAIN)
+    return model.device_removable(
+        transport.snapshot, transport.panel_key, entry.data[CONF_LOCAL_SERIAL], identifiers
+    )
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> None:

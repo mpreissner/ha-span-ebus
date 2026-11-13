@@ -381,6 +381,10 @@ class SpanTransportManager:
             self._logged_unmapped.add(item)
             if item.key is None:
                 _LOGGER.debug("r202639 model: %s devices are not modelled yet", item.device_class)
+            elif item.key == model.LINK_CONFLICT:
+                _LOGGER.debug(
+                    "r202639 model: link conflict on %s; lowest claimant kept", item.device_class
+                )
             else:
                 _LOGGER.debug("r202639 model: ignoring %s property %s", item.device_class, item.key)
 

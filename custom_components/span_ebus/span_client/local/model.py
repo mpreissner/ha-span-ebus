@@ -18,7 +18,7 @@ import json
 import logging
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, StrEnum, auto
 from typing import Any
 
@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 ROOT_CLASS = "distribution-enclosure"
 CIRCUIT_CLASS = "circuit"
 LUGS_CLASS = "lugs"
+BESS_CLASS = "bess"  # `energy.ebus.device.bess`, as DeviceDescription.device_class gives it
+PV_CLASS = "pv"
+EVSE_CLASS = "evse"
+MID_CLASS = "mid"
+SUBDEVICE_CLASSES: frozenset[str] = frozenset({BESS_CLASS, PV_CLASS, EVSE_CLASS, MID_CLASS})
 UP_STATES: frozenset[DeviceState] = frozenset({DeviceState.READY, DeviceState.ALERT})
 
 # The panel publishes power-flows/grid negative while importing (the lugs show
@@ -81,7 +86,7 @@ NO_FALLBACK: Any = _NoFallback()
 class Role(StrEnum):
     LOAD = "load"  # no feeds-role, or LOADS / SUBPANEL / MIXED / UNUSED
     SOLAR = "solar"
-    STORAGE = "storage"  # signed as a load until the battery device exists
+    STORAGE = "storage"  # signed as a load; the battery device keeps SPAN's raw sign
     GENERATOR = "generator"  # signed as solar: it produces
 
 
@@ -165,6 +170,11 @@ class PanelFacts:
     wifi: bool | None
     shed_forecast: ShedForecast | None  # None unless the capability is described
     shed_policy: ShedPolicy | None  # None unless published and valid
+    asserted_islanding: str | None = None  # NONE / ON_GRID / OFF_GRID as published
+    # Set once the whole tree is walked: which subdevices hang off this panel.
+    has_mid: bool = False
+    has_bess: bool = False
+    grid_forming: str | None = None  # the first MID's grid/grid-forming-entity, as published
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +256,33 @@ class CircuitFacts:
 
 
 @dataclass(frozen=True, slots=True)
+class SubdeviceFacts:
+    """A battery, PV inverter, EV charger or MID under the panel.
+
+    `values` holds every described, non-identifying property that carries a
+    value, as the tree parsed it: no serials ever reach it. `link` is the
+    circuit or lugs the device hangs off, resolved after the whole tree is
+    walked, and `circuit_label` that circuit's label (never its readings).
+    """
+
+    device_id: str
+    kind: str  # bess / pv / evse / mid
+    state: DeviceState  # effective: a root that is not ready overrides it
+    described: frozenset[str]
+    values: Mapping[str, Any]
+    settable: frozenset[str]
+    vendor: str | None
+    model: str | None
+    firmware: str | None
+    hardware: str | None
+    link: Link | None = None
+    circuit_label: str | None = None
+
+    def get(self, key: str) -> Any:
+        return self.values.get(key)
+
+
+@dataclass(frozen=True, slots=True)
 class Unmapped:
     device_class: str
     key: str | None  # None: the whole device class is not modelled
@@ -260,6 +297,11 @@ class Snapshot:
     circuits: Mapping[str, CircuitFacts]  # ordered by first space, then name
     unmapped: frozenset[Unmapped]
     restored: bool  # every value came from the Store; nothing live yet
+    # Subdevices by class, each ordered by device id.
+    bess: Mapping[str, SubdeviceFacts] = field(default_factory=dict)
+    pv: Mapping[str, SubdeviceFacts] = field(default_factory=dict)
+    evse: Mapping[str, SubdeviceFacts] = field(default_factory=dict)
+    mid: Mapping[str, SubdeviceFacts] = field(default_factory=dict)
 
     @property
     def upstream(self) -> LugsFacts | None:
@@ -297,10 +339,9 @@ _ROOT_READS = frozenset(
         "status/ethernet",
         "status/wifi",
         "shed/policy",
+        "shed/asserted-islanding-state",
     }
 )
-# `shed/asserted-islanding-state` stays unmapped until the islanding entity
-# that carries it exists (4b-2).
 _ROOT_READ_CAPABILITIES = frozenset({"pcs", "power-flows", "shed-forecast"})
 _CONNECTION_READS = frozenset(
     {
@@ -359,6 +400,41 @@ _CIRCUIT_READS = (
     )
     | _CONNECTION_READS
 )
+# What every subdevice's registry entry reads. `info/serial-number` is never
+# read (IDENTIFYING_KEYS); `info/name` on a subdevice is its own label, not the site's.
+_SUBDEVICE_INFO_READS = frozenset(
+    {
+        "info/name",
+        "info/vendor-name",
+        "info/model",
+        "info/product",
+        "info/firmware-version",
+        "info/hardware-version",
+        "info/part-number",
+    }
+)
+_SUBDEVICE_READS: Mapping[str, frozenset[str]] = {
+    BESS_CLASS: _SUBDEVICE_INFO_READS
+    | {
+        "info/nameplate-capacity",
+        "meter/active-power",
+        "soc/soc",
+        "soc/soe",
+        "status/communication-state",
+    },
+    PV_CLASS: _SUBDEVICE_INFO_READS | {"info/nominal-power"},
+    EVSE_CLASS: _SUBDEVICE_INFO_READS
+    | {
+        "config/max-charge-current",
+        "config/user-max-charge-current",
+        "meter/advertised-current",
+        "status/status",
+        "switch/lock-state",
+    },
+    MID_CLASS: _SUBDEVICE_INFO_READS
+    | {"grid/grid-forming-entity", "grid/grid-state", "grid/islanding-state"},
+}
+LINK_CONFLICT = "connection/link-conflict"  # an Unmapped note, never a property key
 
 
 def build_snapshot(tree: DeviceTree, root_id: str, *, restored: bool = False) -> Snapshot:
@@ -370,6 +446,7 @@ def build_snapshot(tree: DeviceTree, root_id: str, *, restored: bool = False) ->
     panel: PanelFacts | None = None
     lugs: dict[str, LugsFacts] = {}
     circuits: list[CircuitFacts] = []
+    subdevices: dict[str, SubdeviceFacts] = {}
     unmapped: set[Unmapped] = set()
     for description in tree.walk(root_id):
         cls = description.device_class
@@ -384,11 +461,29 @@ def build_snapshot(tree: DeviceTree, root_id: str, *, restored: bool = False) ->
         elif description.device_id != root_id and cls == CIRCUIT_CLASS:
             circuits.append(_circuit(tree, description))
             reads = _CIRCUIT_READS
+        elif description.device_id != root_id and cls in SUBDEVICE_CLASSES:
+            subdevices[description.device_id] = _subdevice(tree, description)
+            reads = _SUBDEVICE_READS[cls]
         else:
             unmapped.add(Unmapped(cls or description.type, None))
             continue
         unmapped.update(Unmapped(cls, key) for key in _described(description) - reads)
     circuits.sort(key=_circuit_order)
+    subdevices = _resolve_links(subdevices, circuits, lugs, unmapped)
+    by_class: dict[str, dict[str, SubdeviceFacts]] = {cls: {} for cls in SUBDEVICE_CLASSES}
+    for device_id in sorted(subdevices):
+        facts = subdevices[device_id]
+        by_class[facts.kind][device_id] = facts
+    if panel is not None:
+        mids = by_class[MID_CLASS]
+        panel = replace(
+            panel,
+            has_mid=bool(mids),
+            has_bess=bool(by_class[BESS_CLASS]),
+            grid_forming=(
+                _text(next(iter(mids.values())).get("grid/grid-forming-entity")) if mids else None
+            ),
+        )
     return Snapshot(
         root_id=root_id,
         root_state=tree.states.get(root_id),
@@ -397,13 +492,58 @@ def build_snapshot(tree: DeviceTree, root_id: str, *, restored: bool = False) ->
         circuits={c.device_id: c for c in circuits},
         unmapped=frozenset(unmapped),
         restored=restored,
+        bess=by_class[BESS_CLASS],
+        pv=by_class[PV_CLASS],
+        evse=by_class[EVSE_CLASS],
+        mid=by_class[MID_CLASS],
     )
 
 
+def _resolve_links(
+    subdevices: dict[str, SubdeviceFacts],
+    circuits: list[CircuitFacts],
+    lugs: Mapping[str, LugsFacts],
+    unmapped: set[Unmapped],
+) -> dict[str, SubdeviceFacts]:
+    """Hang each subdevice off the circuit that feeds it, or the lugs it feeds.
+
+    Two claimants for one device: the lowest (kind, id) wins and an Unmapped
+    note records the conflict. A target that is no known subdevice stays only
+    in the circuit's own `feeds` link. Never raises, never logs ids.
+    """
+    claims: dict[str, dict[tuple[str, str], str | None]] = {}
+    for circuit in circuits:
+        link = circuit.feeds
+        if link is not None and link.via_id in subdevices:
+            claims.setdefault(link.via_id, {})[(CIRCUIT_CLASS, circuit.device_id)] = link.status
+    for lugs_id in sorted(lugs):
+        link = lugs[lugs_id].fed_by
+        if link is not None and link.via_id in subdevices:
+            claims.setdefault(link.via_id, {})[(LUGS_CLASS, lugs_id)] = link.status
+    by_id = {c.device_id: c for c in circuits}
+    resolved = dict(subdevices)
+    for target, claimants in claims.items():
+        kind, via_id = min(claimants)
+        if len(claimants) > 1:
+            unmapped.add(Unmapped(subdevices[target].kind, LINK_CONFLICT))
+        circuit = by_id.get(via_id) if kind == CIRCUIT_CLASS else None
+        resolved[target] = replace(
+            subdevices[target],
+            link=Link(kind, via_id, claimants[(kind, via_id)]),
+            circuit_label=circuit_label(circuit) if circuit is not None else None,
+        )
+    return resolved
+
+
 def pii_keys(description: DeviceDescription | None) -> frozenset[str]:
-    if description is None or description.device_class != ROOT_CLASS:
+    """What is never read from this device: the panel's PII, a subdevice's serials."""
+    if description is None:
         return frozenset()
-    return PII_KEYS
+    if description.device_class == ROOT_CLASS:
+        return PII_KEYS
+    if description.device_class in SUBDEVICE_CLASSES:
+        return IDENTIFYING_KEYS
+    return frozenset()
 
 
 def _described(description: DeviceDescription) -> frozenset[str]:
@@ -478,6 +618,7 @@ def _panel(tree: DeviceTree, description: DeviceDescription) -> PanelFacts:
         wifi=_bool(get("status/wifi")),
         shed_forecast=forecast,
         shed_policy=parse_shed_policy(get("shed/policy")),
+        asserted_islanding=_text(get("shed/asserted-islanding-state")),
     )
 
 
@@ -625,6 +766,26 @@ def _circuit(tree: DeviceTree, description: DeviceDescription) -> CircuitFacts:
         shared_meter_with=_split(get("meter/shared-with-device-ids")),
         shared_switch_with=_split(get("switch/shared-with-device-ids")),
         **_connection(tree, get),
+    )
+
+
+def _subdevice(tree: DeviceTree, description: DeviceDescription) -> SubdeviceFacts:
+    device_id = description.device_id
+    described = _described(description)
+    values = {
+        key: value for key in sorted(described) if (value := tree.value(device_id, key)) is not None
+    }
+    return SubdeviceFacts(
+        device_id=device_id,
+        kind=description.device_class,
+        state=tree.effective_state(device_id),
+        described=described,
+        values=values,
+        settable=frozenset(key for key in described if description.properties[key].settable),
+        vendor=_text(values.get("info/vendor-name")),
+        model=_text(values.get("info/model")) or _text(values.get("info/product")),
+        firmware=_text(values.get("info/firmware-version")),
+        hardware=_text(values.get("info/hardware-version")),
     )
 
 
@@ -795,6 +956,39 @@ def circuit_uid(panel_key: str, circuit_id: str, key: str) -> str:
     return f"{panel_key}_{CIRCUIT_CLASS}/{circuit_id}/{key}"
 
 
+def subdevice_uid(panel_key: str, cls_short: str, device_id: str, key: str) -> str:
+    """`{K}_bess/{id}/soc/soc`: always two `/` or more, so never a cloud uid."""
+    return f"{panel_key}_{cls_short}/{device_id}/{key}"
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRef:
+    """Which HA device an entity sits on; `local_entity` maps it to DeviceInfo.
+
+    Never carries a serial: subdevice registry entries get none.
+    """
+
+    kind: str  # panel / bess / pv / evse / mid / remote_ct
+    device_id: str | None  # None for the panel
+    name_hint: str | None = None  # a remote CT's name, or the circuit of one of several EVSEs
+    manufacturer: str | None = None
+    model: str | None = None
+    sw_version: str | None = None
+    hw_version: str | None = None
+
+
+PANEL_REF = DeviceRef("panel", None)
+REMOTE_CT = "remote_ct"
+
+
+def device_identifier(panel_key: str, ref: DeviceRef) -> str | None:
+    """The registry identifier of a non-panel device; None for the panel."""
+    if ref.kind == "panel" or ref.device_id is None:
+        return None
+    kind = CIRCUIT_CLASS if ref.kind == REMOTE_CT else ref.kind
+    return f"{panel_key}_{kind}/{ref.device_id}"
+
+
 # --- the entity catalogue -------------------------------------------------------------
 
 
@@ -803,9 +997,15 @@ class Scope(StrEnum):
     UPSTREAM = "upstream"
     DOWNSTREAM = "downstream"
     CIRCUIT = "circuit"
+    BESS = "bess"
+    PV = "pv"
+    EVSE = "evse"
+    MID = "mid"
 
 
-type Facts = PanelFacts | LugsFacts | CircuitFacts
+SUBDEVICE_SCOPES: frozenset[Scope] = frozenset({Scope.BESS, Scope.PV, Scope.EVSE, Scope.MID})
+
+type Facts = PanelFacts | LugsFacts | CircuitFacts | SubdeviceFacts
 
 
 @dataclass(frozen=True, slots=True)
@@ -1069,6 +1269,173 @@ def _circuit_rows() -> tuple[Row, ...]:
     )  # fmt: skip
 
 
+# --- 4b-2: subdevices and islanding ----------------------------------------------------
+
+GRID_FORMING_OPTIONS = ("battery", "generator", "grid", "none", "pv", "unknown")
+EVSE_STATUS_OPTIONS = ("available", "preparing", "charging", "unavailable")
+_EV_CONNECTED = frozenset({"PREPARING", "CHARGING", "SUSPENDED_EV", "SUSPENDED_EVSE", "FINISHING"})
+# Row keys an unknown enum value has been logged for: once per key, never the value.
+_unknown_values_logged: set[str] = set()
+
+
+def _known(value: Any, options: tuple[str, ...], key: str, otherwise: str | None) -> str | None:
+    """An enum value lower-cased if it is one of `options`, else `otherwise`."""
+    text = _text(value)
+    if text is None:
+        return None
+    lowered = text.lower()
+    if lowered in options:
+        return lowered
+    if key not in _unknown_values_logged:
+        _unknown_values_logged.add(key)
+        log.debug("Unrecognised value for %s; not shown", key)
+    return otherwise
+
+
+def _grid_forming(p: PanelFacts) -> str | None:
+    return _known(p.grid_forming, GRID_FORMING_OPTIONS, "grid-forming-entity", "unknown")
+
+
+def _islandable(p: PanelFacts) -> bool | None:
+    """A MID means the site can island. With neither MID nor battery any more
+    (the device left after the entity was made) it is unknown, never "no".
+    """
+    return p.has_mid if (p.has_mid or p.has_bess) else None
+
+
+def _islanding_attrs(p: PanelFacts) -> dict[str, Any]:
+    return _present({"asserted_islanding_state": _lower(p.asserted_islanding)})
+
+
+def _raw(key: str) -> Callable[[SubdeviceFacts], Any]:
+    return lambda f: f.get(key)
+
+
+def _number(key: str) -> Callable[[SubdeviceFacts], float | None]:
+    return lambda f: _float(f.get(key))
+
+
+def _enum_of(key: str) -> Callable[[SubdeviceFacts], str | None]:
+    return lambda f: _lower(_text(f.get(key)))
+
+
+def _circuit_attr(f: SubdeviceFacts) -> dict[str, Any]:
+    """The feeding circuit's label: its readings stay on the circuit (spec §3.2)."""
+    return _present({"circuit": f.circuit_label})
+
+
+def _link_published(f: SubdeviceFacts) -> bool:
+    return f.link is not None and f.link.status is not None
+
+
+def _link_ok(f: SubdeviceFacts) -> bool | None:
+    """The panel link. A device that is not up reads False: these rows ignore
+    the device state so a lost charger shows disconnected, not unavailable.
+    """
+    if f.state not in UP_STATES:
+        return False
+    if f.link is None or f.link.status is None:
+        return None
+    return f.link.status.upper() == "OK"
+
+
+def _bess_connected(f: SubdeviceFacts) -> bool | None:
+    """Communication state when published, else the panel link, else unknown.
+    A battery that is not up reads False (see `_link_ok`).
+    """
+    if f.state not in UP_STATES:
+        return False
+    comm = _text(f.get("status/communication-state"))
+    if comm is not None:
+        return comm.upper() == "OK"
+    return _link_ok(f)
+
+
+def _bess_connected_exists(f: SubdeviceFacts) -> bool:
+    return "status/communication-state" in f.described or f.link is not None
+
+
+def _evse_status(f: SubdeviceFacts) -> str | None:
+    return _known(f.get("status/status"), EVSE_STATUS_OPTIONS, "evse-status", None)
+
+
+def _evse_status_raw(f: SubdeviceFacts) -> str | None:
+    text = _text(f.get("status/status"))
+    return None if text is None else text.upper()
+
+
+def _evse_charging(f: SubdeviceFacts) -> bool | None:
+    status = _evse_status_raw(f)
+    return None if status is None else status == "CHARGING"
+
+
+def _evse_plugged(f: SubdeviceFacts) -> bool | None:
+    status = _evse_status_raw(f)
+    return None if status is None else status in _EV_CONNECTED
+
+
+def _evse_status_attrs(f: SubdeviceFacts) -> dict[str, Any]:
+    return _present(
+        {"lock_state": _lower(_text(f.get("switch/lock-state"))), "circuit": f.circuit_label}
+    )
+
+
+def _evse_ceiling_attrs(f: SubdeviceFacts) -> dict[str, Any]:
+    return _present({"user_max_charge_current": _float(f.get("config/user-max-charge-current"))})
+
+
+def _islanding_rows() -> tuple[Row, ...]:
+    """On the panel device, but only once a MID or battery shows the site can island."""
+    p = Scope.PANEL
+    return (
+        Row("grid_islandable", "binary_sensor", p, "derived/grid-islandable", _M,
+            _islandable, when=lambda f: f.has_mid or f.has_bess,
+            attrs=_islanding_attrs),
+        Row("mid:grid/grid-forming-entity", "sensor", p, "derived/grid-forming-entity", _M,
+            _grid_forming, when=lambda f: f.has_mid),
+    )  # fmt: skip
+
+
+def _subdevice_rows() -> tuple[Row, ...]:
+    """Row keys are `{class}:{source}`; values read the subdevice's own properties.
+    Battery power keeps SPAN's raw sign: + = discharging.
+    """
+    b, pv, ev, mid = Scope.BESS, Scope.PV, Scope.EVSE, Scope.MID
+    power, soc, soe = "meter/active-power", "soc/soc", "soc/soe"
+    capacity, comm = "info/nameplate-capacity", "status/communication-state"
+    nominal, status, advertised = "info/nominal-power", "status/status", "meter/advertised-current"
+    ceiling = "config/max-charge-current"
+    grid, islanding = "grid/grid-state", "grid/islanding-state"
+    return (
+        Row(f"bess:{power}", "sensor", b, power, _M, _number(power), (power,),
+            attrs=_circuit_attr),
+        Row(f"bess:{soc}", "sensor", b, soc, _M, _number(soc), (soc,)),
+        Row(f"bess:{soe}", "sensor", b, soe, _M, _number(soe), (soe,)),
+        Row(f"bess:{capacity}", "sensor", b, capacity, _S, _number(capacity), (capacity,)),
+        Row(f"bess:{comm}", "sensor", b, comm, _M, _enum_of(comm), (comm,)),
+        Row("bess:derived/connected", "binary_sensor", b, "derived/connected", _M,
+            _bess_connected, when=_bess_connected_exists, ignores_state=True),
+        Row(f"pv:{nominal}", "sensor", pv, nominal, _S, _number(nominal), (nominal,)),
+        Row("pv:derived/panel-link", "binary_sensor", pv, "derived/panel-link", _M, _link_ok,
+            when=_link_published, attrs=_circuit_attr, ignores_state=True),
+        Row(f"evse:{status}", "sensor", ev, status, _M, _evse_status, (status,),
+            attrs=_evse_status_attrs),
+        Row("evse:derived/charging", "binary_sensor", ev, "derived/charging", _M,
+            _evse_charging, (status,)),
+        Row("evse:derived/ev-connected", "binary_sensor", ev, "derived/ev-connected", _M,
+            _evse_plugged, (status,)),
+        Row(f"evse:{advertised}", "sensor", ev, advertised, _M, _number(advertised),
+            (advertised,)),
+        Row(f"evse:{ceiling}", "sensor", ev, ceiling, _S, _number(ceiling), (ceiling,),
+            attrs=_evse_ceiling_attrs),
+        Row("evse:derived/panel-link", "binary_sensor", ev, "derived/panel-link", _M, _link_ok,
+            when=_link_published, ignores_state=True),
+        Row(f"mid:{grid}", "sensor", mid, grid, _M, _enum_of(grid), (grid,)),
+        Row(f"mid:{islanding}", "sensor", mid, islanding, _M, _enum_of(islanding),
+            (islanding,)),
+    )  # fmt: skip
+
+
 def _state(state: DeviceState | None) -> str | None:
     return None if state is None else state.value
 
@@ -1077,7 +1444,9 @@ def _present(attrs: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in attrs.items() if value is not None}
 
 
-ROWS: tuple[Row, ...] = _panel_rows() + _lugs_rows() + _circuit_rows()
+ROWS: tuple[Row, ...] = (
+    _panel_rows() + _islanding_rows() + _lugs_rows() + _circuit_rows() + _subdevice_rows()
+)
 
 
 def row_devices(snapshot: Snapshot, row: Row) -> list[str]:
@@ -1089,7 +1458,14 @@ def row_devices(snapshot: Snapshot, row: Row) -> list[str]:
             return [snapshot.upstream.device_id] if snapshot.upstream else []
         case Scope.DOWNSTREAM:
             return [snapshot.downstream.device_id] if snapshot.downstream else []
-    return list(snapshot.circuits)
+        case Scope.CIRCUIT:
+            return list(snapshot.circuits)
+    return list(subdevices(snapshot, row.scope))
+
+
+def subdevices(snapshot: Snapshot, scope: Scope) -> Mapping[str, SubdeviceFacts]:
+    """The subdevices of one class, by id; empty for any other scope."""
+    return getattr(snapshot, scope.value) if scope in SUBDEVICE_SCOPES else {}
 
 
 def row_facts(snapshot: Snapshot, row: Row, device_id: str) -> Any:
@@ -1099,6 +1475,8 @@ def row_facts(snapshot: Snapshot, row: Row, device_id: str) -> Any:
         return panel if panel is not None and panel.device_id == device_id else None
     if row.scope is Scope.CIRCUIT:
         return snapshot.circuits.get(device_id)
+    if row.scope in SUBDEVICE_SCOPES:
+        return subdevices(snapshot, row.scope).get(device_id)
     return snapshot.lugs.get(device_id)
 
 
@@ -1107,7 +1485,79 @@ def row_uid(row: Row, panel_key: str, device_id: str) -> str:
         return panel_uid(panel_key, row.source)
     if row.scope is Scope.CIRCUIT:
         return circuit_uid(panel_key, device_id, row.source)
+    if row.scope in SUBDEVICE_SCOPES:
+        return subdevice_uid(panel_key, row.scope.value, device_id, row.source)
     return lugs_uid(panel_key, device_id, row.source)
+
+
+def translation_key(row: Row) -> str:
+    """HA translation keys allow only [a-z0-9_]: `bess:soc/soc` -> `bess_soc_soc`."""
+    return row.key.replace(":", "_").replace("/", "_").replace("-", "_")
+
+
+def row_device(snapshot: Snapshot, row: Row, device_id: str) -> DeviceRef:
+    """Which HA device the entity for this row and device sits on.
+
+    Entities call this once, at construction: the device, the EVSE name hint
+    (circuit label or position) and the remote-CT name are fixed from then on,
+    so a later rename or a second charger does not move or rename a device.
+    """
+    if row.scope in SUBDEVICE_SCOPES:
+        facts = subdevices(snapshot, row.scope).get(device_id)
+        if facts is None:
+            return DeviceRef(row.scope.value, device_id)
+        hint = None
+        if row.scope is Scope.EVSE and len(snapshot.evse) > 1:
+            hint = facts.circuit_label or str(list(snapshot.evse).index(device_id) + 1)
+        return DeviceRef(
+            facts.kind,
+            device_id,
+            name_hint=hint,
+            manufacturer=facts.vendor,
+            model=facts.model,
+            sw_version=facts.firmware,
+            hw_version=facts.hardware if facts.kind == MID_CLASS else None,
+        )
+    if row.scope is Scope.CIRCUIT:
+        circuit = snapshot.circuits.get(device_id)
+        if circuit is not None and circuit.is_remote_ct:
+            return DeviceRef(REMOTE_CT, device_id, name_hint=_remote_ct_name(snapshot, circuit))
+    return PANEL_REF
+
+
+def current_device_identifiers(snapshot: Snapshot, panel_key: str) -> frozenset[str]:
+    """The HA device identifiers this snapshot still backs, besides the panel's."""
+    ids = {
+        identifier
+        for scope in SUBDEVICE_SCOPES
+        for device_id, facts in subdevices(snapshot, scope).items()
+        if (identifier := device_identifier(panel_key, DeviceRef(facts.kind, device_id)))
+    }
+    ids.update(
+        identifier
+        for device_id, circuit in snapshot.circuits.items()
+        if circuit.is_remote_ct
+        and (identifier := device_identifier(panel_key, DeviceRef(REMOTE_CT, device_id)))
+    )
+    return frozenset(ids)
+
+
+def device_removable(
+    snapshot: Snapshot, panel_key: str, panel_identifier: str, identifiers: frozenset[str]
+) -> bool:
+    """Whether the user may delete an HA device: only one the panel no longer
+    reports. Never the panel itself, and never before the panel is known.
+    """
+    if panel_identifier in identifiers or snapshot.panel is None:
+        return False
+    return not identifiers & current_device_identifiers(snapshot, panel_key)
+
+
+def _remote_ct_name(snapshot: Snapshot, circuit: CircuitFacts) -> str:
+    if circuit.name:
+        return circuit.name
+    remote = [c for c in snapshot.circuits.values() if c.is_remote_ct]
+    return f"Remote CT {remote.index(circuit) + 1}"
 
 
 def row_described(facts: Any, row: Row) -> bool:
