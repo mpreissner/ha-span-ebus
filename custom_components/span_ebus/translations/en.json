@@ -237,6 +237,24 @@
     "transport_fallback": {
       "title": "{title} is using the cloud",
       "description": "Home Assistant lost its local connection to {title} over an hour ago and is reading the panel through the SPAN cloud. Check that the panel is powered and on your network; if its address changed, select Reconfigure on the entry. It moves back to the local connection by itself once that has been healthy for five minutes."
+    },
+    "energy_step": {
+      "title": "{title}: fix a one-time jump in energy history",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Fix the energy jump",
+            "description": "{title} now reads circuit and grid energy from the panel's own meters instead of your SPAN account. Those meters count from when the panel was installed, so the Energy dashboard recorded one false jump around {hour} for these sensors:\n\n{entities}\n\nSelect Submit and Home Assistant removes that jump from their history. Nothing else changes. Choose Ignore if you want to keep it.\n\nCan't be fixed automatically:\n{skipped}"
+          },
+          "result": {
+            "title": "Energy history fixed",
+            "description": "Fixed {applied} sensors. The Energy dashboard updates within a few minutes.\n\nNot changed ({skipped_count}):\n{skipped}"
+          }
+        },
+        "abort": {
+          "not_running": "The integration isn't running. Try again once it has started."
+        }
+      }
     }
   },
   "selector": {
@@ -254,6 +272,18 @@
     "cloud_pick_panel": {
       "options": {
         "local_only": "Keep this panel local only"
+      }
+    },
+    "energy_step_reason": {
+      "options": {
+        "excluded_from_recorder": "not recorded",
+        "recorder_not_loaded": "recorder not running",
+        "no_statistics": "no statistics recorded",
+        "no_statistics_recorded": "no statistics recorded",
+        "no_prior_reading": "no earlier reading",
+        "unexpected": "history doesn't show the jump",
+        "changed_since": "already adjusted by hand",
+        "nothing": "none"
       }
     }
   },

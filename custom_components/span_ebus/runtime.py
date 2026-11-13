@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .coordinator import SpanCloudCoordinator
+    from .energy_step import EnergyStepTracker
     from .transport import SpanTransportManager
 
 CoordinatorHook = Callable[["SpanCloudCoordinator"], None]
@@ -24,6 +25,7 @@ class SpanRuntime:
 
     coordinators: list[SpanCloudCoordinator] = field(default_factory=list)
     transport: SpanTransportManager | None = None
+    energy_step: EnergyStepTracker | None = None
     hooks: list[CoordinatorHook] = field(default_factory=list)
 
     def add_platform(self, hook: CoordinatorHook) -> None:

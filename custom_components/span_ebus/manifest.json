@@ -1,6 +1,7 @@
 {
   "domain": "span_ebus",
   "name": "SPAN Panel (eBus)",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@mpreissner"],
   "config_flow": true,
   "documentation": "https://github.com/mpreissner/ha-span-ebus",

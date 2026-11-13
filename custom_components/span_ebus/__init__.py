@@ -15,6 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from . import energy_step
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_CA_PEM,
@@ -32,6 +33,7 @@ from .const import (
     TOKEN_DIR,
 )
 from .coordinator import SpanCloudCoordinator, energy_store
+from .energy_step import EnergyStepTracker
 from .runtime import SpanRuntime
 from .span_client import cloud_auth
 from .span_client.backend import (
@@ -181,6 +183,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
             build_cloud=build_cloud if CONF_TOKENS in entry.data else None,
         )
         await runtime.transport.async_start()
+        # After a cloud entry got its panel: watch for the first local energy
+        # readings, which the entities write as soon as the platforms add them.
+        runtime.energy_step = EnergyStepTracker(hass, entry)
+        entry.async_on_unload(runtime.energy_step.async_stop)
+        await runtime.energy_step.async_start()
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         return True
 
@@ -307,6 +314,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> Non
             entry.data[CONF_ACCESS_TOKEN],
             entry.data[CONF_CLIENT_NAME],
         )
+    await energy_step.async_remove(hass, entry.entry_id)
     await energy_store(hass, entry.entry_id).async_remove()
     await local_tree_store(hass, entry.entry_id).async_remove()
     storage = Path(hass.config.path(".storage"))
