@@ -270,7 +270,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         is a no-op when a flow is already open for the entry, so the latch in the
         backend and this together mean exactly one prompt.
         """
-        _LOGGER.debug("starting reauth flow for %s: %s", self.entry.title, reason)
+        _LOGGER.debug("starting reauth flow: %s", reason)
         self.entry.async_start_reauth(self.hass)
 
     # --- liveness ----------------------------------------------------------

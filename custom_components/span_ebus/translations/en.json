@@ -136,7 +136,8 @@
       "not_supported": "This panel's firmware doesn't offer the local API yet.",
       "unknown": "Unexpected error.",
       "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Try again and pick another, or use this panel locally only.",
-      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again later, or use this panel locally only."
+      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again later, or use this panel locally only.",
+      "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first."
     },
     "flow_title": "{host}"
   },

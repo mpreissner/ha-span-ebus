@@ -158,7 +158,7 @@ class LocalMqtt:
                 self._set_connected(False)
                 return
             except CannotConnect as exc:
-                log.debug("broker connect failed: %s", exc)
+                log.debug("broker connect failed: %s", type(exc).__name__)
             except Exception:
                 log.exception("unexpected error connecting to the panel broker")
             else:

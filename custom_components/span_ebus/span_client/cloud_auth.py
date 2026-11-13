@@ -460,7 +460,7 @@ def user_id_from_token(access_token: str) -> str | None:
         body = access_token.split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
     except (IndexError, ValueError) as exc:
-        log.debug("could not read claims from the access token: %s", exc)
+        log.debug("could not read claims from the access token: %s", type(exc).__name__)
         return None
     username = claims.get("username")
     return username if isinstance(username, str) and username else None

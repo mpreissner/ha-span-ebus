@@ -673,7 +673,7 @@ def parse_sites_hardware_ids(raw: bytes) -> list[str]:
                     if value and value not in out:
                         out.append(value)
     except Exception as exc:  # noqa: BLE001 — a shape change must not break setup
-        log.debug("could not walk GetSitesForUser for hardware ids: %s", exc)
+        log.debug("could not walk GetSitesForUser for hardware ids: %s", type(exc).__name__)
     return out
 
 
@@ -869,7 +869,7 @@ def parse_sites(raw: bytes) -> list[SiteInfo]:
     try:
         return [info for site in parse(raw).get_msgs(1) if (info := _parse_site(site))]
     except Exception as exc:  # noqa: BLE001 — a shape change must not break setup
-        log.debug("could not split GetSitesForUser into sites: %s", exc)
+        log.debug("could not split GetSitesForUser into sites: %s", type(exc).__name__)
         return []
 
 
@@ -886,7 +886,7 @@ def _lookup_gateway(panel: PanelInfo, lookup: Callable[[bytes], bytes]) -> str |
         boards = (board.get_msg_opt(4) for board in result.get_msgs(2))
         holds_board = any(i is not None and i.get_str(3) == panel.serial for i in boards)
     except Exception as exc:  # noqa: BLE001 — pairing is best effort
-        log.debug("GetResourcesForHardware gave no answer: %s", exc)
+        log.debug("GetResourcesForHardware gave no answer: %s", type(exc).__name__)
         return None
     return ids[0] if holds_board and len(ids) == 1 else None
 
@@ -1246,7 +1246,7 @@ def panel_identity(
 def _drop_block(block_id: str | None, unrouted: set[str | None]) -> None:
     if block_id not in unrouted:
         unrouted.add(block_id)
-        log.debug("dropping block %s: it belongs to no panel here", block_id)
+        log.debug("dropping a block that belongs to no panel here")
 
 
 def split_frame(frame: Frame, routes: SiteRoutes, unrouted: set[str | None]) -> dict[str, Frame]:
@@ -1638,7 +1638,7 @@ class CloudBackend:
             attached_at = time.monotonic()
             try:
                 token, channel = self.bootstrap()
-                log.debug("attaching to Ably channel %s", channel)
+                log.debug("attaching to the Ably channel")
                 # The watchdog measures from the attach, not from the last frame
                 # of the previous connection, so the reconnect gets a full budget.
                 self._last_frame = attached_at = time.monotonic()
@@ -1661,7 +1661,7 @@ class CloudBackend:
                 else:
                     reason = "cloud stream closed"
             except Exception as exc:  # noqa: BLE001 — keep the daemon alive
-                reason = f"cloud stream error ({exc})"
+                reason = f"cloud stream error ({type(exc).__name__})"
             if self._stop.is_set():
                 return
             # Frames arriving after the attach are the only proof the attempt was
@@ -1770,7 +1770,7 @@ class CloudBackend:
                 if self._serial is None:
                     self._serial = (site.serial if site else None) or _parse_sites_serial(sites)
                     if self._serial:
-                        log.debug("resolved panel serial %s from GetSitesForUser", self._serial)
+                        log.debug("resolved the panel serial from GetSitesForUser")
                 if not self._hardware_ids:
                     self._hardware_ids = (
                         list(site.hardware_ids) if site else parse_sites_hardware_ids(sites)
@@ -1787,13 +1787,8 @@ class CloudBackend:
                             len(self._resolved_hardware_ids),
                             len(self._hardware_ids),
                         )
-                        log.debug(
-                            "hardware ids were %s, now %s",
-                            self._resolved_hardware_ids,
-                            self._hardware_ids,
-                        )
                     self._resolved_hardware_ids = self._hardware_ids
-                    log.debug("subscribable hardware ids: %s", self._hardware_ids)
+                    log.debug("subscribable hardware ids: %d", len(self._hardware_ids))
 
             request = field_string(1, self._device_uuid)
             directive = parse_ably_token(
@@ -1833,10 +1828,13 @@ class CloudBackend:
                         log.error(
                             "SubscribeAndGetTraits failed (%s); the channel will stay "
                             "silent until the next reconnect",
-                            exc,
+                            type(exc).__name__,
                         )
                     else:
-                        log.warning("relay state refresh failed (%s); keeping last known", exc)
+                        log.warning(
+                            "relay state refresh failed (%s); keeping last known",
+                            type(exc).__name__,
+                        )
                 first = False
                 if not self._wait_before_refresh(SWITCH_REFRESH_SECONDS):
                     return
@@ -1949,8 +1947,9 @@ class CloudBackend:
             if targets != self._energy_targets:
                 self._energy_targets = targets
                 log.debug(
-                    "energy targets: %s",
-                    {res: sorted(nodes) for res, nodes in targets.items()},
+                    "energy targets: %d node(s) on %d resource(s)",
+                    sum(len(nodes) for nodes in targets.values()),
+                    len(targets),
                 )
             if frame.site_flows:
                 self._energy_flows = tuple(frame.site_flows)

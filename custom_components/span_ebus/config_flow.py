@@ -512,7 +512,7 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         try:
             found.extend(await self._browse())
         except Exception as err:  # noqa: BLE001 — the address form is the fallback
-            _LOGGER.debug("mDNS browse for SPAN panels failed: %s", err)
+            _LOGGER.debug("mDNS browse for SPAN panels failed: %s", type(err).__name__)
         entries = self._async_current_entries(include_ignore=False)
         return discovery.offerable(
             found,
@@ -562,7 +562,7 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         found: list[discovery.Candidate] = []
         for result in results:
             if isinstance(result, BaseException):
-                _LOGGER.debug("could not resolve a discovered panel: %s", result)
+                _LOGGER.debug("could not resolve a discovered panel: %s", type(result).__name__)
             else:
                 found.extend(result)
         return found
@@ -790,6 +790,8 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         if found is None:
             return self.async_abort(reason="panel_not_on_account")
         site, panel = found
+        if self._cloud_runs_panel(panel.key):
+            return self.async_abort(reason="panel_on_cloud_entry")
         cloud = pick["cloud"]
         try:
             # No entry yet, so no transport: read the circuits straight off
