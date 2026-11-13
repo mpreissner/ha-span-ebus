@@ -120,7 +120,16 @@ def test_entities_the_fixture_triggers(snapshot):
 
 # Rows for properties the MAIN 40 capture does not describe; grounded in
 # synthetic tests instead.
-SYNTHETIC_ONLY_ROWS = frozenset({"time_to_priority_shed", "total_time_remaining"})
+SYNTHETIC_ONLY_ROWS = frozenset(
+    {
+        "time_to_priority_shed", "total_time_remaining",
+        # 4b-2 subdevices: the MAIN 40 capture has no battery, PV, EV charger or MID.
+        "bess:soc/soc", "bess:soc/soe", "bess:info/nameplate-capacity",
+        "bess:status/communication-state", "pv:info/nominal-power", "evse:status/status",
+        "evse:derived/charging", "evse:derived/ev-connected", "evse:meter/advertised-current",
+        "evse:config/max-charge-current", "mid:grid/grid-state", "mid:grid/islanding-state",
+    }
+)  # fmt: skip
 
 
 def _capture_described(snapshot: model.Snapshot) -> set[str]:
@@ -278,3 +287,24 @@ def test_time_zone_is_pii_and_kept_out_of_the_store():
 
 def test_fixture_time_zone_is_redacted():
     assert capture_tree().value(PANEL, "status/time-zone") == "Etc/UTC"
+
+
+# --- 4b-2: subdevices stay absent on the capture -----------------------------------------
+
+
+def test_capture_has_no_subdevices_and_no_islanding(snapshot):
+    """The user's panel has no battery, PV, EV charger or MID: nothing new appears."""
+    assert not (snapshot.bess or snapshot.pv or snapshot.evse or snapshot.mid)
+    panel = snapshot.panel
+    assert not panel.has_mid and not panel.has_bess and panel.grid_forming is None
+    keys = {row.key for row, _ in existing(snapshot)}
+    assert "grid_islandable" not in keys and "mid:grid/grid-forming-entity" not in keys
+    assert {model.row_device(snapshot, row, d) for row, d in existing(snapshot)} == {
+        model.PANEL_REF
+    }
+
+
+def test_translation_keys_are_valid_and_unique():
+    keys = [model.translation_key(row) for row in model.ROWS]
+    assert len(keys) == len(set(keys))
+    assert all(re.fullmatch(r"[a-z0-9_]+", key) for key in keys)

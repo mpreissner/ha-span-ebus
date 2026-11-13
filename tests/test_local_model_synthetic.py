@@ -195,12 +195,16 @@ def test_a_root_not_ready_takes_its_children_down():
 
 
 def test_unmapped_devices_and_properties():
+    widget = description("widget", _props_map(("meter/soc",), {}), parent=PANEL, root=PANEL)
     bess = description("bess", _props_map(("meter/soc",), {}), parent=PANEL, root=PANEL)
     keys = (*CIRCUIT_KEYS, "meter/mystery")
-    snapshot = snap(tree_with(circuit_keys=keys, extra_children={"bess-1": bess}))
-    assert model.Unmapped("bess", None) in snapshot.unmapped
+    snapshot = snap(
+        tree_with(circuit_keys=keys, extra_children={"widget-1": widget, "bess-1": bess})
+    )
+    assert model.Unmapped("widget", None) in snapshot.unmapped
+    assert model.Unmapped("bess", "meter/soc") in snapshot.unmapped  # mapped class, odd property
     assert model.Unmapped("circuit", "meter/mystery") in snapshot.unmapped
-    assert "bess-1" not in snapshot.circuits and "bess-1" not in snapshot.lugs
+    assert "widget-1" not in snapshot.circuits and "widget-1" not in snapshot.lugs
 
 
 def test_circuit_label_falls_back_to_spaces():

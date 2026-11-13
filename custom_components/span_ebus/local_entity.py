@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import (
+    PERCENTAGE,
     EntityCategory,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
@@ -70,6 +71,7 @@ class Presentation:
     options: tuple[str, ...] | None = None
     enabled: bool | Callable[[Any], bool] = True
     suffix: str | None = None  # circuit rows: "<circuit name> <suffix>"
+    digits: int | None = None  # overrides ROUNDING for this row
 
 
 _W, _A, _V, _HZ, _KWH = (
@@ -106,6 +108,9 @@ _DURATION = Presentation(
 
 def _enum(*options: str) -> Presentation:
     return Presentation(device_class=SensorDeviceClass.ENUM, category=_D, options=options)
+
+
+_DIAG_CONNECTIVITY = Presentation(device_class=BinarySensorDeviceClass.CONNECTIVITY, category=_D)
 
 
 def _produces(circuit: model.CircuitFacts) -> bool:
@@ -190,12 +195,56 @@ PRESENTATION: dict[str, Presentation] = {
     ),
     "breaker": Presentation(suffix="breaker"),
     "priority": Presentation(category=EntityCategory.CONFIG, suffix="priority"),
+    # islanding, on the panel: only with a MID or battery
+    "grid_islandable": Presentation(device_class=BinarySensorDeviceClass.POWER, category=_D),
+    "mid:grid/grid-forming-entity": _enum(*model.GRID_FORMING_OPTIONS),
+    # battery (+ = discharging, SPAN's raw sign)
+    "bess:meter/active-power": _POWER,
+    "bess:soc/soc": Presentation(
+        unit=PERCENTAGE, device_class=SensorDeviceClass.BATTERY, state_class=_MEAS, digits=0
+    ),
+    "bess:soc/soe": Presentation(
+        unit=_KWH, device_class=SensorDeviceClass.ENERGY_STORAGE, state_class=_MEAS,
+        category=_D, digits=2,
+    ),
+    "bess:info/nameplate-capacity": Presentation(
+        unit=_KWH, device_class=SensorDeviceClass.ENERGY_STORAGE, category=_D, enabled=False
+    ),
+    "bess:status/communication-state": Presentation(
+        device_class=SensorDeviceClass.ENUM, category=_D, enabled=False,
+        options=("ok", "degraded", "lost", "unknown"),
+    ),
+    "bess:derived/connected": _DIAG_CONNECTIVITY,
+    # solar
+    "pv:info/nominal-power": Presentation(
+        unit=_W, device_class=SensorDeviceClass.POWER, category=_D, enabled=False
+    ),
+    "pv:derived/panel-link": _DIAG_CONNECTIVITY,
+    # EV charger (read only; the current limit and lock arrive with their platforms)
+    "evse:status/status": Presentation(
+        device_class=SensorDeviceClass.ENUM, options=model.EVSE_STATUS_OPTIONS
+    ),
+    "evse:derived/charging": Presentation(
+        device_class=BinarySensorDeviceClass.BATTERY_CHARGING
+    ),
+    "evse:derived/ev-connected": Presentation(device_class=BinarySensorDeviceClass.PLUG),
+    "evse:meter/advertised-current": Presentation(
+        unit=_A, device_class=SensorDeviceClass.CURRENT, state_class=_MEAS, digits=1
+    ),
+    "evse:config/max-charge-current": _RATING,
+    "evse:derived/panel-link": _DIAG_CONNECTIVITY,
+    # MID
+    "mid:grid/grid-state": _enum("up", "down", "degraded", "unknown"),
+    "mid:grid/islanding-state": _enum("on_grid", "off_grid", "unknown"),
 }  # fmt: skip
 
 
-def round_value(value: Any, unit: str | None) -> Any:
-    """Round a reading to what its unit is worth showing. -0 is shown as 0."""
-    digits = ROUNDING.get(unit) if unit is not None else None
+def round_value(value: Any, unit: str | None, digits: int | None = None) -> Any:
+    """Round a reading to what its unit is worth showing. -0 is shown as 0.
+    `digits` overrides the unit's default.
+    """
+    if digits is None:
+        digits = ROUNDING.get(unit) if unit is not None else None
     if digits is None or isinstance(value, bool) or not isinstance(value, int | float):
         return value
     if digits == 0:
@@ -220,6 +269,40 @@ def panel_device_info(entry: ConfigEntry, snapshot: Snapshot | None = None) -> D
             info["sw_version"] = panel.firmware
         if panel.hardware:
             info["hw_version"] = panel.hardware
+    return info
+
+
+_SUBDEVICE_NAMES = {"bess": "Battery", "pv": "Solar", "evse": "EV charger", "mid": "MID"}
+
+
+def device_info_for(
+    entry: ConfigEntry, panel_key: str, ref: model.DeviceRef, snapshot: Snapshot | None = None
+) -> DeviceInfo:
+    """The device an entity sits on. Subdevices hang off the panel and never
+    carry a serial number.
+    """
+    identifier = model.device_identifier(panel_key, ref)
+    if identifier is None:
+        return panel_device_info(entry, snapshot)
+    if ref.kind == model.REMOTE_CT:
+        name = ref.name_hint or "Remote CT"
+    else:
+        name = f"{entry.title} {_SUBDEVICE_NAMES.get(ref.kind, ref.kind)}"
+        if ref.name_hint:
+            name = f"{name} ({ref.name_hint})"
+    info = DeviceInfo(
+        identifiers={(DOMAIN, identifier)},
+        name=name,
+        via_device=(DOMAIN, entry.data[CONF_LOCAL_SERIAL]),
+    )
+    for key, value in (
+        ("manufacturer", ref.manufacturer),
+        ("model", ref.model),
+        ("sw_version", ref.sw_version),
+        ("hw_version", ref.hw_version),
+    ):
+        if value:
+            info[key] = value
     return info
 
 
@@ -323,14 +406,15 @@ class SpanLocalEntity(Entity):
         snapshot = transport.snapshot
         facts = model.row_facts(snapshot, row, device_id)
         self._attr_unique_id = model.row_uid(row, transport.panel_key, device_id)
-        self._attr_device_info = panel_device_info(entry, snapshot)
+        self._ref = model.row_device(snapshot, row, device_id)
+        self._attr_device_info = device_info_for(entry, transport.panel_key, self._ref, snapshot)
         self._attr_entity_category = self._look.category
         enabled = self._look.enabled
         self._attr_entity_registry_enabled_default = (
             enabled(facts) if callable(enabled) else enabled
         )
         if row.scope is not Scope.CIRCUIT:
-            self._attr_translation_key = row.key
+            self._attr_translation_key = model.translation_key(row)
         self._recompute(snapshot)
 
     async def async_added_to_hass(self) -> None:
@@ -396,7 +480,10 @@ class SpanLocalEntity(Entity):
             if presence is Presence.VALUE and row.attrs is not None:
                 attrs = row.attrs(facts)
             if row.scope is Scope.CIRCUIT and self._look.suffix:
-                self._attr_name = f"{model.circuit_label(facts)} {self._look.suffix}"
+                if self._ref.kind == model.REMOTE_CT:  # its own device carries the label
+                    self._attr_name = self._look.suffix.capitalize()
+                else:
+                    self._attr_name = f"{model.circuit_label(facts)} {self._look.suffix}"
         if self._blocked(snapshot):
             presence = Presence.UNAVAILABLE
         if presence is not Presence.VALUE:
@@ -416,7 +503,7 @@ class SpanLocalEntity(Entity):
     def _present(self, value: Any) -> Any:
         if self._look.options is not None and value not in self._look.options:
             return None
-        return round_value(value, self._look.unit)
+        return round_value(value, self._look.unit, self._look.digits)
 
     # --- switch and select: optimistic until the panel confirms ------------
 

@@ -207,6 +207,24 @@
       },
       "pcs_enabled": {
         "name": "PCS enabled"
+      },
+      "grid_islandable": {
+        "name": "Grid islandable"
+      },
+      "bess_derived_connected": {
+        "name": "Connected"
+      },
+      "pv_derived_panel_link": {
+        "name": "Panel link"
+      },
+      "evse_derived_charging": {
+        "name": "Charging"
+      },
+      "evse_derived_ev_connected": {
+        "name": "EV connected"
+      },
+      "evse_derived_panel_link": {
+        "name": "Panel link"
       }
     },
     "sensor": {
@@ -336,6 +354,73 @@
       },
       "total_time_remaining": {
         "name": "Total time remaining"
+      },
+      "mid_grid_grid_forming_entity": {
+        "name": "Grid-forming source",
+        "state": {
+          "battery": "Battery",
+          "generator": "Generator",
+          "grid": "Grid",
+          "none": "None",
+          "pv": "Solar",
+          "unknown": "Unknown"
+        }
+      },
+      "bess_meter_active_power": {
+        "name": "Power"
+      },
+      "bess_soc_soc": {
+        "name": "State of charge"
+      },
+      "bess_soc_soe": {
+        "name": "Stored energy"
+      },
+      "bess_info_nameplate_capacity": {
+        "name": "Nameplate capacity"
+      },
+      "bess_status_communication_state": {
+        "name": "Communication",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "lost": "Lost",
+          "unknown": "Unknown"
+        }
+      },
+      "pv_info_nominal_power": {
+        "name": "Nominal power"
+      },
+      "evse_status_status": {
+        "name": "Status",
+        "state": {
+          "available": "Available",
+          "preparing": "Preparing",
+          "charging": "Charging",
+          "unavailable": "Unavailable"
+        }
+      },
+      "evse_meter_advertised_current": {
+        "name": "Advertised current"
+      },
+      "evse_config_max_charge_current": {
+        "name": "Maximum charge current"
+      },
+      "mid_grid_grid_state": {
+        "name": "Grid state",
+        "state": {
+          "up": "Up",
+          "down": "Down",
+          "degraded": "Degraded",
+          "unknown": "Unknown"
+        }
+      },
+      "mid_grid_islanding_state": {
+        "name": "Islanding state",
+        "state": {
+          "on_grid": "On grid",
+          "off_grid": "Off grid",
+          "unknown": "Unknown"
+        }
       }
     },
     "select": {
