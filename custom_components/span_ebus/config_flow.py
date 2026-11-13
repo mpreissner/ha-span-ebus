@@ -39,6 +39,8 @@ from zeroconf import IPVersion, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo
 
 from .const import (
+    CLOUD_DATA_KEYS,
+    CLOUD_OPTION_KEYS,
     CONF_ACCESS_TOKEN,
     CONF_BROKER_PASSWORD,
     CONF_BROKER_USERNAME,
@@ -81,7 +83,7 @@ from .span_client.link import (
     feeds_from_kinds,
     link_to_options,
     match_circuits,
-    options_without_link,
+    unlinked_entry,
 )
 from .span_client.local import discovery, onboard, tls
 from .span_client.local.health import Mode
@@ -225,10 +227,6 @@ def _new_link(cloud_key: str, serial: str, site: SiteInfo) -> PanelLink:
         site_panel_count=len(site.panels),
         linked_at=dt_util.utcnow().isoformat(),
     )
-
-
-def _remove_file(path: Path) -> None:
-    path.unlink(missing_ok=True)
 
 
 def _sites_from_token_store(token_path: Path) -> list[SiteInfo]:
@@ -981,8 +979,6 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
             return await self.async_step_linked()
         if CONF_LOCAL_SERIAL in self.config_entry.data:
             return await self.async_step_cloud_add()
-        if not _is_cloud_account(self.config_entry.data):
-            return self.async_abort(reason="not_cloud_account")
         errors: dict[str, str] = {}
         if user_input is None:
             try:
@@ -1169,30 +1165,30 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Drop the account: the panel runs over its local API alone."""
+        entry = self.config_entry
+        if not _is_linked(entry.data):
+            # TODO(5c): a cloud entry linked to a local one keeps its link and
+            # stays at 1.2; removing that link is not this step's to do.
+            return self.async_abort(reason="cloud_remove_unsupported")
         if user_input is None:
             return self.async_show_form(step_id="cloud_remove", data_schema=vol.Schema({}))
-        entry = self.config_entry
-        dropped = {
-            CONF_TOKENS,
-            CONF_EMAIL,
-            CONF_USER_ID,
-            CONF_DEVICE_UUID,
-            CONF_SERIAL,
-            CONF_PRIMARY_PANEL,
-        }
-        data = {key: value for key, value in entry.data.items() if key not in dropped}
-        options = {
-            key: value
-            for key, value in options_without_link(entry.options).items()
-            if key not in (CONF_PANELS, CONF_DECLINED, CONF_FEEDS)
-        }
+        data, options = unlinked_entry(
+            entry.data,
+            entry.options,
+            data_keys=CLOUD_DATA_KEYS,
+            option_keys=CLOUD_OPTION_KEYS,
+        )
         options[CONF_TRANSPORT_MODE] = Mode.LOCAL_ONLY.value
-        # Unloading leaves the token file once the tokens are gone from the data.
-        token_path = self._token_path()
-        await self.hass.async_add_executor_job(_remove_file, token_path)
         self.hass.config_entries.async_update_entry(
             entry, data=data, options=options, minor_version=UNLINKED_MINOR_VERSION
         )
+        # Stop the cloud before its token file goes, so no refresh writes it
+        # back; the unload after the reload removes it again for good measure.
+        runtime = getattr(entry, "runtime_data", None)
+        transport = runtime.transport if runtime is not None else None
+        if transport is not None:
+            await transport.async_detach_cloud()
+        await self.hass.async_add_executor_job(cloud_auth.discard_tokens, self._token_path())
         self.hass.config_entries.async_schedule_reload(entry.entry_id)
         return self.async_create_entry(data=options)
 

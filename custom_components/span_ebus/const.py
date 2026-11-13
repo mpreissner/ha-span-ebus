@@ -36,6 +36,14 @@ CONF_TRANSPORT_MODE = "transport_mode"
 CONF_SNAPSHOT_INTERVAL = "snapshot_interval"
 DEFAULT_SNAPSHOT_INTERVAL = 1.0
 
+# What removing a local panel's cloud fallback takes out of its entry: the
+# account in the data, and the account's panel choices in the options (the
+# link itself is span_client.link's to drop).
+CLOUD_DATA_KEYS = frozenset(
+    {CONF_TOKENS, CONF_EMAIL, CONF_USER_ID, CONF_DEVICE_UUID, CONF_SERIAL, CONF_PRIMARY_PANEL}
+)
+CLOUD_OPTION_KEYS = frozenset({CONF_PANELS, CONF_DECLINED, CONF_FEEDS})
+
 # Marks a reauth flow as the local broker's, in the flow's entry data: a linked
 # entry also has cloud tokens, which would otherwise route it to the cloud form.
 LOCAL_REAUTH = "local_reauth"

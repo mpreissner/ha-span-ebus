@@ -372,6 +372,12 @@ def refresh(refresh_token: str) -> CloudTokens:
 # never stored, per the module contract).
 
 
+def discard_tokens(path: Path) -> None:
+    """Delete a token store, if there is one. Never raises."""
+    with contextlib.suppress(OSError):
+        Path(path).expanduser().unlink(missing_ok=True)
+
+
 def save_tokens(path: Path, tokens: CloudTokens) -> None:
     """Persist tokens to `path` as 0600 JSON."""
     path = Path(path).expanduser()

@@ -190,7 +190,7 @@
     },
     "abort": {
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
-      "not_cloud_account": "Panels added locally without a SPAN account have no options yet.",
+      "cloud_remove_unsupported": "This entry has no cloud fallback to remove.",
       "panel_not_on_account": "This panel isn't on that SPAN account.",
       "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first."
     }

@@ -198,6 +198,28 @@ def options_without_link(options: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in options.items() if key != CONF_LINKS}
 
 
+def unlinked_entry(
+    data: Mapping[str, Any],
+    options: Mapping[str, Any],
+    *,
+    data_keys: Iterable[str],
+    option_keys: Iterable[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """An entry's data and options with its cloud fallback taken out.
+
+    Drops the link and the given account keys; everything local stays.
+    """
+    dropped_data, dropped_options = set(data_keys), set(option_keys)
+    return (
+        {key: value for key, value in data.items() if key not in dropped_data},
+        {
+            key: value
+            for key, value in options_without_link(options).items()
+            if key not in dropped_options
+        },
+    )
+
+
 # --- entry versions -------------------------------------------------------------
 
 # Entries with a link are minor version 2, so a version that knows nothing of

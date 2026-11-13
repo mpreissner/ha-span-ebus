@@ -19,6 +19,7 @@ from span_client.link import (
     match_circuits,
     migration_ok,
     options_without_link,
+    unlinked_entry,
 )
 
 CLOUD_KEY = "nt-0000-test"
@@ -163,3 +164,50 @@ def test_options_without_link():
 )
 def test_migration_ok(version, minor, ok):
     assert migration_ok(version, minor) is ok
+
+
+def test_unlinked_entry_keeps_the_local_panel_and_drops_the_account():
+    from const import (
+        CLOUD_DATA_KEYS,
+        CLOUD_OPTION_KEYS,
+        CONF_DECLINED,
+        CONF_DEVICE_UUID,
+        CONF_EMAIL,
+        CONF_FEEDS,
+        CONF_LOCAL_SERIAL,
+        CONF_PANELS,
+        CONF_PRIMARY_PANEL,
+        CONF_SERIAL,
+        CONF_TOKENS,
+        CONF_TRANSPORT_MODE,
+        CONF_USER_ID,
+    )
+
+    local = {CONF_LOCAL_SERIAL: SERIAL, "host": "panel.invalid", "ca_pem": "pem"}
+    data = {
+        **local,
+        CONF_TOKENS: {"refresh_token": "r"},
+        CONF_EMAIL: "user@example.invalid",
+        CONF_USER_ID: "u-1",
+        CONF_DEVICE_UUID: "d-1",
+        CONF_SERIAL: SERIAL,
+        CONF_PRIMARY_PANEL: SERIAL,
+    }
+    options = link_to_options(
+        {
+            CONF_TRANSPORT_MODE: "local_first",
+            CONF_PANELS: [CLOUD_KEY],
+            CONF_DECLINED: [],
+            CONF_FEEDS: {},
+            "other": 1,
+        },
+        _link(),
+    )
+    new_data, new_options = unlinked_entry(
+        data, options, data_keys=CLOUD_DATA_KEYS, option_keys=CLOUD_OPTION_KEYS
+    )
+    assert new_data == local
+    assert new_options == {CONF_TRANSPORT_MODE: "local_first", "other": 1}
+    # The originals are left alone.
+    assert CONF_TOKENS in data
+    assert CONF_LINKS in options

@@ -166,6 +166,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         # Added over the local API. Earlier versions left this issue to say
         # local telemetry was still to come.
         ir.async_delete_issue(hass, DOMAIN, _local_pending_issue(entry))
+        if CONF_TOKENS not in entry.data:
+            # No account any more: a token file left from one must not linger.
+            await hass.async_add_executor_job(cloud_auth.discard_tokens, _token_path(hass, entry))
 
         async def build_cloud() -> list[SpanCloudCoordinator]:
             return await _cloud_coordinators(hass, entry)
@@ -260,9 +263,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> boo
     if unloaded:
         for coordinator in runtime.coordinators:
             await coordinator.async_shutdown()
-        token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
-        if CONF_TOKENS in entry.data:
-            await hass.async_add_executor_job(_remove_quietly, token_path)
+        # Every unload: a local entry whose account was just removed may have
+        # had its token file rewritten by a refresh in flight.
+        await hass.async_add_executor_job(cloud_auth.discard_tokens, _token_path(hass, entry))
     return unloaded
 
 
@@ -315,6 +318,10 @@ def _remove_by_prefix(directory: Path, prefix: str) -> None:
     with contextlib.suppress(OSError):
         for path in directory.glob(f"{prefix}*.energy"):
             _remove_quietly(path)
+
+
+def _token_path(hass: HomeAssistant, entry: SpanConfigEntry) -> Path:
+    return Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
 
 
 def _remove_quietly(path: Path) -> None:

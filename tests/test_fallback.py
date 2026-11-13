@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 from span_client.fallback import FALLBACK_KEYS, RegisterContinuation, resolve
 from span_client.link import DOWNSTREAM, UPSTREAM, PanelLink
@@ -239,3 +241,63 @@ def test_second_spell_continues_from_what_is_shown():
     cont.cloud_started()
     assert cont.cloud(800.0) == pytest.approx(105.0)
     assert cont.cloud(801.0) == pytest.approx(106.0)
+
+
+def test_hold_without_anything_shown_passes_through():
+    cont = RegisterContinuation()
+    assert cont.hold(None) is None
+    assert cont.hold(42.0) == 42.0
+
+
+def test_hold_never_goes_below_what_was_shown():
+    cont = RegisterContinuation()
+    cont.local(100.0)
+    assert cont.hold(98.0) == 100.0  # a stale or restored value
+    assert cont.hold(None) == 100.0
+    cont.cloud_started()
+    cont.cloud(500.0)
+    cont.cloud(505.0)  # shown 105
+    assert cont.hold(100.0) == pytest.approx(105.0)
+    assert cont.hold(110.0) == 110.0
+
+
+def _step(cont, value, *, transport, total=None):
+    return cont.show(
+        value,
+        local=transport == "local",
+        cloud_counting=transport == "cloud",
+        total=total,
+    )
+
+
+def test_local_cloud_stopped_local_stays_monotonic():
+    """LOCAL, then the cloud counts, then it stops, then LOCAL comes back."""
+    cont = RegisterContinuation()
+    seen = [_step(cont, 100.0, transport="local")]
+    cont.cloud_started()
+    seen += [
+        _step(cont, 100.0, transport="cloud", total=500.0),
+        _step(cont, 100.0, transport="cloud", total=505.0),
+        # The cloud stopped (or the shown transport is offline): hold.
+        _step(cont, 100.0, transport="offline"),
+        _step(cont, None, transport="offline"),
+        # Back on LOCAL, the panel says less than the cloud counted.
+        _step(cont, 103.0, transport="local"),
+        _step(cont, 106.0, transport="local"),
+    ]
+    assert seen == pytest.approx([100.0, 100.0, 105.0, 105.0, 105.0, 105.0, 106.0])
+    assert all(b >= a for a, b in itertools.pairwise(seen))
+
+
+def test_cloud_with_nothing_to_count_from_holds_the_value():
+    cont = RegisterContinuation()
+    cont.cloud_started()
+    # No local value yet: cloud() has nothing to continue, so the value shows.
+    assert _step(cont, 50.0, transport="cloud", total=500.0) == 50.0
+    assert _step(cont, None, transport="cloud", total=500.0) is None
+
+
+def test_show_on_local_is_local():
+    cont = RegisterContinuation()
+    assert _step(cont, 100.0, transport="local") == 100.0
+    assert _step(cont, None, transport="local") is None

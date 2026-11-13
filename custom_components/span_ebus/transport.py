@@ -196,6 +196,7 @@ class SpanTransportManager:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        self._unlisten_to_cloud()
         self._listeners.clear()
         self._model_listeners.clear()
         self._coalescer.stop()
@@ -335,6 +336,16 @@ class SpanTransportManager:
                 await coordinator.async_stop()
             except Exception:  # one panel's failure must not keep the rest streaming
                 _LOGGER.exception("could not stop a SPAN cloud stream")
+
+    async def async_detach_cloud(self) -> None:
+        """Let go of the cloud before its credentials are removed.
+
+        Nothing is restarted after this, so no token refresh can write the
+        credentials back before the entry reloads.
+        """
+        self._build_cloud = None
+        self._cloud_retry_at = float("inf")
+        await self._stop_cloud()
 
     @callback
     def _listen_to_cloud(self) -> None:
@@ -544,14 +555,15 @@ class SpanTransportManager:
         ):
             return local_value
         continuation = self._continuations.setdefault(device_id, RegisterContinuation())
-        if self.shown is Transport.LOCAL:
-            return continuation.local(
-                float(local_value) if isinstance(local_value, int | float) else None
-            )
-        if self.shown is Transport.CLOUD and self._cloud_running:
-            shown = continuation.cloud(self._cloud_energy("site/grid"))
-            return local_value if shown is None else shown
-        return local_value
+        value = float(local_value) if isinstance(local_value, int | float) else None
+        counting = self.shown is Transport.CLOUD and self._cloud_running
+        shown = continuation.show(
+            value,
+            local=self.shown is Transport.LOCAL,
+            cloud_counting=counting,
+            total=self._cloud_energy("site/grid") if counting else None,
+        )
+        return local_value if shown is None else shown
 
     def _call_soon(self, action: Callable[[], None]) -> Callable[[], None]:
         handle = self._hass.loop.call_soon(action)

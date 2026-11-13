@@ -191,6 +191,31 @@ class RegisterContinuation:
             return value
         return self._high
 
+    def hold(self, value: float | None) -> float | None:
+        """A value shown while neither the panel nor the cloud is counting.
+
+        The register never goes below what was shown: the larger of the value
+        and the most recently shown. The value is not taken as the panel's own,
+        since off LOCAL it is a stale or restored one.
+        """
+        floor = self._high if self._high is not None else self._local_last
+        if value is None or floor is None:
+            return floor if value is None else value
+        return max(value, floor)
+
+    def show(
+        self, value: float | None, *, local: bool, cloud_counting: bool, total: float | None
+    ) -> float | None:
+        """One step: the panel's value on LOCAL, the cloud's count while it
+        runs, otherwise a hold."""
+        if local:
+            return self.local(value)
+        if cloud_counting:
+            shown = self.cloud(total)
+            if shown is not None:
+                return shown
+        return self.hold(value)
+
     def cloud(self, total: float | None) -> float | None:
         if self._local_last is None:
             return None
