@@ -6,7 +6,7 @@ once, twice, or never — are the part of the energy sensors worth pinning down.
 """
 
 import pytest
-from energy import EnergyAccumulator, EnergyLedger, IntegratedRun
+from energy import EnergyAccumulator, EnergyLedger, IntegratedRun, SourcedRun, pick_restored
 from span_client.models import EnergySample
 
 KEY = "circuit-36/power"
@@ -412,3 +412,71 @@ def test_a_run_carries_a_restored_total_and_only_counts_the_positive_part():
     run.sample(3600.0, 10.0)
     # Trapezoid of max(0, -3600) and 3600 over ten seconds.
     assert run.total_kwh == pytest.approx(5.005)
+
+
+# --- a run that changes source, and resuming a total -----------------------------
+
+
+def test_a_failover_is_not_bridged():
+    run = SourcedRun(300.0)
+    run.sample_from("local", 3600.0, 0.0)
+    run.sample_from("local", 3600.0, 10.0)
+    assert run.total_kwh == pytest.approx(0.01)
+    # The cloud's first reading only sets a baseline: the 20 s the switch took
+    # is not credited with the average either side.
+    assert run.sample_from("cloud", 3600.0, 30.0) == (True, None)
+    assert run.total_kwh == pytest.approx(0.01)
+    run.sample_from("cloud", 3600.0, 40.0)
+    assert run.total_kwh == pytest.approx(0.02)
+
+
+def test_a_failback_is_not_bridged():
+    run = SourcedRun(300.0)
+    run.sample_from("cloud", 3600.0, 0.0)
+    run.sample_from("local", 3600.0, 10.0)
+    run.sample_from("local", 3600.0, 20.0)
+    assert run.total_kwh == pytest.approx(0.01)
+
+
+def test_offline_between_sources_breaks_the_run_and_reports_a_long_gap():
+    run = SourcedRun(300.0)
+    run.sample_from("local", 3600.0, 0.0)
+    assert run.sample_from("offline", None, 100.0) == (False, None)
+    assert run.sample_from("cloud", 3600.0, 400.0) == (True, 400.0)
+    assert run.total_kwh == 0.0
+
+
+def test_a_short_switch_is_not_a_gap():
+    # Gaps under the limit are never recorded (a normal failover is not one).
+    run = SourcedRun(300.0)
+    run.sample_from("local", 1000.0, 0.0)
+    assert run.sample_from("cloud", 1000.0, 20.0) == (True, None)
+
+
+def test_the_same_source_integrates_as_before():
+    run = SourcedRun(300.0, total_kwh=1.0)
+    run.sample_from("local", 3600.0, 0.0)
+    run.sample_from("local", 3600.0, 10.0)
+    assert run.total_kwh == pytest.approx(1.01)
+
+
+@pytest.mark.parametrize(
+    ("cache", "recorded", "expected"),
+    [
+        (1.5, "2.25", 2.25),  # the recorder is ahead after a crash
+        (2.5, "2.25", 2.5),  # the cache is ahead
+        (2.5, "unknown", 2.5),
+        (2.5, "unavailable", 2.5),
+        (2.5, "garbage", 2.5),
+        (2.5, "nan", 2.5),
+        (2.5, "-4", 2.5),
+        (2.5, None, 2.5),  # no recorder state
+        (None, "3.0", 3.0),  # no cache
+        (None, None, 0.0),
+        (None, "unknown", 0.0),
+        ("unknown", 1.0, 1.0),
+        (True, None, 0.0),
+    ],
+)
+def test_pick_restored(cache, recorded, expected):
+    assert pick_restored(cache, recorded) == expected

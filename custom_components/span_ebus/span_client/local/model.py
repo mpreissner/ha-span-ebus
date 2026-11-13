@@ -1625,14 +1625,25 @@ def has_feedthrough(snapshot: Snapshot) -> bool:
 
     Downstream lugs marked UNUSED, or not describing their power, carry nothing
     to subtract: an MLO sharing the enclosure reports such lugs, whose currents
-    mirror the upstream ones. An unpublished role counts as maybe in use.
+    mirror the upstream ones. Lugs with no published role count as in use only
+    once they have reported a power: until then they would hold the overhead at
+    None, on panels that may well feed nothing downstream.
     """
     down = snapshot.downstream
-    return (
-        down is not None
-        and (down.feeds_role or "").upper() != "UNUSED"
-        and _ACTIVE_POWER in down.described
-    )
+    if down is None or _ACTIVE_POWER not in down.described:
+        return False
+    if down.feeds_role is None:
+        if down.active_power is None:
+            return False
+        if down.device_id not in _ASSUMED_FEEDTHROUGH:
+            _ASSUMED_FEEDTHROUGH.add(down.device_id)
+            log.debug("Downstream lugs without a feeds role report power; assuming a feedthrough")
+        return True
+    return down.feeds_role.upper() != "UNUSED"
+
+
+# Downstream lugs already logged as an assumed feedthrough, so it is said once.
+_ASSUMED_FEEDTHROUGH: set[str] = set()
 
 
 def local_overhead_w(snapshot: Snapshot, read: Reader) -> float | None:
@@ -1650,6 +1661,9 @@ def local_overhead_w(snapshot: Snapshot, read: Reader) -> float | None:
     for device_id, circuit in snapshot.circuits.items():
         if circuit.is_remote_ct:
             continue
+        # Each circuit counts once, shared meter or not. Whether two circuits
+        # sharing a meter both publish its whole power (double counting here)
+        # or split it is not known: that needs a capture of a panel with one.
         shown = _float(read(Scope.CIRCUIT, device_id, _ACTIVE_POWER, circuit.state, circuit.power))
         if shown is not None and circuit.role in _PRODUCERS:
             shown = -shown

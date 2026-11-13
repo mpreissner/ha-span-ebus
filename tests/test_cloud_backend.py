@@ -1238,10 +1238,31 @@ def test_the_feedthrough_reading_is_required_once_classified():
     assert cloud.panel_overhead(schema, readings) is None
 
 
-def test_a_lone_feedthrough_is_not_a_main_feed():
+def test_a_lone_feed_is_the_main_feed_whatever_its_kind():
+    # A panel fed through lugs may tag its only feed as a feedthrough; it is
+    # still everything the panel takes in.
     schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits(), {2: 4})
     readings = {r.key: r for r in cloud.readings_from_frame(_frame(), 0.0, _circuits())}
-    assert cloud.panel_overhead(schema, readings) is None
+    plain = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits())
+    assert cloud.panel_overhead(schema, readings) == pytest.approx(
+        cloud.panel_overhead(plain, readings)
+    )
+    assert cloud.panel_overhead(schema, readings) == pytest.approx(1661.020)
+
+
+def test_a_lone_feedthrough_tagged_feed_still_gets_the_overhead_pair(caplog):
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits(), {2: 4})
+    feeds = [s for s in schema.properties.values() if cloud.is_main_feed_power(s)]
+    assert len(feeds) == 1
+    with caplog.at_level("DEBUG", logger=cloud.log.name):
+        assert cloud.is_overhead_feed(feeds[0], schema)
+    assert "lone feed" in caplog.text
+
+
+def test_the_overhead_pair_hangs_on_the_main_feed_beside_a_feedthrough():
+    schema, _ = _two_feed_inputs({2: 3, 41: 4})
+    gates = [s for s in schema.properties.values() if cloud.is_overhead_feed(s, schema)]
+    assert [s.feeder_kind for s in gates] == [3]
 
 
 def test_private_ids_stay_below_info_level(monkeypatch, caplog, tmp_path):

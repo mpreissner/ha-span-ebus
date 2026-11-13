@@ -47,7 +47,7 @@ from homeassistant.util import dt as dt_util
 from . import SpanConfigEntry
 from .const import CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER
 from .coordinator import STALE_AFTER_SECONDS, SpanCloudCoordinator
-from .energy import EnergyAccumulator, IntegratedRun
+from .energy import EnergyAccumulator, SourcedRun, pick_restored
 from .local_entity import (
     PRESENTATION,
     SpanLocalEntity,
@@ -56,9 +56,13 @@ from .local_entity import (
     panel_device_info,
     round_value,
 )
-from .span_client.backend import POWER_PROPERTY, SITE_NODE, is_main_feed_power, panel_overhead
+from .span_client.backend import (
+    POWER_PROPERTY,
+    SITE_NODE,
+    is_overhead_feed,
+    panel_overhead,
+)
 from .span_client.cloud_history import SITE_FLOW_ENERGY
-from .span_client.cloud_traits import FEEDER_FEEDTHROUGH
 from .span_client.local import model
 from .span_client.local.health import Transport
 from .span_client.local.model import DerivedRow, Presence, Row, Snapshot, ValueKind
@@ -123,8 +127,13 @@ async def async_setup_entry(
 
 
 def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntitiesCallback) -> None:
+    # The overhead pair has one uid per panel, so it is built once, however many
+    # feeds qualify.
+    overhead_added = False
+
     @callback
     def add_specs(specs: list[PropertySpec]) -> None:
+        nonlocal overhead_added
         entities: list[SensorEntity] = []
         for spec in specs:
             entities.append(SpanSensor(coordinator, spec))
@@ -135,8 +144,9 @@ def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntities
             # The main feed arrives once per panel, so it is what gates the one
             # derived pair built on it; a panel without one gets no overhead. A
             # feed classified as feedthrough lugs is the downstream panel's, not
-            # this one's main feed.
-            if is_main_feed_power(spec) and spec.feeder_kind != FEEDER_FEEDTHROUGH:
+            # this one's main feed, unless it is the panel's only feed.
+            if not overhead_added and is_overhead_feed(spec, coordinator.schema):
+                overhead_added = True
                 entities.append(SpanPanelOverheadSensor(coordinator))
                 entities.append(SpanPanelOverheadEnergySensor(coordinator, spec))
         async_add_entities(entities)
@@ -512,6 +522,10 @@ class _SpanDerivedSensor(SensorEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(self._transport.async_add_model_listener(self._on_snapshot))
+        # TODO(5a): while CLOUD no local snapshot arrives, so nothing wakes these
+        # rows to read the fallback. 5a must call `_on_transport` (or `_refresh`
+        # with the current snapshot) on each cloud coordinator update, e.g. by
+        # notifying the transport manager's listeners, which this subscribes to.
         self.async_on_remove(self._transport.async_add_listener(self._on_transport))
         self._refresh(self._transport.snapshot)
 
@@ -611,10 +625,12 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
         self, entry: SpanConfigEntry, transport: SpanTransportManager, row: DerivedRow
     ) -> None:
         super().__init__(entry, transport, row)
-        self._run = IntegratedRun(MAX_INTEGRATION_GAP_SECONDS)
-        # UTC ISO time the total last took a sample, so the time since can be
-        # accounted for later.
+        self._run = SourcedRun(MAX_INTEGRATION_GAP_SECONDS)
+        # UTC ISO time the total last took a sample, persisted with it. The 5d
+        # backfill (spec §8.3) reads it at setup to find the stretch HA was down.
         self._last_at: str | None = None
+        # The last gap the run refused to bridge, in seconds; 5d records it as a
+        # backfill gap ending at the sample that reported it.
         self._last_gap: float | None = None
         self._written: float | None = None
         # Nothing is integrated until the stored total is back.
@@ -628,21 +644,21 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
         that one wins, since a `total_increasing` sensor must not go back.
         """
         last = await self.async_get_last_sensor_data()
-        if last is not None and isinstance(last.native_value, int | float):
-            self._run.total_kwh = float(last.native_value)
+        cached = pick_restored(None if last is None else last.native_value, None)
         extra = await self.async_get_last_extra_data()
         if extra is not None:
             last_at = extra.as_dict().get("last_at")
             self._last_at = last_at if isinstance(last_at, str) else None
         recorded, recorded_at = await self._async_recorded()
-        if recorded is not None and recorded > self._run.total_kwh:
-            self._run.total_kwh = recorded
+        total = pick_restored(cached, recorded)
+        if total > cached:
             self._last_at = recorded_at
+        self._run.total_kwh = total
         self._restoring = False
         await super().async_added_to_hass()
 
-    async def _async_recorded(self) -> tuple[float | None, str | None]:
-        """The last state the recorder holds for this entity, if it is a number."""
+    async def _async_recorded(self) -> tuple[str | None, str | None]:
+        """The last state the recorder holds for this entity, and when, raw."""
         hass = self.hass
         if "recorder" not in hass.config.components:
             return None, None
@@ -659,12 +675,8 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
         if not states:
             return None, None
         state = states[-1]
-        try:
-            value = float(state.state)
-        except (TypeError, ValueError):
-            return None, None
         when = getattr(state, "last_reported", None) or state.last_updated
-        return value, when.isoformat()
+        return state.state, when.isoformat()
 
     @property
     def extra_restore_state_data(self) -> _IntegratedData:
@@ -676,7 +688,10 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
         shown = self._transport.shown
         timestamp = model.derived_timestamp(snapshot, shown, time.monotonic())
         if timestamp is not None:
-            taken, gap = self._run.sample(self._power(snapshot), timestamp)
+            # A change of transport, OFFLINE included, breaks the run: nothing is
+            # integrated across a failover or a failback.
+            power = None if shown is Transport.OFFLINE else self._power(snapshot)
+            taken, gap = self._run.sample_from(shown, power, timestamp)
             if taken:
                 self._last_at = dt_util.utcnow().isoformat()
             if gap is not None:

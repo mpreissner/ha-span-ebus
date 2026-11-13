@@ -429,7 +429,7 @@
         "name": "Panel overhead energy"
       },
       "site_energy": {
-        "name": "Site energy"
+        "name": "Home energy"
       },
       "pv_energy": {
         "name": "Solar energy"

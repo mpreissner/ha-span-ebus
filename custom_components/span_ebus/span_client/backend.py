@@ -475,6 +475,29 @@ def is_main_feed_power(spec: PropertySpec) -> bool:
     return spec.node_kind is NodeKind.LUGS and spec.property_id == POWER_PROPERTY
 
 
+def is_overhead_feed(spec: PropertySpec, schema: PanelSchema | None) -> bool:
+    """Whether `spec` is the feed a panel's overhead pair is built on.
+
+    The main feed, or a panel's only feed whatever its kind. A feed tagged as
+    feedthrough lugs is the downstream panel's only when this panel has another
+    feed; alone, the tag more likely means the panel itself is fed through lugs
+    (a downstream panel), and its feed is still all it takes in.
+    """
+    if not is_main_feed_power(spec):
+        return False
+    if spec.feeder_kind != FEEDER_FEEDTHROUGH:
+        return True
+    others = [] if schema is None else [
+        other
+        for other in schema.properties.values()
+        if is_main_feed_power(other) and other.key != spec.key
+    ]  # fmt: skip
+    if others:
+        return False
+    log.debug("A lone feed is tagged as feedthrough lugs; treating it as the main feed")
+    return True
+
+
 def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> float | None:
     """Watts entering the panel that no branch circuit or downstream panel accounts for.
 
@@ -491,11 +514,12 @@ def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> floa
     from −420 to +320 W. The result is still floored at zero, since the meters
     are not reconciled and a negative figure could only be their disagreement.
 
-    Which feed is which comes from trait 1/21's feeder kind. A single feed the
-    kind does not call a feedthrough is the main feed, with nothing leaving
-    downstream. Several feeds need every one classified — one main breaker and
-    at most one feedthrough — or there is no telling them apart, and the result
-    is None.
+    Which feed is which comes from trait 1/21's feeder kind. A single feed is
+    the main feed, with nothing leaving downstream, whatever its kind: a panel
+    fed through lugs may well tag its only feed as one (see
+    `is_overhead_feed`). Several feeds need every one classified — one main
+    breaker and at most one feedthrough — or there is no telling them apart, and
+    the result is None.
 
     None until the feeds and *every* circuit have reported, so a circuit that
     has not landed yet cannot masquerade as overhead of its whole draw.
@@ -508,7 +532,7 @@ def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> floa
     ]
     if not keys:
         return None
-    if len(feeds) == 1 and feeds[0].feeder_kind != FEEDER_FEEDTHROUGH:
+    if len(feeds) == 1:
         main, through = feeds[0], None
     else:
         mains = [f for f in feeds if f.feeder_kind == FEEDER_MAIN_BREAKER]

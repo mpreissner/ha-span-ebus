@@ -127,8 +127,43 @@ def test_local_overhead_subtracts_the_feedthrough(snapshot):
     assert model.local_overhead_w(fed, LOCAL) == pytest.approx(2000.0 - 10.0 * n - 1500.0)
     # A feedthrough that has not reported blocks the figure rather than
     # counting the downstream panel's load as overhead.
-    silent = _with_lugs(fed, "DOWNSTREAM", active_power=None)
+    silent = _with_lugs(fed, "DOWNSTREAM", feeds_role="LOADS", active_power=None)
     assert model.local_overhead_w(silent, LOCAL) is None
+
+
+def test_unroled_lugs_count_only_once_they_report(snapshot):
+    base = _with_lugs(_with_circuits(snapshot, 10.0), "UPSTREAM", active_power=2000.0)
+    n = len(base.circuits)
+    quiet = _with_lugs(base, "DOWNSTREAM", feeds_role=None, active_power=None)
+    # No role and no power yet: assumed to feed nothing, so the overhead is not
+    # held at None waiting for a reading that may never come.
+    assert not model.has_feedthrough(quiet)
+    assert model.local_overhead_w(quiet, LOCAL) == pytest.approx(2000.0 - 10.0 * n)
+    reported = _with_lugs(quiet, "DOWNSTREAM", active_power=1500.0)
+    assert model.has_feedthrough(reported)
+    assert model.local_overhead_w(reported, LOCAL) == pytest.approx(2000.0 - 10.0 * n - 1500.0)
+
+
+def test_unroled_lugs_are_logged_once(snapshot, caplog):
+    model._ASSUMED_FEEDTHROUGH.clear()
+    reported = _with_lugs(snapshot, "DOWNSTREAM", feeds_role=None, active_power=5.0)
+    with caplog.at_level("DEBUG", logger=model.log.name):
+        model.has_feedthrough(reported)
+        model.has_feedthrough(reported)
+    assert len([r for r in caplog.records if "assuming a feedthrough" in r.message]) == 1
+
+
+def test_circuits_sharing_a_meter_each_count_once(snapshot):
+    # Pins today's behaviour: both circuits on a shared meter are summed as
+    # published. Whether the panel duplicates the shared power onto both, which
+    # would double count it here, needs a capture of a panel with a shared meter.
+    base = _with_lugs(_with_circuits(snapshot, 0.0), "UPSTREAM", active_power=1000.0)
+    loads = [d for d, c in base.circuits.items() if not c.is_remote_ct][:2]
+    circuits = dict(base.circuits)
+    circuits[loads[0]] = replace(circuits[loads[0]], power=300.0, shared_meter_with=(loads[1],))
+    circuits[loads[1]] = replace(circuits[loads[1]], power=300.0, shared_meter_with=(loads[0],))
+    shared = replace(base, circuits=circuits)
+    assert model.local_overhead_w(shared, LOCAL) == pytest.approx(400.0)
 
 
 def test_a_producing_circuit_counts_as_power_into_the_bus(snapshot):

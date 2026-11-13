@@ -24,6 +24,7 @@ from its power instead; see `EnergyAccumulator`.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -310,3 +311,50 @@ class IntegratedRun:
             if elapsed > self._accumulator.max_gap_seconds:
                 gap = elapsed  # the run was broken by missing readings for this long
         return True, gap
+
+
+class SourcedRun(IntegratedRun):
+    """An `IntegratedRun` whose readings come from one source at a time.
+
+    A change of source breaks the run as a missing reading would: the stretch
+    either side of a failover is not one measurement, and the time the switch
+    took (detection, reconnection) is a dead stretch no trapezoid may span. The
+    first reading from the new source only re-establishes the baseline; a break
+    longer than `max_gap_seconds` is reported as a gap as usual.
+    """
+
+    def __init__(self, max_gap_seconds: float, total_kwh: float = 0.0) -> None:
+        super().__init__(max_gap_seconds, total_kwh)
+        self._source: object | None = None
+
+    def sample_from(
+        self, source: object, power_w: float | None, timestamp: float
+    ) -> tuple[bool, float | None]:
+        """Offer one reading from `source`. Returns (taken, gap seconds or None)."""
+        if self._source is not None and source != self._source:
+            self.sample(None, timestamp)
+        self._source = source
+        return self.sample(power_w, timestamp)
+
+
+def pick_restored(cache_total: float | None, recorded_state: Any) -> float:
+    """The total to resume from: the larger of the restore cache and the recorder.
+
+    The restore cache is saved every 15 minutes and on a clean stop, so after a
+    crash the recorder can hold a later, larger total; a `total_increasing`
+    sensor must not go back to the cache's. Either may be missing, and the
+    recorder's state may be `unknown`, `unavailable` or otherwise not a number;
+    anything that is not a finite, non-negative number is ignored. 0.0 when
+    neither has one.
+    """
+    candidates = [0.0]
+    for raw in (cache_total, recorded_state):
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value >= 0.0:
+            candidates.append(value)
+    return max(candidates)
