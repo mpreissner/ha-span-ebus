@@ -57,6 +57,8 @@ from .const import (
     CONF_BROKER_USERNAME,
     CONF_CA_PEM,
     CONF_CLIENT_NAME,
+    CONF_CLOUD_STEM,
+    CONF_CLOUD_UNMATCHED,
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_EMAIL,
@@ -1826,7 +1828,18 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             return self.async_abort(reason="migration_failed")
         if lasts:
             await self._save_energy_step(lasts)
-        data = {**entry.data, **local}
+        unmatched = sorted(
+            uid[len(stem) + 1 :]
+            for entity_id in plan.unmatched
+            if (row := registry.async_get(entity_id)) is not None
+            and (uid := row.unique_id).startswith(f"{stem}_")
+        )
+        data = {
+            **entry.data,
+            **local,
+            CONF_CLOUD_STEM: stem,
+            CONF_CLOUD_UNMATCHED: unmatched,
+        }
         options = link_to_options(
             {**entry.options, CONF_TRANSPORT_MODE: Mode.LOCAL_FIRST.value}, link
         )

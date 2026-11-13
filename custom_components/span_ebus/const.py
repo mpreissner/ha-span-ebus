@@ -17,6 +17,11 @@ CONF_PRIMARY_PANEL = "primary_panel"
 # Config-entry data keys for a panel added over its local API. The host is
 # HA's `host`. An entry with these and no `tokens` runs without the cloud.
 CONF_LOCAL_SERIAL = "local_serial"
+# A linked cloud entry: what its kept cloud entities' unique ids start with, and
+# which of them are circuits the link could not pair. Kept when the cloud is
+# removed, since the stand-ins outlive it.
+CONF_CLOUD_STEM = "cloud_stem"
+CONF_CLOUD_UNMATCHED = "cloud_unmatched"
 CONF_CA_PEM = "ca_pem"
 CONF_CLIENT_NAME = "client_name"
 CONF_ACCESS_TOKEN = "access_token"

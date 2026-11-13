@@ -111,3 +111,100 @@ def row_keys() -> frozenset[tuple[Scope, str]]:
     rows = {(row.scope, row.key) for row in model.ROWS}
     rows |= {(Scope.PANEL, row.key) for row in model.DERIVED_ROWS}
     return frozenset(rows)
+
+
+# --- what a linked entry builds for its kept cloud entities ------------------------
+
+STANDIN = "standin"
+FALLBACK = "fallback_only"
+UNMATCHED = "unmatched"
+_TRANSPORT = "transport"
+_ENERGY_SUFFIX = "_energy"
+
+
+def classify_kept(suffixes: Iterable[str], unmatched: Iterable[str]) -> dict[str, str]:
+    """suffix -> STANDIN, FALLBACK or UNMATCHED for each kept cloud uid suffix.
+
+    `suffixes` are what follows `{stem}_` in the registry's kept uids;
+    `unmatched` the ones the link could not pair, recorded at link time. The
+    transport uid is the local transport sensor's and is left out. Anything
+    else kept on the cloud uid has no local row: it is fallback-only.
+    """
+    skipped = set(unmatched)
+    out: dict[str, str] = {}
+    for suffix in suffixes:
+        if suffix == _TRANSPORT:
+            continue
+        if suffix in STANDIN_SUFFIXES:
+            out[suffix] = STANDIN
+        elif suffix in skipped:
+            out[suffix] = UNMATCHED
+        else:
+            out[suffix] = FALLBACK
+    return out
+
+
+def standin_by_suffix(suffix: str) -> StandIn | None:
+    return next((s for s in STANDINS if s.uid_suffix == suffix), None)
+
+
+def is_energy(suffix: str) -> bool:
+    return suffix.endswith(_ENERGY_SUFFIX)
+
+
+def ledger_key(suffix: str) -> str:
+    """The cloud ledger key a kept `..._energy` entity totals: its power key."""
+    return suffix[: -len(_ENERGY_SUFFIX)] if is_energy(suffix) else suffix
+
+
+# device class -> (unit, state class), for kept rows with no local presentation.
+# Read from the registry's original device class, not its unit: the user may
+# have changed the display unit.
+_LOOKS: dict[str, tuple[str, str]] = {
+    "power": ("W", "measurement"),
+    "current": ("A", "measurement"),
+    "voltage": ("V", "measurement"),
+    "frequency": ("Hz", "measurement"),
+}
+
+
+def look(device_class: str | None, suffix: str) -> tuple[str | None, str | None]:
+    """(native unit, state class) for a kept cloud sensor, from its device class.
+
+    The cloud's energy totals are kWh; the only other energy it reports is a
+    raw Wh reading.
+    """
+    if device_class == "energy":
+        return ("kWh", "total_increasing") if is_energy(suffix) else ("Wh", "total_increasing")
+    return _LOOKS.get(device_class or "", (None, None))
+
+
+class HeldTotal:
+    """A fallback-only energy total: held outside the cloud, grown on it.
+
+    Fed the cloud ledger's total for its key while the cloud carries the entry,
+    and None otherwise. The first total after each cloud start only sets the
+    mark; after that the total grows by what the ledger grew. A ledger that
+    goes back is a new mark, not a negative step. With nothing restored the
+    total adopts the ledger's.
+    """
+
+    __slots__ = ("mark", "total")
+
+    def __init__(self, total: float | None = None) -> None:
+        self.total = total
+        self.mark: float | None = None
+
+    def sample(self, ledger: float | None) -> bool:
+        """Take one reading; True if the total changed."""
+        if ledger is None:
+            self.mark = None
+            return False
+        if self.total is None:
+            self.total = self.mark = ledger
+            return True
+        mark, self.mark = self.mark, ledger
+        if mark is None or ledger <= mark:
+            return False
+        self.total += ledger - mark
+        return True

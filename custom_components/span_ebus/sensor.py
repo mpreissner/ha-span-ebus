@@ -50,12 +50,16 @@ from .coordinator import STALE_AFTER_SECONDS, SpanCloudCoordinator
 from .energy import EnergyAccumulator, SourcedRun, pick_restored
 from .local_entity import (
     PRESENTATION,
+    KeptEntry,
     SpanLocalEntity,
+    SpanUnmatchedEntity,
     async_setup_local,
     async_track_panel_device,
+    kept_cloud_entries,
     panel_device_info,
     round_value,
 )
+from .span_client import standin
 from .span_client.backend import (
     POWER_PROPERTY,
     SITE_NODE,
@@ -65,7 +69,7 @@ from .span_client.backend import (
 from .span_client.cloud_history import SITE_FLOW_ENERGY
 from .span_client.local import model
 from .span_client.local.health import Transport
-from .span_client.local.model import DerivedRow, Presence, Row, Snapshot, ValueKind
+from .span_client.local.model import DerivedRow, Presence, Row, Scope, Snapshot, ValueKind
 from .span_client.models import NodeKind, PropertySpec
 from .transport import SpanTransportManager
 
@@ -118,10 +122,18 @@ async def async_setup_entry(
 ) -> None:
     runtime = entry.runtime_data
     if runtime.transport is not None:
-        async_add_entities([SpanTransportSensor(entry, runtime.transport)])
-        async_setup_local(entry, runtime.transport, async_add_entities, "sensor", _local_sensor)
-        async_track_panel_device(hass, entry, runtime.transport)
-        _setup_derived(entry, runtime.transport, async_add_entities)
+        transport = runtime.transport
+        async_add_entities([SpanTransportSensor(entry, transport)])
+        # A cloud entry linked to its panel keeps some cloud entities; a
+        # stand-in shows a local row's value in place of that row's own entity.
+        kept = kept_cloud_entries(hass, entry, "sensor")
+        standins = [(k, s) for k in kept if (s := standin.standin_by_suffix(k.suffix)) is not None]
+        skip = standin.suppressed_rows(s for _k, s in standins)
+        async_setup_local(entry, transport, async_add_entities, "sensor", _local_sensor, skip)
+        async_track_panel_device(hass, entry, transport)
+        _setup_derived(entry, transport, async_add_entities, skip)
+        if kept:
+            _setup_kept(entry, transport, async_add_entities, kept, standins)
         # A local entry's cloud is its fallback: the local entities read it, and
         # it creates none of its own.
         return
@@ -478,10 +490,12 @@ def _setup_derived(
     entry: SpanConfigEntry,
     transport: SpanTransportManager,
     async_add_entities: AddEntitiesCallback,
+    skip: frozenset[tuple[Scope, str]] = frozenset(),
 ) -> None:
     """Create the panel's derived rows as their inputs are published.
 
-    Like the other local entities, one is never removed once created.
+    Like the other local entities, one is never removed once created. Rows in
+    `skip` are shown by a kept cloud entity instead.
     """
     known: set[str] = set()
 
@@ -490,7 +504,7 @@ def _setup_derived(
         new: list[SensorEntity] = []
         for row in model.DERIVED_ROWS:
             uid = model.panel_uid(transport.panel_key, row.source)
-            if uid in known or not row.when(snapshot):
+            if uid in known or (Scope.PANEL, row.key) in skip or not row.when(snapshot):
                 continue
             known.add(uid)
             cls = SpanDerivedEnergySensor if row.energy else SpanDerivedPowerSensor
@@ -706,6 +720,249 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
     @property
     def native_value(self) -> float:
         return round(self._run.total_kwh, ENERGY_PRECISION)
+
+    @property
+    def available(self) -> bool:
+        return True
+
+
+# --- a linked cloud entry's kept cloud entities -------------------------------------
+
+_ROWS_BY_KEY = {(row.scope, row.key): row for row in model.ROWS}
+_DERIVED_BY_KEY = {row.key: row for row in model.DERIVED_ROWS}
+
+
+def _device_class(value: str | None) -> SensorDeviceClass | None:
+    try:
+        return None if value is None else SensorDeviceClass(value)
+    except ValueError:
+        return None
+
+
+@callback
+def _setup_kept(
+    entry: SpanConfigEntry,
+    transport: SpanTransportManager,
+    async_add_entities: AddEntitiesCallback,
+    kept: list[KeptEntry],
+    standins: list[tuple[KeptEntry, standin.StandIn]],
+) -> None:
+    """Build the kept cloud sensors: stand-ins once their source row exists,
+    fallback-only and unmatched ones now.
+    """
+    now: list[SensorEntity] = []
+    for k in kept:
+        if k.kind == standin.UNMATCHED:
+            now.append(SpanUnmatchedSensor(entry, transport, k))
+        elif k.kind == standin.FALLBACK:
+            if standin.is_energy(k.suffix):
+                now.append(SpanFallbackOnlyEnergySensor(entry, transport, k))
+            else:
+                now.append(SpanFallbackOnlySensor(entry, transport, k))
+    if now:
+        async_add_entities(now)
+    if not standins:
+        return
+    waiting = dict(standins)
+
+    @callback
+    def add(snapshot: Snapshot) -> None:
+        new: list[SensorEntity] = []
+        for k, s in list(waiting.items()):
+            entity = _standin_entity(entry, transport, snapshot, k, s)
+            if entity is not None:
+                del waiting[k]
+                new.append(entity)
+        if new:
+            async_add_entities(new)
+
+    add(transport.snapshot)
+    if waiting:
+        entry.async_on_unload(transport.async_add_model_listener(add))
+
+
+def _standin_entity(
+    entry: SpanConfigEntry,
+    transport: SpanTransportManager,
+    snapshot: Snapshot,
+    kept: KeptEntry,
+    stand: standin.StandIn,
+) -> SensorEntity | None:
+    """The stand-in, once its source row is one the panel publishes; else None."""
+    if stand.energy:
+        derived = _DERIVED_BY_KEY[stand.source_row]
+        if not derived.when(snapshot):
+            return None
+        return SpanStandInEnergySensor(entry, transport, derived, kept)
+    row = _ROWS_BY_KEY[(stand.scope, stand.source_row)]
+    for device_id in model.row_devices(snapshot, row):
+        if model.row_exists(snapshot, row, device_id):
+            return SpanStandInSensor(entry, transport, row, device_id, kept, stand)
+    return None
+
+
+class SpanStandInSensor(SpanLocalSensor):
+    """A kept cloud sensor showing a local row's value through a fixed transform.
+
+    It follows its source row in every state, the cloud fallback included, and
+    keeps the cloud entity's name, look and place on the panel device.
+    """
+
+    def __init__(
+        self,
+        entry: SpanConfigEntry,
+        transport: SpanTransportManager,
+        row: Row,
+        device_id: str,
+        kept: KeptEntry,
+        stand: standin.StandIn,
+    ) -> None:
+        self._transform = stand.transform
+        super().__init__(entry, transport, row, device_id)
+        self._attr_unique_id = kept.unique_id
+        self._attr_name = kept.name
+        self._attr_translation_key = None
+        self._attr_entity_category = None
+        self._attr_device_info = panel_device_info(entry, transport.snapshot)
+
+    def _present(self, value: Any) -> Any:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            value = self._transform(value)
+        return super()._present(value)
+
+
+class SpanStandInEnergySensor(SpanDerivedEnergySensor):
+    """A kept cloud energy total, integrated from a derived local power.
+
+    Picks up from its own restored total, so the cloud's history runs on.
+    """
+
+    def __init__(
+        self,
+        entry: SpanConfigEntry,
+        transport: SpanTransportManager,
+        row: DerivedRow,
+        kept: KeptEntry,
+    ) -> None:
+        super().__init__(entry, transport, row)
+        self._attr_unique_id = kept.unique_id
+        self._attr_name = kept.name
+        self._attr_translation_key = None
+
+
+class _SpanKeptSensor(SensorEntity):
+    """A kept cloud sensor with no local row, on the panel device."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(
+        self, entry: SpanConfigEntry, transport: SpanTransportManager, kept: KeptEntry
+    ) -> None:
+        self._transport = transport
+        self._key = kept.suffix
+        unit, state_class = standin.look(kept.device_class, kept.suffix)
+        self._attr_unique_id = kept.unique_id
+        self._attr_name = kept.name
+        self._attr_device_class = _device_class(kept.device_class)
+        self._attr_native_unit_of_measurement = unit
+        self._attr_state_class = None if state_class is None else SensorStateClass(state_class)
+        self._attr_device_info = panel_device_info(entry, transport.snapshot)
+
+
+class SpanUnmatchedSensor(SpanUnmatchedEntity, _SpanKeptSensor):
+    """A sensor of a circuit the link could not pair: always unavailable."""
+
+    def __init__(
+        self, entry: SpanConfigEntry, transport: SpanTransportManager, kept: KeptEntry
+    ) -> None:
+        _SpanKeptSensor.__init__(self, entry, transport, kept)
+
+
+class SpanFallbackOnlySensor(_SpanKeptSensor):
+    """A cloud reading with no local source: shown only while on the cloud.
+
+    Unavailable whenever the cloud is not carrying the entry (local up,
+    offline, or local only); unknown while it is but has no reading.
+    """
+
+    def __init__(
+        self, entry: SpanConfigEntry, transport: SpanTransportManager, kept: KeptEntry
+    ) -> None:
+        super().__init__(entry, transport, kept)
+        self._shown: tuple[bool, Any] | None = None
+        self._attr_available = False
+        self._attr_native_value = None
+        self._recompute()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self._transport.async_add_listener(self._on_transport))
+        self._recompute()
+
+    @callback
+    def _on_transport(self) -> None:
+        if self._recompute() and self.hass is not None:
+            self.async_write_ha_state()
+
+    def _recompute(self) -> bool:
+        reading = self._transport.cloud_reading(self._key)
+        if reading is model.NO_FALLBACK:
+            shown: tuple[bool, Any] = (False, None)
+        else:
+            try:
+                value = None if reading is None else float(reading)
+            except (TypeError, ValueError):
+                value = None
+            shown = (True, round_value(value, self._attr_native_unit_of_measurement))
+        changed = shown != self._shown
+        self._shown = shown
+        self._attr_available, self._attr_native_value = shown
+        return changed
+
+
+class SpanFallbackOnlyEnergySensor(_SpanKeptSensor, RestoreSensor):
+    """A cloud energy total with no local source: held, and grown on the cloud.
+
+    Always shows its total (see `standin.HeldTotal`), so the Energy dashboard
+    sees no gap and no reset while the panel is local.
+    """
+
+    _attr_suggested_display_precision = ENERGY_PRECISION
+
+    def __init__(
+        self, entry: SpanConfigEntry, transport: SpanTransportManager, kept: KeptEntry
+    ) -> None:
+        super().__init__(entry, transport, kept)
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._ledger_key = standin.ledger_key(kept.suffix)
+        self._held = standin.HeldTotal()
+        self._written: float | None = None
+
+    async def async_added_to_hass(self) -> None:
+        last = await self.async_get_last_sensor_data()
+        if last is not None and isinstance(last.native_value, int | float):
+            self._held.total = float(last.native_value)
+        await super().async_added_to_hass()
+        self.async_on_remove(self._transport.async_add_listener(self._on_transport))
+        self._on_transport()
+
+    @callback
+    def _on_transport(self) -> None:
+        self._held.sample(self._transport.cloud_energy(self._ledger_key))
+        value = self.native_value
+        if value == self._written:
+            return
+        self._written = value
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float | None:
+        total = self._held.total
+        return None if total is None else round(total, ENERGY_PRECISION)
 
     @property
     def available(self) -> bool:

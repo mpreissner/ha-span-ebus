@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from span_client import standin as st
 from span_client.local import model
 from span_client.local.model import BATTERY_TO_CLOUD_SIGN, PV_TO_CLOUD_SIGN, Scope
 from span_client.standin import (
@@ -71,3 +72,69 @@ def test_standins_for_only_those_in_the_registry():
     uids = [f"{K}_site/home", f"{K}_site/solar_energy", f"{K}_site/grid_to_home", "x_site/grid"]
     assert [s.uid_suffix for s in standins_for(uids, K)] == ["site/home", "site/solar_energy"]
     assert standins_for([], K) == ()
+
+
+# --- what a linked entry builds for its kept rows ------------------------------------
+
+
+def test_classify_kept():
+    got = st.classify_kept(
+        ["transport", "site/grid", "site/solar_to_grid", "circuit-9/power", "feed-8/power"],
+        ["circuit-9/power"],
+    )
+    assert got == {
+        "site/grid": st.STANDIN,
+        "site/solar_to_grid": st.FALLBACK,
+        "circuit-9/power": st.UNMATCHED,
+        "feed-8/power": st.FALLBACK,
+    }
+
+
+def test_a_standin_wins_over_a_stale_unmatched_record():
+    assert st.classify_kept(["site/home"], ["site/home"]) == {"site/home": st.STANDIN}
+
+
+def test_standin_by_suffix():
+    assert st.standin_by_suffix("site/home").source_row == "site_power"
+    assert st.standin_by_suffix("site/nothing") is None
+
+
+def test_ledger_key():
+    assert st.ledger_key("site/solar_to_grid_energy") == "site/solar_to_grid"
+    assert st.ledger_key("feed-7/power") == "feed-7/power"
+
+
+def test_look_follows_the_device_class_not_the_display_unit():
+    assert st.look("power", "site/generator") == ("W", "measurement")
+    assert st.look("current", "feed-7/current") == ("A", "measurement")
+    assert st.look("energy", "site/generator_energy") == ("kWh", "total_increasing")
+    assert st.look(None, "circuit-9/relay") == (None, None)
+
+
+def test_held_total_adopts_the_ledger_with_nothing_restored():
+    held = st.HeldTotal()
+    assert held.sample(12.5) is True
+    assert held.total == 12.5
+    assert held.sample(13.0) is True
+    assert held.total == 13.0
+
+
+def test_held_total_reseeds_at_each_cloud_start():
+    held = st.HeldTotal(100.0)
+    assert held.sample(40.0) is False  # first reading on the cloud: the mark only
+    assert held.sample(41.5) is True
+    assert held.total == 101.5
+    assert held.sample(None) is False  # off the cloud: held
+    assert held.total == 101.5
+    assert held.sample(60.0) is False  # back on: the jump is not counted
+    assert held.sample(60.25) is True
+    assert held.total == 101.75
+
+
+def test_held_total_never_steps_back():
+    held = st.HeldTotal(5.0)
+    held.sample(10.0)
+    assert held.sample(2.0) is False
+    assert held.total == 5.0
+    assert held.sample(3.0) is True
+    assert held.total == 6.0
