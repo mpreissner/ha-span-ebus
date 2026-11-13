@@ -86,7 +86,7 @@ NO_FALLBACK: Any = _NoFallback()
 class Role(StrEnum):
     LOAD = "load"  # no feeds-role, or LOADS / SUBPANEL / MIXED / UNUSED
     SOLAR = "solar"
-    STORAGE = "storage"  # signed as a load until the battery device exists
+    STORAGE = "storage"  # signed as a load; the battery device keeps SPAN's raw sign
     GENERATOR = "generator"  # signed as solar: it produces
 
 
@@ -1296,6 +1296,13 @@ def _grid_forming(p: PanelFacts) -> str | None:
     return _known(p.grid_forming, GRID_FORMING_OPTIONS, "grid-forming-entity", "unknown")
 
 
+def _islandable(p: PanelFacts) -> bool | None:
+    """A MID means the site can island. With neither MID nor battery any more
+    (the device left after the entity was made) it is unknown, never "no".
+    """
+    return p.has_mid if (p.has_mid or p.has_bess) else None
+
+
 def _islanding_attrs(p: PanelFacts) -> dict[str, Any]:
     return _present({"asserted_islanding_state": _lower(p.asserted_islanding)})
 
@@ -1322,13 +1329,22 @@ def _link_published(f: SubdeviceFacts) -> bool:
 
 
 def _link_ok(f: SubdeviceFacts) -> bool | None:
+    """The panel link. A device that is not up reads False: these rows ignore
+    the device state so a lost charger shows disconnected, not unavailable.
+    """
+    if f.state not in UP_STATES:
+        return False
     if f.link is None or f.link.status is None:
         return None
     return f.link.status.upper() == "OK"
 
 
 def _bess_connected(f: SubdeviceFacts) -> bool | None:
-    """Communication state when published, else the panel link, else unknown."""
+    """Communication state when published, else the panel link, else unknown.
+    A battery that is not up reads False (see `_link_ok`).
+    """
+    if f.state not in UP_STATES:
+        return False
     comm = _text(f.get("status/communication-state"))
     if comm is not None:
         return comm.upper() == "OK"
@@ -1373,7 +1389,7 @@ def _islanding_rows() -> tuple[Row, ...]:
     p = Scope.PANEL
     return (
         Row("grid_islandable", "binary_sensor", p, "derived/grid-islandable", _M,
-            lambda f: f.has_mid, when=lambda f: f.has_mid or f.has_bess,
+            _islandable, when=lambda f: f.has_mid or f.has_bess,
             attrs=_islanding_attrs),
         Row("mid:grid/grid-forming-entity", "sensor", p, "derived/grid-forming-entity", _M,
             _grid_forming, when=lambda f: f.has_mid),
@@ -1398,10 +1414,10 @@ def _subdevice_rows() -> tuple[Row, ...]:
         Row(f"bess:{capacity}", "sensor", b, capacity, _S, _number(capacity), (capacity,)),
         Row(f"bess:{comm}", "sensor", b, comm, _M, _enum_of(comm), (comm,)),
         Row("bess:derived/connected", "binary_sensor", b, "derived/connected", _M,
-            _bess_connected, when=_bess_connected_exists),
+            _bess_connected, when=_bess_connected_exists, ignores_state=True),
         Row(f"pv:{nominal}", "sensor", pv, nominal, _S, _number(nominal), (nominal,)),
         Row("pv:derived/panel-link", "binary_sensor", pv, "derived/panel-link", _M, _link_ok,
-            when=_link_published, attrs=_circuit_attr),
+            when=_link_published, attrs=_circuit_attr, ignores_state=True),
         Row(f"evse:{status}", "sensor", ev, status, _M, _evse_status, (status,),
             attrs=_evse_status_attrs),
         Row("evse:derived/charging", "binary_sensor", ev, "derived/charging", _M,
@@ -1413,7 +1429,7 @@ def _subdevice_rows() -> tuple[Row, ...]:
         Row(f"evse:{ceiling}", "sensor", ev, ceiling, _S, _number(ceiling), (ceiling,),
             attrs=_evse_ceiling_attrs),
         Row("evse:derived/panel-link", "binary_sensor", ev, "derived/panel-link", _M, _link_ok,
-            when=_link_published),
+            when=_link_published, ignores_state=True),
         Row(f"mid:{grid}", "sensor", mid, grid, _M, _enum_of(grid), (grid,)),
         Row(f"mid:{islanding}", "sensor", mid, islanding, _M, _enum_of(islanding),
             (islanding,)),
@@ -1480,7 +1496,12 @@ def translation_key(row: Row) -> str:
 
 
 def row_device(snapshot: Snapshot, row: Row, device_id: str) -> DeviceRef:
-    """Which HA device the entity for this row and device sits on."""
+    """Which HA device the entity for this row and device sits on.
+
+    Entities call this once, at construction: the device, the EVSE name hint
+    (circuit label or position) and the remote-CT name are fixed from then on,
+    so a later rename or a second charger does not move or rename a device.
+    """
     if row.scope in SUBDEVICE_SCOPES:
         facts = subdevices(snapshot, row.scope).get(device_id)
         if facts is None:
@@ -1502,6 +1523,34 @@ def row_device(snapshot: Snapshot, row: Row, device_id: str) -> DeviceRef:
         if circuit is not None and circuit.is_remote_ct:
             return DeviceRef(REMOTE_CT, device_id, name_hint=_remote_ct_name(snapshot, circuit))
     return PANEL_REF
+
+
+def current_device_identifiers(snapshot: Snapshot, panel_key: str) -> frozenset[str]:
+    """The HA device identifiers this snapshot still backs, besides the panel's."""
+    ids = {
+        identifier
+        for scope in SUBDEVICE_SCOPES
+        for device_id, facts in subdevices(snapshot, scope).items()
+        if (identifier := device_identifier(panel_key, DeviceRef(facts.kind, device_id)))
+    }
+    ids.update(
+        identifier
+        for device_id, circuit in snapshot.circuits.items()
+        if circuit.is_remote_ct
+        and (identifier := device_identifier(panel_key, DeviceRef(REMOTE_CT, device_id)))
+    )
+    return frozenset(ids)
+
+
+def device_removable(
+    snapshot: Snapshot, panel_key: str, panel_identifier: str, identifiers: frozenset[str]
+) -> bool:
+    """Whether the user may delete an HA device: only one the panel no longer
+    reports. Never the panel itself, and never before the panel is known.
+    """
+    if panel_identifier in identifiers or snapshot.panel is None:
+        return False
+    return not identifiers & current_device_identifiers(snapshot, panel_key)
 
 
 def _remote_ct_name(snapshot: Snapshot, circuit: CircuitFacts) -> str:

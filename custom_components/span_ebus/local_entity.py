@@ -406,6 +406,8 @@ class SpanLocalEntity(Entity):
         snapshot = transport.snapshot
         facts = model.row_facts(snapshot, row, device_id)
         self._attr_unique_id = model.row_uid(row, transport.panel_key, device_id)
+        # Fixed at construction: the device, the EVSE name hint and the
+        # remote-CT name do not follow later renames or a second charger.
         self._ref = model.row_device(snapshot, row, device_id)
         self._attr_device_info = device_info_for(entry, transport.panel_key, self._ref, snapshot)
         self._attr_entity_category = self._look.category

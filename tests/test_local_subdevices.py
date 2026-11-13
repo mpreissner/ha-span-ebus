@@ -334,6 +334,32 @@ def test_battery_connected_from_communication_then_the_link(comm, feeds, expecte
     assert connected.value(snapshot.bess[BESS]) is expected
 
 
+@pytest.mark.parametrize(
+    ("key", "device_id", "state"),
+    [
+        ("bess:derived/connected", BESS, b"lost"),
+        ("bess:derived/connected", BESS, b"disconnected"),
+        ("pv:derived/panel-link", PV, b"lost"),
+        ("evse:derived/panel-link", EVSE, b"lost"),
+    ],
+)
+def test_a_subdevice_that_is_not_up_reads_disconnected_not_unavailable(key, device_id, state):
+    tree = full_site()
+    tree.apply(f"ebus/5/{device_id}/$state", state)
+    snapshot = snap(tree)
+    connectivity = row(key)
+    assert connectivity.ignores_state
+    facts = model.row_facts(snapshot, connectivity, device_id)
+    assert facts.state not in model.UP_STATES
+    assert connectivity.value(facts) is False
+
+
+def test_connectivity_rows_still_read_the_link_while_up():
+    snapshot = snap(full_site(feeds={CIRCUIT: (EVSE, "LOST"), CIRCUIT_2: (PV, "OK")}))
+    assert row("evse:derived/panel-link").value(snapshot.evse[EVSE]) is False
+    assert row("pv:derived/panel-link").value(snapshot.pv[PV]) is True
+
+
 def test_battery_connected_is_absent_without_communication_or_link():
     snapshot = snap(site({BESS: "bess"}, drop={BESS: ("status/communication-state",)}))
     assert not model.row_exists(snapshot, row("bess:derived/connected"), BESS)
@@ -374,6 +400,16 @@ def test_grid_islandable_is_on_with_a_mid():
     forming = row("mid:grid/grid-forming-entity")
     assert model.row_exists(snapshot, forming, PANEL)
     assert forming.value(snapshot.panel) == "grid"
+
+
+@pytest.mark.parametrize("kind", ["bess", "mid"])
+def test_grid_islandable_is_unknown_once_the_mid_or_battery_leaves(kind):
+    device_id = MID if kind == "mid" else BESS
+    islandable = row("grid_islandable")
+    before = snap(site({device_id: kind}))
+    assert model.row_exists(before, islandable, PANEL)
+    after = snap(site({}))  # the entity outlives the device that made it
+    assert islandable.value(after.panel) is None  # unknown, never "not islandable"
 
 
 @pytest.mark.parametrize("raw", ["BATTERY", "GENERATOR", "GRID", "NONE", "PV", "UNKNOWN"])
@@ -544,6 +580,50 @@ def test_subdevices_go_unavailable_with_the_root():
     snapshot = snap(tree)
     assert snapshot.bess[BESS].state is DeviceState.LOST
     assert snapshot.evse[EVSE].state is DeviceState.LOST
+
+
+# --- removing stale devices ---------------------------------------------------------
+
+
+def _ids(snapshot: model.Snapshot, *refs: model.DeviceRef) -> frozenset[str]:
+    return frozenset(model.device_identifier(KEY, ref) for ref in refs)
+
+
+def test_the_panel_device_is_never_removable():
+    snapshot = snap(full_site())
+    assert not model.device_removable(snapshot, KEY, KEY, frozenset({KEY}))
+    assert not model.device_removable(model.EMPTY, KEY, KEY, frozenset({KEY}))
+
+
+@pytest.mark.parametrize(("kind", "device_id"), [(k, i) for i, k in FULL.items()])
+def test_a_current_subdevice_is_not_removable(kind, device_id):
+    snapshot = snap(full_site())
+    ids = _ids(snapshot, model.DeviceRef(kind, device_id))
+    assert not model.device_removable(snapshot, KEY, KEY, ids)
+
+
+def test_a_subdevice_the_panel_no_longer_reports_is_removable():
+    snapshot = snap(site({PV: "pv"}))
+    stale = _ids(snapshot, model.DeviceRef("bess", BESS))
+    assert model.device_removable(snapshot, KEY, KEY, stale)
+    # A device carrying a current identifier too stays.
+    current = _ids(snapshot, model.DeviceRef("pv", PV))
+    assert not model.device_removable(snapshot, KEY, KEY, stale | current)
+
+
+def test_a_current_remote_ct_is_not_removable_but_a_gone_one_is():
+    snapshot = snap(_remote_tree({CIRCUIT: "Detached garage"}))
+    remote = _ids(snapshot, model.DeviceRef(model.REMOTE_CT, CIRCUIT))
+    assert remote == {f"{KEY}_circuit/{CIRCUIT}"}
+    assert not model.device_removable(snapshot, KEY, KEY, remote)
+    # The same circuit back in its breaker: no longer a remote CT device.
+    assert model.device_removable(snap(full_site()), KEY, KEY, remote)
+
+
+def test_nothing_is_removable_before_the_panel_is_known():
+    stale = frozenset({f"{KEY}_bess/{BESS}"})
+    assert model.EMPTY.panel is None
+    assert not model.device_removable(model.EMPTY, KEY, KEY, stale)
 
 
 # --- translations ---------------------------------------------------------------------
