@@ -227,7 +227,7 @@ async def _cloud_coordinators(
         return [SpanCloudCoordinator(hass, entry, **common)]
 
     _LOGGER.info("SPAN account has %d site(s)", len(sites))
-    _LOGGER.debug("SPAN sites: %s", ", ".join(f"{s.model} {s.serial}" for s in sites))
+    _LOGGER.debug("SPAN site models: %s", ", ".join(s.model for s in sites))
     # The key's presence is what makes this once-only: None is an answer, and
     # asking again after a panel leaves would hand a scoped panel the entry's
     # empty store.

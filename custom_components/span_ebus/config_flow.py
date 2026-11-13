@@ -355,7 +355,7 @@ class _FeedSteps:
                 primary_panel=identity.get(CONF_PRIMARY_PANEL, primary_panel_for(self._sites)),
             )
         except Exception as err:  # noqa: BLE001 — the question can wait for options
-            _LOGGER.debug("could not list a SPAN panel's circuits: %s", err)
+            _LOGGER.debug("could not list a SPAN panel's circuits: %s", type(err).__name__)
             return {}
         return feeds.circuit_choices(circuits)
 
@@ -743,7 +743,7 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         try:
             sites = await self.hass.async_add_executor_job(discover_sites, token)
         except Exception as err:  # noqa: BLE001 — shown as a form error
-            _LOGGER.debug("could not list SPAN panels during setup: %s", err)
+            _LOGGER.debug("could not list SPAN panels during setup: %s", type(err).__name__)
             return "cannot_connect"
         found = find_panel(sites, local[CONF_LOCAL_SERIAL])
         if found is None:
@@ -960,7 +960,7 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         try:
             self._sites = await self.hass.async_add_executor_job(discover_sites, self._token)
         except Exception as err:  # noqa: BLE001 — discovery is optional here
-            _LOGGER.debug("could not list SPAN panels during setup: %s", err)
+            _LOGGER.debug("could not list SPAN panels during setup: %s", type(err).__name__)
             return {}
         return panel_labels(self._sites)
 
@@ -1105,7 +1105,7 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
                     _sites_from_token_store, self._token_path()
                 )
             except Exception as err:  # noqa: BLE001 — the form can't be built without them
-                _LOGGER.debug("could not list SPAN panels: %s", err)
+                _LOGGER.debug("could not list SPAN panels: %s", type(err).__name__)
                 return self.async_abort(reason="cannot_connect")
             options = self.config_entry.options
             plan = panel_plan(sites, options.get(CONF_PANELS), options.get(CONF_DECLINED, ()))
