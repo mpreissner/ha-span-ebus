@@ -359,7 +359,8 @@ class SpanLocalApi:
 async def _raise_for(resp: aiohttp.ClientResponse, method: str, path: str) -> None:
     status = resp.status
     detail = await _detail(resp)
-    log.debug("%s %s -> %s %s", method, path, status, detail)
+    # Status only: the body can echo panel ids.
+    log.debug("%s %s -> %s", method, path, status)
     if status == 429:
         raise RateLimited(_retry_after(resp))
     if status in (401, 403):
