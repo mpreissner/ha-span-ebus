@@ -34,6 +34,7 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_call_later
 
 from .const import CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER
+from .span_client.fallback import RELAY
 from .span_client.local import model
 from .span_client.local.health import Transport
 from .span_client.local.homie import DeviceState
@@ -467,8 +468,12 @@ class SpanLocalEntity(Entity):
             value = self._present(row.value(facts))
             if row.kind is ValueKind.ENERGY:
                 value = model.energy_floor(value, self._restored_value(), snapshot.restored)
+                value = transport.continue_energy(row.scope, self._device_id, row.source, value)
             fallback = model.NO_FALLBACK
-            if transport.shown is Transport.CLOUD and row.kind is ValueKind.MEASUREMENT:
+            if transport.shown is Transport.CLOUD and (
+                row.kind is ValueKind.MEASUREMENT
+                or (row.kind is ValueKind.CONTROL and row.source == RELAY)
+            ):
                 fallback = transport.fallback_value(row.scope, self._device_id, row.source)
             state = DeviceState.READY if row.ignores_state else facts.state
             presence = model.presence(

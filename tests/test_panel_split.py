@@ -98,7 +98,9 @@ def test_unknown_block_is_dropped_and_logged_once(caplog):
     frame = _frame({"gw-unticked": [_sample(1)]})
     assert split_frame(frame, routes, unrouted) == {}
     assert split_frame(frame, routes, unrouted) == {}
-    assert caplog.text.count("gw-unticked") == 1
+    assert caplog.text.count("belongs to no panel here") == 1
+    # Block ids are gateway hardware ids: private.
+    assert "gw-unticked" not in caplog.text
 
 
 def test_unticked_panel_is_absent_from_every_part():

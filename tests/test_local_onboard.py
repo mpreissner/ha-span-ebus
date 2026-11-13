@@ -5,11 +5,14 @@ step runs against a fake MQTT client that replays retained topics.
 """
 
 import asyncio
+import json
 from typing import Any, ClassVar
 
 import pytest
 from span_client.local import onboard, rest
 
+from tests.test_local_capture import FIXTURES
+from tests.test_local_capture import PANEL as CAPTURED
 from tests.test_local_homie import PANEL, PANEL_DESC
 from tests.test_local_rest import CA, PASSPHRASE, REGISTER_BODY, TOKEN, run
 
@@ -291,3 +294,55 @@ def test_broker_login_failure_still_stops(error):
 )
 def test_form_error(exc, key, placeholders):
     assert onboard.form_error(exc) == (key, placeholders)
+
+
+# --- reading the circuits for a panel picked by hand ------------------------
+
+
+def capture_messages(rename: str | None = None) -> list[tuple[str, bytes]]:
+    raw = json.loads((FIXTURES / "capture.json").read_text())
+    if rename is not None:
+        raw = {
+            topic.replace(CAPTURED, rename): payload.replace(CAPTURED, rename)
+            for topic, payload in raw.items()
+        }
+    return [(topic, payload.encode()) for topic, payload in raw.items()]
+
+
+def read(messages, serial="nt-0000-test", connect_error=None):
+    return asyncio.run(
+        onboard.read_circuits(
+            host=HOST,
+            port=8883,
+            username="client-user",
+            password="broker-secret",
+            ca_pem=CA,
+            client_id="client-id",
+            serial=serial,
+            seconds=0,
+            mqtt_factory=factory(messages, connect_error),
+        )
+    )
+
+
+def test_read_circuits_returns_the_panels_circuits_and_disconnects():
+    circuits = read(capture_messages())
+    assert len(circuits) == 29
+    broker = FakeBroker.instances[0]
+    assert broker.stopped
+    assert broker.kwargs["client_id"] == "client-id"
+    assert broker.kwargs["port"] == 8883
+
+
+def test_read_circuits_takes_the_only_root_when_the_serial_differs():
+    assert len(read(capture_messages(rename="nt-1111-test"))) == 29
+
+
+def test_read_circuits_with_nothing_published_finds_none():
+    assert read([]) == {}
+
+
+def test_read_circuits_login_failure_raises_and_disconnects():
+    with pytest.raises(rest.AuthFailed):
+        read([], connect_error=rest.AuthFailed("no"))
+    assert FakeBroker.instances[0].stopped

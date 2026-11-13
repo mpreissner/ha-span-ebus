@@ -342,7 +342,7 @@ def authenticate(username: str, password: str) -> CloudTokens:
         raise CloudAuthError(
             f"login did not complete; Cognito returned challenge {result.get('ChallengeName')!r}"
         )
-    log.debug("Cognito login succeeded for %s", username)
+    log.debug("Cognito login succeeded")
     return _tokens_from_result(auth)
 
 
@@ -370,6 +370,12 @@ def refresh(refresh_token: str) -> CloudTokens:
 # restart need not round-trip Cognito. The store is written 0600 — a refresh
 # token is a long-lived credential, but note it is not the password (which is
 # never stored, per the module contract).
+
+
+def discard_tokens(path: Path) -> None:
+    """Delete a token store, if there is one. Never raises."""
+    with contextlib.suppress(OSError):
+        Path(path).expanduser().unlink(missing_ok=True)
 
 
 def save_tokens(path: Path, tokens: CloudTokens) -> None:
@@ -454,7 +460,7 @@ def user_id_from_token(access_token: str) -> str | None:
         body = access_token.split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
     except (IndexError, ValueError) as exc:
-        log.debug("could not read claims from the access token: %s", exc)
+        log.debug("could not read claims from the access token: %s", type(exc).__name__)
         return None
     username = claims.get("username")
     return username if isinstance(username, str) and username else None

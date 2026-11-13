@@ -39,8 +39,11 @@ from .span_client.backend import (
     SiteStream,
     device_name,
     panel_identity,
+    same_serial,
     stream_identity,
 )
+from .span_client.cloud_traits import CircuitInfo
+from .span_client.link import link_from_options
 from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
@@ -162,6 +165,10 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
             if site and site.lead.serial and site.lead.key != site.lead.serial:
                 self._board = site.lead
         self._serial = identity.serial
+        # The picker key of the panel this streams, as a link records it.
+        self.cloud_key: str | None = (
+            panel.key if panel is not None else site.lead.key if site is not None else None
+        )
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
         self._flush_scheduled = False
@@ -263,7 +270,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         is a no-op when a flow is already open for the entry, so the latch in the
         backend and this together mean exactly one prompt.
         """
-        _LOGGER.debug("starting reauth flow for %s: %s", self.entry.title, reason)
+        _LOGGER.debug("starting reauth flow: %s", reason)
         self.entry.async_start_reauth(self.hass)
 
     # --- liveness ----------------------------------------------------------
@@ -335,9 +342,26 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
             serial_number=serial,
         )
 
+    def traits(self) -> tuple[dict[int, CircuitInfo], dict[int, int]]:
+        """The circuits and feeder kinds the backend last read from SPAN."""
+        return self._backend.traits()
+
+    def site_history_target(self) -> tuple[str, int] | None:
+        """Where SPAN keeps the site's metered history, once a frame has named it."""
+        return self._backend.site_history_target()
+
     def _linked_name(self) -> str | None:
-        """A panel added locally is named by its entry, whichever transport is live."""
-        if self.serial == self.entry.data.get(CONF_LOCAL_SERIAL):
+        """A panel added locally is named by its entry, whichever transport is live.
+
+        SPAN can list the panel under a serial unlike its own, so the link's
+        cloud key counts as well as the serial.
+        """
+        if CONF_LOCAL_SERIAL not in self.entry.data:
+            return None
+        if same_serial(self.serial, self.entry.data[CONF_LOCAL_SERIAL]):
+            return self.entry.title
+        link = link_from_options(self.entry.options)
+        if link is not None and self.cloud_key is not None and self.cloud_key == link.cloud_key:
             return self.entry.title
         return None
 

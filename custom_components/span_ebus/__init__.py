@@ -44,6 +44,7 @@ from .span_client.backend import (
     site_routes,
     stream_identity,
 )
+from .span_client.link import migration_ok
 from .span_client.local import model, onboard
 from .span_client.local.health import Mode
 from .transport import SpanTransportManager, fallback_issue_id, local_tree_store
@@ -150,6 +151,14 @@ def _transport_mode(entry: SpanConfigEntry) -> Mode:
         return Mode.LOCAL_FIRST
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
+    """Minor 2 marks a linked entry and needs no reshaping; a newer major is refused."""
+    if not migration_ok(entry.version, entry.minor_version):
+        _LOGGER.error("entry from a newer major version; this release can't run it")
+        return False
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
     runtime = SpanRuntime()
     entry.runtime_data = runtime
@@ -157,6 +166,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         # Added over the local API. Earlier versions left this issue to say
         # local telemetry was still to come.
         ir.async_delete_issue(hass, DOMAIN, _local_pending_issue(entry))
+        if CONF_TOKENS not in entry.data:
+            # No account any more: a token file left from one must not linger.
+            await hass.async_add_executor_job(cloud_auth.discard_tokens, _token_path(hass, entry))
 
         async def build_cloud() -> list[SpanCloudCoordinator]:
             return await _cloud_coordinators(hass, entry)
@@ -215,7 +227,7 @@ async def _cloud_coordinators(
         return [SpanCloudCoordinator(hass, entry, **common)]
 
     _LOGGER.info("SPAN account has %d site(s)", len(sites))
-    _LOGGER.debug("SPAN sites: %s", ", ".join(f"{s.model} {s.serial}" for s in sites))
+    _LOGGER.debug("SPAN site models: %s", ", ".join(s.model for s in sites))
     # The key's presence is what makes this once-only: None is an answer, and
     # asking again after a panel leaves would hand a scoped panel the entry's
     # empty store.
@@ -251,9 +263,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> boo
     if unloaded:
         for coordinator in runtime.coordinators:
             await coordinator.async_shutdown()
-        token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
-        if CONF_TOKENS in entry.data:
-            await hass.async_add_executor_job(_remove_quietly, token_path)
+        # Every unload: a local entry whose account was just removed may have
+        # had its token file rewritten by a refresh in flight.
+        await hass.async_add_executor_job(cloud_auth.discard_tokens, _token_path(hass, entry))
     return unloaded
 
 
@@ -306,6 +318,10 @@ def _remove_by_prefix(directory: Path, prefix: str) -> None:
     with contextlib.suppress(OSError):
         for path in directory.glob(f"{prefix}*.energy"):
             _remove_quietly(path)
+
+
+def _token_path(hass: HomeAssistant, entry: SpanConfigEntry) -> Path:
+    return Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
 
 
 def _remove_quietly(path: Path) -> None:

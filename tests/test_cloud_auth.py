@@ -200,3 +200,34 @@ def test_a_store_that_cannot_produce_a_token_asks_for_the_user(tmp_path):
     )
     with pytest.raises(ca.CloudCredentialsRejected):
         ca.access_token_from_store(path)
+
+
+def test_discard_tokens_removes_the_store(tmp_path):
+    path = tmp_path / "entry.json"
+    path.write_text("{}")
+    ca.discard_tokens(path)
+    assert not path.exists()
+
+
+def test_discard_tokens_without_a_store_is_quiet(tmp_path):
+    ca.discard_tokens(tmp_path / "missing.json")
+    ca.discard_tokens(tmp_path)  # a directory cannot be unlinked; still no raise
+    assert tmp_path.exists()
+
+
+def test_a_successful_login_logs_no_account_email(monkeypatch, caplog):
+    # The email identifies the account holder; debug logs end up in issues.
+    email = "someone@example.invalid"
+    replies = iter(
+        [
+            {"ChallengeName": "PASSWORD_VERIFIER", "ChallengeParameters": {}},
+            {"AuthenticationResult": {"AccessToken": "a", "IdToken": "i", "RefreshToken": "r"}},
+        ]
+    )
+    monkeypatch.setattr(ca, "_cognito_call", lambda target, body: next(replies))
+    monkeypatch.setattr(ca, "_process_challenge", lambda *args: {})
+    with caplog.at_level("DEBUG", logger=ca.log.name):
+        tokens = ca.authenticate(email, "not-a-real-passphrase")
+    assert tokens.access_token == "a"
+    assert "login succeeded" in caplog.text
+    assert email not in caplog.text

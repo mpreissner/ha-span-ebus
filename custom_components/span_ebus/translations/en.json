@@ -93,6 +93,17 @@
         "data": {
           "circuit": "Circuit"
         }
+      },
+      "cloud_pick_panel": {
+        "title": "Which panel is this?",
+        "description": "Your SPAN account lists no panel with this panel's serial. Pick the one that is this panel, and Home Assistant will check that its circuits sit on the same breaker spaces.",
+        "data": {
+          "panel": "Panel"
+        }
+      },
+      "cloud_pick_confirm": {
+        "title": "Check the panel",
+        "description": "The SPAN account lists this panel under a different serial. Check that it's the same panel. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to finish setup."
       }
     },
     "error": {
@@ -123,7 +134,10 @@
       "panel_not_on_account": "This panel isn't on that SPAN account.",
       "cannot_connect": "Could not reach the panel.",
       "not_supported": "This panel's firmware doesn't offer the local API yet.",
-      "unknown": "Unexpected error."
+      "unknown": "Unexpected error.",
+      "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Try again and pick another, or use this panel locally only.",
+      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again later, or use this panel locally only.",
+      "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first."
     },
     "flow_title": "{host}"
   },
@@ -157,15 +171,55 @@
         "data": {
           "circuit": "Circuit"
         }
+      },
+      "linked": {
+        "title": "Cloud fallback",
+        "menu_options": {
+          "transport": "Connection",
+          "cloud_remove": "Remove cloud fallback"
+        }
+      },
+      "cloud_add": {
+        "title": "Add cloud fallback",
+        "description": "Optional. If the local connection fails, Home Assistant reads the panel through your SPAN account until it recovers. Controls stay local only. While the local connection works, Home Assistant only contacts your account to fill gaps in solar, battery and site energy after an outage.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "cloud_add_confirm": {
+        "title": "Add cloud fallback",
+        "description": "Found this panel on your SPAN account. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to add the fallback. No new entities are created."
+      },
+      "cloud_remove": {
+        "title": "Remove cloud fallback",
+        "description": "Home Assistant forgets your SPAN account for this panel and runs it over the local connection only. Entities and their history stay."
+      },
+      "cloud_pick_panel": {
+        "title": "Which panel is this?",
+        "description": "Your SPAN account lists no panel with this panel's serial. Pick the one that is this panel, and Home Assistant will check that its circuits sit on the same breaker spaces.",
+        "data": {
+          "panel": "Panel"
+        }
+      },
+      "cloud_pick_confirm": {
+        "title": "Check the panel",
+        "description": "The SPAN account lists this panel under a different serial. Check that it's the same panel. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to add the fallback. No new entities are created."
       }
     },
     "error": {
       "no_panels": "Choose at least one panel.",
-      "feed_cycle": "Panels can't feed each other. Check the answers for a loop."
+      "feed_cycle": "Panels can't feed each other. Check the answers for a loop.",
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Could not reach the SPAN cloud. Please try again."
     },
     "abort": {
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
-      "not_cloud_account": "Panels added locally without a SPAN account have no options yet."
+      "cloud_remove_unsupported": "This entry has no cloud fallback to remove.",
+      "panel_not_on_account": "This panel isn't on that SPAN account.",
+      "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first.",
+      "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Try again and pick another, or use this panel locally only.",
+      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again later, or use this panel locally only."
     }
   },
   "issues": {

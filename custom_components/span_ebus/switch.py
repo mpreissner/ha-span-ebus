@@ -38,6 +38,7 @@ async def async_setup_entry(
         async_setup_local(
             entry, runtime.transport, async_add_entities, "switch", SpanLocalRelaySwitch
         )
+        return  # the cloud fallback creates no entities of its own
     runtime.add_platform(lambda c: _register(c, async_add_entities))
 
 
