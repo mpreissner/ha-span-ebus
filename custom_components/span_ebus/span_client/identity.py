@@ -19,12 +19,17 @@ from dataclasses import dataclass
 
 from .link import DOWNSTREAM, UPSTREAM, PanelLink
 from .local.model import (
+    DERIVED_ROWS,
+    ROWS,
     DerivedRow,
     Row,
     Scope,
+    Snapshot,
     circuit_uid,
     lugs_uid,
     panel_uid,
+    row_devices,
+    row_exists,
     row_uid,
 )
 from .standin import FALLBACK_ONLY, STANDIN_SUFFIXES
@@ -92,6 +97,34 @@ _CIRCUIT = re.compile(r"circuit-(\d+)/(.+)")
 _FEED = re.compile(r"feed-(\d+)/(.+)")
 
 
+def local_rows(snapshot: Snapshot) -> list[tuple[Row | DerivedRow, str]]:
+    """Every row the local panel creates from `snapshot`, with its device id.
+
+    The same rows the local platforms add: a register row per device that
+    describes it, and each derived row whose inputs are published.
+    """
+    rows: list[tuple[Row | DerivedRow, str]] = [
+        (row, device_id)
+        for row in ROWS
+        for device_id in row_devices(snapshot, row)
+        if row_exists(snapshot, row, device_id)
+    ]
+    rows += [(row, "panel") for row in DERIVED_ROWS if row.when(snapshot)]
+    return rows
+
+
+def confirm_counts(plan: RewritePlan) -> dict[str, int]:
+    """What the link confirmation shows: how many of each group."""
+    total = len(plan.repoint) + len(plan.standin) + len(plan.fallback_only) + len(plan.unmatched)
+    return {
+        "matched": len(plan.repoint),
+        "total": total,
+        "standins": len(plan.standin),
+        "fallback_only": len(plan.fallback_only),
+        "unmatched": len(plan.unmatched),
+    }
+
+
 def transport_uid(panel_key: str) -> str:
     return f"{panel_key}_{_TRANSPORT}"
 
@@ -133,8 +166,14 @@ def rewrite_plan(
     registry_entries: Iterable[RegistryEntryView],
     link: PanelLink,
     local_rows: Iterable[tuple[Row | DerivedRow, str]],
+    *,
+    cloud_stem: str | None = None,
 ) -> RewritePlan:
     """Sort the cloud entry's entities into re-points, stand-ins and the rest.
+
+    `cloud_stem` is what the cloud entity uids start with (`{stem}_...`): the
+    running cloud coordinator's serial, which is not always the panel key the
+    link records. It defaults to `link.cloud_key`.
 
     `local_rows` is every local row the panel creates, with its device id;
     derived rows are passed with any device id. A cloud entity whose local
@@ -143,8 +182,8 @@ def rewrite_plan(
     fallback-only. If two cloud entities would take the same local uid, the
     first in entity order does and the rest are fallback-only.
     """
-    cloud, serial = link.cloud_key, link.local_serial
-    prefix = f"{cloud}_"
+    serial = link.local_serial
+    prefix = f"{cloud_stem or link.cloud_key}_"
     entries = sorted(
         (e for e in registry_entries if e.unique_id.startswith(prefix)),
         key=lambda e: e.unique_id,

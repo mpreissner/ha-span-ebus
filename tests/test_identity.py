@@ -250,3 +250,51 @@ def test_collisions_count_new_uids_already_taken():
 def test_fallback_only_table(suffix):
     plan = rewrite_plan(entries(suffix), link(), local_rows())
     assert plan.fallback_only == ("sensor.e0",)
+
+
+# --- rows from a capture, and the confirmation counts ----------------------------
+
+
+def test_local_rows_from_a_capture_match_what_the_platforms_create():
+    from span_client.identity import local_rows as rows_of
+
+    from tests.test_local_capture import PANEL, capture_tree
+
+    tree = capture_tree()
+    snap = model.build_snapshot(tree, tree.panel_root(PANEL))
+    rows = rows_of(snap)
+    expected = {
+        (row.key, device_id)
+        for row in model.ROWS
+        for device_id in model.row_devices(snap, row)
+        if model.row_exists(snap, row, device_id)
+    }
+    assert {(r.key, d) for r, d in rows if isinstance(r, model.Row)} == expected
+    derived = [r for r, _d in rows if isinstance(r, model.DerivedRow)]
+    assert derived == [r for r in model.DERIVED_ROWS if r.when(snap)]
+    assert expected
+
+
+def test_confirm_counts_add_up():
+    from span_client.identity import confirm_counts
+
+    views = entries("circuit-1/power", "circuit-9/power", "transport", "panel/voltage_l1")
+    plan = rewrite_plan(views, link(), local_rows())
+    counts = confirm_counts(plan)
+    assert counts["total"] == len(views)
+    assert (
+        counts["matched"] + counts["standins"] + counts["fallback_only"] + counts["unmatched"]
+        == counts["total"]
+    )
+    assert counts["unmatched"] == 1
+
+
+def test_cloud_stem_reads_uids_under_the_coordinator_serial():
+    stem = "XC-AAAA"
+    views = [
+        RegistryEntryView("sensor.a", f"{stem}_circuit-1/power"),
+        RegistryEntryView("sensor.b", f"{K}_circuit-1/power"),
+    ]
+    plan = rewrite_plan(views, link(), local_rows(), cloud_stem=stem)
+    assert [r[0] for r in plan.repoint] == ["sensor.a"]
+    assert rewrite_plan(views, link(), local_rows()).repoint[0][0] == "sensor.b"

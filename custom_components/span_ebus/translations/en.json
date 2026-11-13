@@ -158,6 +158,13 @@
         }
       },
       "init": {
+        "title": "SPAN account",
+        "menu_options": {
+          "panels": "Choose panels",
+          "link_local": "Link the local panel"
+        }
+      },
+      "panels": {
         "title": "Choose your panels",
         "description": "Tick the panels on your SPAN account that belong to this Home Assistant.",
         "data": {
@@ -212,13 +219,35 @@
       "cloud_pick_confirm": {
         "title": "Check the panel",
         "description": "The SPAN account lists this panel under a different serial. Check that it's the same panel. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to add the fallback. No new entities are created."
+      },
+      "link_local": {
+        "title": "Link the local panel",
+        "description": "Home Assistant reads this panel over your home network and keeps your SPAN account as its fallback. Entities keep their names and history. Enter the panel's address and the passphrase from the SPAN app. The passphrase is not stored.",
+        "data": {
+          "host": "Address",
+          "passphrase": "Passphrase"
+        }
+      },
+      "link_confirm": {
+        "title": "Link the local panel",
+        "description": "{matched} of {total} entities move onto the local panel and keep their history. {standins} are kept, now fed by the panel. {fallback_only} are only updated while the local connection is down. {unmatched} are no longer updated.\n\nEnergy totals jump once when they switch to the panel's own meters. Home Assistant will offer to fix that in Repairs.\n\n{grid_energy_note}"
       }
     },
     "error": {
       "no_panels": "Choose at least one panel.",
       "feed_cycle": "Panels can't feed each other. Check the answers for a loop.",
       "invalid_auth": "Invalid email or password.",
-      "cannot_connect": "Could not reach the SPAN cloud. Please try again."
+      "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
+      "not_a_panel": "The device at that address doesn't look like a SPAN panel.",
+      "unknown": "Unexpected error. Check the logs and try again.",
+      "rate_limited": "The panel is limiting requests. Wait {retry_after} seconds and try again.",
+      "invalid_passphrase": "The panel didn't accept that passphrase.",
+      "panel_not_ready": "The panel isn't ready yet. Try again in a minute.",
+      "broker_auth": "The panel registered Home Assistant but its broker refused the login. Try again.",
+      "no_ready_state": "Connected to the panel, but it didn't report ready in time. Try again.",
+      "panel_unreachable": "Could not reach the panel at that address.",
+      "not_supported": "This panel's firmware doesn't offer the local API yet.",
+      "wrong_panel": "The panel at that address isn't the one on this SPAN account. Check the address."
     },
     "abort": {
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
@@ -226,7 +255,17 @@
       "panel_not_on_account": "This panel isn't on that SPAN account.",
       "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first.",
       "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Try again and pick another, or use this panel locally only.",
-      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again later, or use this panel locally only."
+      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again later, or use this panel locally only.",
+      "multi_panel_upgrade": "This SPAN account runs more than one panel here. Remove it and add each panel locally instead.",
+      "uid_collision": "Some of this panel's entities already exist in Home Assistant. Remove the other entry for this panel first.",
+      "migration_failed": "Linking failed and nothing was changed. Check the logs and try again.",
+      "link_not_running": "This SPAN account isn't running. Wait for it to load and try again.",
+      "link_unreadable": "Couldn't read the panel or its circuits. Nothing was changed. Try again later.",
+      "already_configured": "This panel is already set up in Home Assistant.",
+      "unknown": "Unexpected error."
+    },
+    "progress": {
+      "link_check": "Reading the panel and matching its circuits. This takes up to 20 seconds."
     }
   },
   "issues": {
@@ -284,6 +323,11 @@
         "unexpected": "history doesn't show the jump",
         "changed_since": "already adjusted by hand",
         "nothing": "none"
+      }
+    },
+    "link_note": {
+      "options": {
+        "grid_energy": "Site grid energy is one of the sensors only updated while the local connection is down, because this site has several panels. If your Energy dashboard uses it, switch to the panel's imported energy sensor."
       }
     }
   },
