@@ -210,14 +210,6 @@ async def wait_until_ready(
     return root
 
 
-def panel_root(tree: homie.DeviceTree, serial: str) -> str:
-    """The panel's root device: its serial, or the only root if that differs."""
-    if serial in tree.states or serial in tree.descriptions:
-        return serial
-    roots = tree.roots()
-    return roots[0] if len(roots) == 1 else serial
-
-
 async def read_circuits(
     *,
     host: str,
@@ -252,7 +244,7 @@ async def read_circuits(
     finally:
         with contextlib.suppress(Exception):
             await broker.stop()
-    return model.build_snapshot(tree, panel_root(tree, serial)).circuits
+    return model.build_snapshot(tree, tree.panel_root(serial)).circuits
 
 
 def form_error(exc: BaseException) -> tuple[str, dict[str, str]]:

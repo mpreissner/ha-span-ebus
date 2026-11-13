@@ -230,11 +230,7 @@ class SpanTransportManager:
         self._refresh_shown()
 
     def _root(self) -> str:
-        """The panel's root device: its serial, or the only root if that differs."""
-        if self.serial in self.tree.states or self.serial in self.tree.descriptions:
-            return self.serial
-        roots = self.tree.roots()
-        return roots[0] if len(roots) == 1 else self.serial
+        return self.tree.panel_root(self.serial)
 
     # --- the switch -------------------------------------------------------
 

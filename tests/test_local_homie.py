@@ -235,6 +235,15 @@ def test_walk_skips_undescribed_children():
     assert [d.device_id for d in tree.walk(PANEL)] == [PANEL, CIRCUIT]
 
 
+def test_panel_root_prefers_the_serial_else_the_only_root():
+    tree = loaded_tree()
+    assert tree.panel_root(PANEL) == PANEL
+    assert tree.panel_root("nt-9999-test") == PANEL  # the only root
+    tree.apply("ebus/5/other-root/$description", PANEL_DESC)
+    assert tree.panel_root("nt-9999-test") == "nt-9999-test"  # ambiguous
+    assert homie.DeviceTree().panel_root("nt-9999-test") == "nt-9999-test"
+
+
 def test_root_state_overrides_children():
     tree = loaded_tree()
     assert tree.effective_state(MID) is DeviceState.READY

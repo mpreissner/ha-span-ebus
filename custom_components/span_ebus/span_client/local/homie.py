@@ -378,6 +378,13 @@ class DeviceTree:
         """Devices with no parent: normally just the panel."""
         return [d.device_id for d in self.descriptions.values() if not d.parent]
 
+    def panel_root(self, serial: str) -> str:
+        """The panel's root device: its serial, or the only root if that differs."""
+        if serial in self.states or serial in self.descriptions:
+            return serial
+        roots = self.roots()
+        return roots[0] if len(roots) == 1 else serial
+
     def walk(self, root_id: str) -> list[DeviceDescription]:
         """`root_id` and everything below it, parents before children.
 
