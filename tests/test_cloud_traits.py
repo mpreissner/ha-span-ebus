@@ -8,15 +8,19 @@ Labels are placeholders — no captured payload or real circuit name is committe
 from span_client import cloud_pb as pb
 from span_client.cloud_commands import SwitchTarget
 from span_client.cloud_traits import (
+    FEEDER_FEEDTHROUGH,
+    FEEDER_MAIN_BREAKER,
     SWITCH_STATE_CLOSED,
     SWITCH_STATE_OPEN,
     SWITCH_STATE_UNKNOWN,
     TRAIT_CIRCUIT,
+    TRAIT_FEEDER,
     TRAIT_LABEL,
     TRAIT_SPACE,
     TRAIT_SWITCH,
     VENDOR_SPAN,
     CircuitInfo,
+    parse_feeder_kinds,
     parse_trait_snapshot,
 )
 
@@ -194,3 +198,30 @@ def test_unfamiliar_or_empty_snapshots_degrade_quietly():
     assert parse_trait_snapshot(b"") == {}
     assert parse_trait_snapshot(pb.field_string(9, "not a snapshot")) == {}
     assert parse_trait_snapshot(b"\xff\xff\xff") == {}
+
+
+def _feeder(kind: int) -> bytes:
+    """Trait 1/21's value: { 1: { 2: feeder kind } }."""
+    return pb.field_message(1, pb.field_varint(2, kind))
+
+
+def test_feeder_kinds_are_read_per_feed_instance():
+    entries = (
+        _entry(TRAIT_FEEDER, 2, _feeder(FEEDER_MAIN_BREAKER))
+        + _entry(TRAIT_FEEDER, 41, _feeder(FEEDER_FEEDTHROUGH))
+        + _entry(TRAIT_LABEL, 101, _label("Branch A", 20))
+    )
+    resource = pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + entries
+    assert parse_feeder_kinds(pb.field_message(1, resource)) == {2: 3, 41: 4}
+
+
+def test_feeder_kinds_degrade_quietly():
+    assert parse_feeder_kinds(b"") == {}
+    assert parse_feeder_kinds(b"\xff\xff\xff") == {}
+    # A snapshot without trait 1/21 classifies nothing.
+    assert parse_feeder_kinds(build_snapshot()) == {}
+    # A feeder entry without a kind is left out rather than guessed.
+    resource = pb.field_message(1, pb.field_string(1, HARDWARE_ID)) + _entry(
+        TRAIT_FEEDER, 2, pb.field_message(1, b"")
+    )
+    assert parse_feeder_kinds(pb.field_message(1, resource)) == {}

@@ -55,6 +55,9 @@ class PropertySpec:
     # Node display name, e.g. a circuit's user-assigned label. Resolved after
     # the schema is parsed, since a circuit's `name` arrives as a property.
     node_name: str | None = None
+    # Cloud feeds only: trait 1/21's feeder kind for this feed instance, when
+    # the snapshot classified it (see cloud_traits.FEEDER_*).
+    feeder_kind: int | None = None
 
     @property
     def key(self) -> str:
