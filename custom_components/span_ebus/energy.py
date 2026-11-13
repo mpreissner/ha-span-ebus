@@ -235,21 +235,78 @@ class EnergyAccumulator:
         self._last_power_w: float | None = None
         self._last_timestamp: float | None = None
 
-    def add(self, power_w: float, timestamp: float) -> None:
-        """Fold one sample in, advancing the total by the interval it closes."""
+    def add(self, power_w: float, timestamp: float) -> float | None:
+        """Fold one sample in, advancing the total by the interval it closes.
+
+        Returns the length in seconds of a gap it refused to bridge, so a caller
+        can account for the time some other way; None otherwise, including a gap
+        of exactly `max_gap_seconds`, which is bridged.
+        """
         previous_power, previous_timestamp = self._last_power_w, self._last_timestamp
         if previous_timestamp is not None and timestamp <= previous_timestamp:
             # A repeated or out-of-order stamp. The coordinator wakes its
             # entities for reasons other than a new frame — a relay command, a
             # liveness change — so the same sample being offered twice is
             # routine, and it must neither add energy nor move the baseline.
-            return
+            return None
         self._last_power_w, self._last_timestamp = power_w, timestamp
 
         if previous_power is None or previous_timestamp is None:
-            return
+            return None
         elapsed = timestamp - previous_timestamp
         if elapsed > self.max_gap_seconds:
-            return
+            return elapsed
         average_w = (max(previous_power, 0.0) + max(power_w, 0.0)) / 2.0
         self.total_kwh += average_w * elapsed / _WS_PER_KWH
+        return None
+
+    def interrupt(self) -> None:
+        """Break the run: the next sample only re-establishes the baseline.
+
+        For a reading that went missing. Bridging across it would credit the
+        missing stretch with the average of the samples either side.
+        """
+        self._last_power_w = None
+        self._last_timestamp = None
+
+
+class IntegratedRun:
+    """An `EnergyAccumulator` fed readings that can go missing.
+
+    A missing reading (None) breaks the run, so nothing is credited across it.
+    A break longer than `max_gap_seconds`, or a long silence between readings, is
+    reported by `sample` as a gap, measured from the last reading integrated, so
+    a caller can record it whichever way it arose.
+    """
+
+    def __init__(self, max_gap_seconds: float, total_kwh: float = 0.0) -> None:
+        self._accumulator = EnergyAccumulator(max_gap_seconds, total_kwh)
+        self._last_good: float | None = None
+
+    @property
+    def total_kwh(self) -> float:
+        return self._accumulator.total_kwh
+
+    @total_kwh.setter
+    def total_kwh(self, value: float) -> None:
+        self._accumulator.total_kwh = value
+
+    def sample(self, power_w: float | None, timestamp: float) -> tuple[bool, float | None]:
+        """Offer one reading. Returns (taken, gap seconds or None).
+
+        `taken` is False for a missing reading and for a stamp no newer than the
+        last one taken (the same sample offered again).
+        """
+        if power_w is None:
+            self._accumulator.interrupt()
+            return False, None
+        previous = self._last_good
+        if previous is not None and timestamp <= previous:
+            return False, None
+        gap = self._accumulator.add(power_w, timestamp)
+        self._last_good = timestamp
+        if gap is None and previous is not None:
+            elapsed = timestamp - previous
+            if elapsed > self._accumulator.max_gap_seconds:
+                gap = elapsed  # the run was broken by missing readings for this long
+        return True, gap

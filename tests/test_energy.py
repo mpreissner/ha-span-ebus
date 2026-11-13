@@ -6,7 +6,7 @@ once, twice, or never — are the part of the energy sensors worth pinning down.
 """
 
 import pytest
-from energy import EnergyAccumulator, EnergyLedger
+from energy import EnergyAccumulator, EnergyLedger, IntegratedRun
 from span_client.models import EnergySample
 
 KEY = "circuit-36/power"
@@ -350,3 +350,65 @@ def test_a_restored_total_is_carried_forward_not_restarted():
     acc.add(3600.0, 10.0)
 
     assert acc.total_kwh == pytest.approx(12.51)
+
+
+def test_a_refused_gap_is_reported_with_its_length():
+    acc = EnergyAccumulator(max_gap_seconds=300.0)
+    assert acc.add(2000.0, 0.0) is None  # baseline
+    assert acc.add(2000.0, 300.0) is None  # exactly the limit is bridged
+    assert acc.add(2000.0, 1000.0) == pytest.approx(700.0)
+    assert acc.add(2000.0, 1000.0) is None  # a repeat is not a gap
+
+
+def test_an_interrupted_run_only_re_establishes_the_baseline():
+    acc = EnergyAccumulator(max_gap_seconds=300.0)
+    acc.add(3600.0, 0.0)
+    acc.interrupt()
+    acc.add(3600.0, 10.0)
+    assert acc.total_kwh == 0.0
+    acc.add(3600.0, 20.0)
+    assert acc.total_kwh == pytest.approx(0.01)
+
+
+def test_a_missing_reading_breaks_the_run():
+    run = IntegratedRun(max_gap_seconds=300.0)
+    assert run.sample(3600.0, 0.0) == (True, None)
+    assert run.sample(None, 10.0) == (False, None)
+    # The ten seconds either side of the missing reading are not credited.
+    assert run.sample(3600.0, 20.0) == (True, None)
+    assert run.total_kwh == 0.0
+    run.sample(3600.0, 30.0)
+    assert run.total_kwh == pytest.approx(0.01)
+
+
+def test_a_long_break_is_reported_as_a_gap():
+    run = IntegratedRun(max_gap_seconds=300.0)
+    run.sample(1000.0, 0.0)
+    run.sample(None, 100.0)
+    taken, gap = run.sample(1000.0, 500.0)
+    assert taken
+    assert gap == pytest.approx(500.0)
+    assert run.total_kwh == 0.0
+
+
+def test_a_long_silence_is_reported_as_a_gap():
+    run = IntegratedRun(max_gap_seconds=300.0)
+    run.sample(1000.0, 0.0)
+    assert run.sample(1000.0, 900.0) == (True, pytest.approx(900.0))
+    assert run.total_kwh == 0.0
+
+
+def test_a_repeated_stamp_is_not_taken():
+    run = IntegratedRun(max_gap_seconds=300.0)
+    run.sample(1000.0, 10.0)
+    assert run.sample(1000.0, 10.0) == (False, None)
+    assert run.sample(1000.0, 5.0) == (False, None)
+
+
+def test_a_run_carries_a_restored_total_and_only_counts_the_positive_part():
+    run = IntegratedRun(max_gap_seconds=300.0, total_kwh=4.0)
+    run.total_kwh = 5.0
+    run.sample(-3600.0, 0.0)
+    run.sample(3600.0, 10.0)
+    # Trapezoid of max(0, -3600) and 3600 over ten seconds.
+    assert run.total_kwh == pytest.approx(5.005)

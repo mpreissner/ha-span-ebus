@@ -421,6 +421,21 @@
           "off_grid": "Off grid",
           "unknown": "Unknown"
         }
+      },
+      "overhead": {
+        "name": "Panel overhead"
+      },
+      "overhead_energy": {
+        "name": "Panel overhead energy"
+      },
+      "site_energy": {
+        "name": "Site energy"
+      },
+      "pv_energy": {
+        "name": "Solar energy"
+      },
+      "battery_energy": {
+        "name": "Battery energy"
       }
     },
     "select": {

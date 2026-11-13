@@ -22,6 +22,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum, StrEnum, auto
 from typing import Any
 
+from ..overhead import FEEDTHROUGH_SIGN, overhead_w
 from . import homie
 from .health import Transport
 from .homie import DEVICE_TYPE_PREFIX, DeviceDescription, DeviceState, DeviceTree
@@ -43,6 +44,14 @@ UP_STATES: frozenset[DeviceState] = frozenset({DeviceState.READY, DeviceState.AL
 # dashboard expects. Confirm against the live panel before release: changing a
 # sign later corrupts long-term statistics.
 GRID_FLOW_SIGN = -1
+# power-flows/pv reads negative while the array produces, and power-flows/battery
+# positive while the battery charges. These turn them into what the integrated
+# solar and battery energies count: production, and the battery's discharge
+# (what SPAN's cloud history calls battery import). Both follow the official
+# SpanPanel/span integration's handling of the same properties; no panel with
+# either has been captured yet, so tests pin them.
+PV_TO_CLOUD_SIGN = -1
+BATTERY_TO_CLOUD_SIGN = -1
 
 DERIVED = "derived"  # capability for values we compute; never a Homie capability
 STATE_KEY = "$state"  # Homie-reserved, so it cannot collide with a property key
@@ -302,6 +311,8 @@ class Snapshot:
     pv: Mapping[str, SubdeviceFacts] = field(default_factory=dict)
     evse: Mapping[str, SubdeviceFacts] = field(default_factory=dict)
     mid: Mapping[str, SubdeviceFacts] = field(default_factory=dict)
+    # time.monotonic() of the newest message folded in; None for a restored tree.
+    received_at: float | None = None
 
     @property
     def upstream(self) -> LugsFacts | None:
@@ -437,7 +448,13 @@ _SUBDEVICE_READS: Mapping[str, frozenset[str]] = {
 LINK_CONFLICT = "connection/link-conflict"  # an Unmapped note, never a property key
 
 
-def build_snapshot(tree: DeviceTree, root_id: str, *, restored: bool = False) -> Snapshot:
+def build_snapshot(
+    tree: DeviceTree,
+    root_id: str,
+    *,
+    restored: bool = False,
+    received_at: float | None = None,
+) -> Snapshot:
     """The facts for `root_id` and everything under it. Pure.
 
     Devices are classified by their description's type, never by id; one whose
@@ -496,6 +513,7 @@ def build_snapshot(tree: DeviceTree, root_id: str, *, restored: bool = False) ->
         pv=by_class[PV_CLASS],
         evse=by_class[EVSE_CLASS],
         mid=by_class[MID_CLASS],
+        received_at=received_at,
     )
 
 
@@ -1569,6 +1587,153 @@ def row_exists(snapshot: Snapshot, row: Row, device_id: str) -> bool:
     """Whether the entity for this row and device should be created."""
     facts = row_facts(snapshot, row, device_id)
     return row_described(facts, row) and (row.when is None or row.when(facts))
+
+
+# --- derived rows: computed from the whole snapshot ----------------------------------
+#
+# Panel overhead and the integrated site energies read several devices at once,
+# so they are not `Row`s (a Row reads one device's facts). Each takes a
+# `Reader`, which turns a local value into the value shown: the local one on
+# LOCAL, the cloud fallback's on CLOUD, nothing while OFFLINE.
+
+# (scope, device id, row source, device state, local value in the row's frame) -> shown value
+type Reader = Callable[[Scope, str, str, DeviceState | None, Any], Any]
+_ACTIVE_POWER = "meter/active-power"
+
+
+def shown_reader(shown: Transport, fallback: Callable[[Scope, str, str], Any]) -> Reader:
+    """What a derived value reads its inputs through.
+
+    LOCAL: the local value, but only from a device that is up (a measurement
+    from one that is not would be stale). CLOUD: the fallback's value for the
+    same row, None where it has none. OFFLINE: nothing.
+    """
+
+    def read(scope: Scope, device_id: str, source: str, state: DeviceState | None, value: Any):
+        if shown is Transport.LOCAL:
+            return value if state in UP_STATES else None
+        if shown is Transport.CLOUD:
+            got = fallback(scope, device_id, source)
+            return None if got is NO_FALLBACK else got
+        return None
+
+    return read
+
+
+def has_feedthrough(snapshot: Snapshot) -> bool:
+    """Whether the panel feeds a downstream panel through lugs it meters.
+
+    Downstream lugs marked UNUSED, or not describing their power, carry nothing
+    to subtract: an MLO sharing the enclosure reports such lugs, whose currents
+    mirror the upstream ones. An unpublished role counts as maybe in use.
+    """
+    down = snapshot.downstream
+    return (
+        down is not None
+        and (down.feeds_role or "").upper() != "UNUSED"
+        and _ACTIVE_POWER in down.described
+    )
+
+
+def local_overhead_w(snapshot: Snapshot, read: Reader) -> float | None:
+    """`overhead.overhead_w` over this panel's own lugs and circuits.
+
+    Each circuit counts as power leaving the bus, so a producing circuit counts
+    negative. Remote CTs meter something that is not on this bus and are left
+    out.
+    """
+    up = snapshot.upstream
+    if up is None:
+        return None
+    feed = _float(read(Scope.UPSTREAM, up.device_id, _ACTIVE_POWER, up.state, up.active_power))
+    circuits: list[float | None] = []
+    for device_id, circuit in snapshot.circuits.items():
+        if circuit.is_remote_ct:
+            continue
+        shown = _float(read(Scope.CIRCUIT, device_id, _ACTIVE_POWER, circuit.state, circuit.power))
+        if shown is not None and circuit.role in _PRODUCERS:
+            shown = -shown
+        circuits.append(shown)
+    feedthrough: float | None = None
+    through = has_feedthrough(snapshot)
+    down = snapshot.downstream
+    if through and down is not None:  # has_feedthrough implies a downstream device
+        raw = _float(read(Scope.DOWNSTREAM, down.device_id, _ACTIVE_POWER, down.state,
+                          down.active_power))  # fmt: skip
+        feedthrough = None if raw is None else FEEDTHROUGH_SIGN * raw
+    return overhead_w(feed, circuits, feedthrough, through)
+
+
+def _flow_w(name: str, sign: int) -> Callable[[Snapshot, Reader], float | None]:
+    source = f"power-flows/{name}"
+
+    def power(snapshot: Snapshot, read: Reader) -> float | None:
+        panel = snapshot.panel
+        if panel is None:
+            return None
+        value = _float(read(Scope.PANEL, panel.device_id, source, panel.state,
+                            getattr(panel.flows, name)))  # fmt: skip
+        return None if value is None else sign * value
+
+    return power
+
+
+def _flow_published(name: str) -> Callable[[Snapshot], bool]:
+    return lambda s: s.panel is not None and name in s.panel.flows.published
+
+
+def _has_panel(snapshot: Snapshot) -> bool:
+    return snapshot.panel is not None
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedRow:
+    """A panel-device entity computed from the whole snapshot.
+
+    `power` is the value in W (+ = what the row counts); an `energy` row
+    integrates its positive part into kWh. The uid is `panel_uid(K, source)`.
+    """
+
+    key: str  # translation key
+    source: str
+    power: Callable[[Snapshot, Reader], float | None]
+    energy: bool
+    when: Callable[[Snapshot], bool]
+
+
+DERIVED_ROWS: tuple[DerivedRow, ...] = (
+    DerivedRow("overhead", f"{DERIVED}/overhead", local_overhead_w, False, _has_panel),
+    DerivedRow("overhead_energy", f"{DERIVED}/overhead-energy", local_overhead_w, True,
+               _has_panel),
+    DerivedRow("site_energy", f"{DERIVED}/site-energy", _flow_w("site", 1), True,
+               _flow_published("site")),
+    DerivedRow("pv_energy", f"{DERIVED}/pv-energy", _flow_w("pv", PV_TO_CLOUD_SIGN), True,
+               _flow_published("pv")),
+    DerivedRow("battery_energy", f"{DERIVED}/battery-energy",
+               _flow_w("battery", BATTERY_TO_CLOUD_SIGN), True, _flow_published("battery")),
+)  # fmt: skip
+
+
+def derived_presence(shown: Transport, root_state: DeviceState | None, has_value: bool) -> Presence:
+    """What a derived power row shows. Integrated energies always show their total."""
+    if shown is Transport.OFFLINE:
+        return Presence.UNAVAILABLE
+    if shown is Transport.LOCAL and root_state not in UP_STATES:
+        return Presence.UNAVAILABLE
+    return Presence.VALUE if has_value else Presence.UNKNOWN
+
+
+def derived_timestamp(snapshot: Snapshot, shown: Transport, now: float) -> float | None:
+    """The monotonic time a derived sample stands for, or None to skip it.
+
+    On LOCAL it is when the snapshot's newest message arrived, so a recompute for
+    some other reason (a transport change) offers the same sample again and the
+    accumulator ignores it. A restored snapshot has no live sample at all.
+    Otherwise the sample is taken now.
+    """
+    if shown is Transport.LOCAL:
+        return snapshot.received_at
+    return now
 
 
 # --- restoring the tree across restarts -----------------------------------------------

@@ -1184,6 +1184,66 @@ def test_panel_overhead_is_never_negative():
     assert cloud.panel_overhead(schema, readings) == 0.0
 
 
+def _two_feed_inputs(feeders):
+    # The second three_wire instance is a feedthrough carrying 1500 W onward.
+    frame = _frame()
+    samples = [
+        *frame.resources["res1"],
+        CircuitSample(
+            instance_id=41,
+            kind="three_wire",
+            quality_pct=100,
+            combined=Channel(current_ma=6250, power_mw=1500000),
+        ),
+    ]
+    frame = replace(frame, resources={"res1": samples})
+    schema = cloud.schema_from_frame("<cloud-serial>", frame, _circuits(), feeders)
+    readings = {r.key: r for r in cloud.readings_from_frame(frame, 0.0, _circuits())}
+    return schema, readings
+
+
+def test_a_single_unclassified_feed_is_still_the_main_feed():
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits(), {})
+    readings = {r.key: r for r in cloud.readings_from_frame(_frame(), 0.0, _circuits())}
+    assert schema.properties["feed-2/power"].feeder_kind is None
+    assert round(cloud.panel_overhead(schema, readings), 3) == 1661.020
+
+
+def test_feeder_kind_is_recorded_on_the_feed_power():
+    schema, _ = _two_feed_inputs({2: 3, 41: 4})
+    assert schema.properties["feed-2/power"].feeder_kind == 3
+    assert schema.properties["feed-41/power"].feeder_kind == 4
+    assert schema.properties["circuit-54/power"].feeder_kind is None
+
+
+def test_two_unclassified_feeds_cannot_be_told_apart():
+    schema, readings = _two_feed_inputs({})
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_a_partly_classified_pair_of_feeds_is_not_guessed():
+    schema, readings = _two_feed_inputs({2: 3})
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_the_feedthrough_is_subtracted_from_the_main_feed():
+    # 2003.000 W in, 341.980 W to the branch, 1500.000 W on to the downstream panel.
+    schema, readings = _two_feed_inputs({2: 3, 41: 4})
+    assert round(cloud.panel_overhead(schema, readings), 3) == 161.020
+
+
+def test_the_feedthrough_reading_is_required_once_classified():
+    schema, readings = _two_feed_inputs({2: 3, 41: 4})
+    del readings["feed-41/power"]
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_a_lone_feedthrough_is_not_a_main_feed():
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits(), {2: 4})
+    readings = {r.key: r for r in cloud.readings_from_frame(_frame(), 0.0, _circuits())}
+    assert cloud.panel_overhead(schema, readings) is None
+
+
 def test_private_ids_stay_below_info_level(monkeypatch, caplog, tmp_path):
     ids = iter([["gw-secret-old"], ["gw-secret-new"]])
 

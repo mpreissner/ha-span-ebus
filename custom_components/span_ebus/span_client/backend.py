@@ -50,8 +50,15 @@ from pathlib import Path
 from . import cloud_ably, cloud_auth, cloud_commands, cloud_grpc, cloud_history
 from .cloud_pb import Message, ProtoError, field_message, field_string, field_varint, parse
 from .cloud_telemetry import CircuitSample, Frame, decode_frame
-from .cloud_traits import CircuitInfo, parse_trait_snapshot
+from .cloud_traits import (
+    FEEDER_FEEDTHROUGH,
+    FEEDER_MAIN_BREAKER,
+    CircuitInfo,
+    parse_feeder_kinds,
+    parse_trait_snapshot,
+)
 from .models import DataType, EnergySample, NodeKind, PanelSchema, PropertySpec, Reading
+from .overhead import overhead_w
 
 # Backend callbacks (previously defined on the daemon's backend Protocol).
 ReadingCallback = Callable[[Reading], None]
@@ -322,7 +329,10 @@ def _node_names(frame: Frame, circuits: dict[int, CircuitInfo]) -> dict[str, str
 
 
 def schema_from_frame(
-    serial: str, frame: Frame, circuits: dict[int, CircuitInfo] | None = None
+    serial: str,
+    frame: Frame,
+    circuits: dict[int, CircuitInfo] | None = None,
+    feeders: Mapping[int, int] | None = None,
 ) -> PanelSchema:
     """Synthesize a PanelSchema from one decoded frame.
 
@@ -330,18 +340,21 @@ def schema_from_frame(
     internal identifiers with no relation to panel spaces — a 40-space MAIN 40
     reports instances up to 56 — so `circuits`, parsed from the subscribe
     snapshot, supplies the user's labels, breaker ratings and real space numbers.
-    Without it nodes fall back to instance-id names.
+    Without it nodes fall back to instance-id names. `feeders`, from the same
+    snapshot, tags each feed with its feeder kind where trait 1/21 gives one.
 
     Properties are chosen per sample kind so every entity we advertise is one the
     wire actually feeds; the site directional flows get their own node.
     """
     circuits = circuits or {}
+    feeders = feeders or {}
     schema = PanelSchema(serial=serial)
     names = _node_names(frame, circuits)
 
     for samples in frame.resources.values():
         for sample in samples:
             node_id, kind = _node_for(sample, circuits)
+            feeder_kind = feeders.get(sample.instance_id) if kind is NodeKind.LUGS else None
             for prop_id, unit, _source, _attr in _PROPS_BY_KIND.get(sample.kind, ()):
                 schema.add(
                     PropertySpec(
@@ -352,6 +365,7 @@ def schema_from_frame(
                         datatype=DataType.FLOAT,
                         unit=unit,
                         node_name=names.get(node_id),
+                        feeder_kind=feeder_kind,
                     )
                 )
             # Only circuits whose switch trait the snapshot resolved get a relay,
@@ -462,10 +476,11 @@ def is_main_feed_power(spec: PropertySpec) -> bool:
 
 
 def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> float | None:
-    """Watts entering the panel that no branch circuit accounts for.
+    """Watts entering the panel that no branch circuit or downstream panel accounts for.
 
     The main feed (`feed-*/power`) is everything through the main lugs; the
-    branch meters are everything leaving on a breaker. What separates them is the
+    branch meters are everything leaving on a breaker, and a feedthrough feed is
+    everything leaving for a downstream panel. What separates them is the
     panel's own draw — its electronics and relays — which is a steady load and
     never negative.
 
@@ -476,24 +491,38 @@ def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> floa
     from −420 to +320 W. The result is still floored at zero, since the meters
     are not reconciled and a negative figure could only be their disagreement.
 
-    None until the main feed and *every* circuit has reported, so a circuit that
-    has not landed yet cannot masquerade as overhead of its whole draw — and None
-    on a panel that does not report exactly one main feed.
+    Which feed is which comes from trait 1/21's feeder kind. A single feed the
+    kind does not call a feedthrough is the main feed, with nothing leaving
+    downstream. Several feeds need every one classified — one main breaker and
+    at most one feedthrough — or there is no telling them apart, and the result
+    is None.
+
+    None until the feeds and *every* circuit have reported, so a circuit that
+    has not landed yet cannot masquerade as overhead of its whole draw.
     """
-    feeds = [spec.key for spec in schema.properties.values() if is_main_feed_power(spec)]
+    feeds = [spec for spec in schema.properties.values() if is_main_feed_power(spec)]
     keys = [
         spec.key
         for spec in schema.properties.values()
         if spec.node_kind is NodeKind.CIRCUIT and spec.property_id == POWER_PROPERTY
     ]
-    if len(feeds) != 1 or not keys:
+    if not keys:
         return None
+    if len(feeds) == 1 and feeds[0].feeder_kind != FEEDER_FEEDTHROUGH:
+        main, through = feeds[0], None
+    else:
+        mains = [f for f in feeds if f.feeder_kind == FEEDER_MAIN_BREAKER]
+        throughs = [f for f in feeds if f.feeder_kind == FEEDER_FEEDTHROUGH]
+        if len(mains) != 1 or len(throughs) > 1 or len(mains) + len(throughs) != len(feeds):
+            return None
+        main, through = mains[0], (throughs[0] if throughs else None)
     try:
-        total = float(readings[feeds[0]].value)
-        branches = sum(float(readings[key].value) for key in keys)
+        feed_w = float(readings[main.key].value)
+        circuits_w = [float(readings[key].value) for key in keys]
+        through_w = float(readings[through.key].value) if through is not None else None
     except (KeyError, TypeError, ValueError):
         return None
-    return max(0.0, total - branches)
+    return overhead_w(feed_w, circuits_w, through_w, through is not None)
 
 
 def energy_samples(
@@ -1285,6 +1314,8 @@ class CloudBackend:
         self._resolved_hardware_ids: list[str] = []
         # instance id -> circuit identity, from the subscribe snapshot.
         self._circuits: dict[int, CircuitInfo] = {}
+        # feed instance id -> trait 1/21 feeder kind, from the same snapshot.
+        self._feeders: dict[int, int] = {}
         # What `fetch_energy` asks about, learned from the frames: resource ->
         # instance -> node id, and the site flows this panel publishes.
         self._energy_targets: dict[str, dict[int, str]] = {}
@@ -1730,9 +1761,11 @@ class CloudBackend:
         switch state, so without this the value would only move when we ourselves
         commanded it.
         """
-        circuits = parse_trait_snapshot(self.subscribe(channel))
+        snapshot = self.subscribe(channel)
+        circuits = parse_trait_snapshot(snapshot)
         if circuits:
             self._circuits = circuits
+            self._feeders = parse_feeder_kinds(snapshot)
             if announce:
                 for info in circuits.values():
                     if info.switch is not None:
@@ -1815,7 +1848,7 @@ class CloudBackend:
             and (self._circuits or time.monotonic() >= self._label_deadline)
         ):
             serial = self._serial or "span-cloud"
-            self._on_schema(schema_from_frame(serial, source, self._circuits))
+            self._on_schema(schema_from_frame(serial, source, self._circuits, self._feeders))
             self._schema_sent = True
 
         # Only a content-bearing frame names the metering instances: the lean
@@ -1942,9 +1975,11 @@ class SiteStream(CloudBackend):
     def _refresh_circuits(self, channel: str, *, announce: bool = False) -> None:
         parts = split_snapshot(self.subscribe(channel), self._routes, self._unrouted)
         for key, panel in self._panels.items():
-            circuits = parse_trait_snapshot(parts.get(key, b""))
+            part = parts.get(key, b"")
+            circuits = parse_trait_snapshot(part)
             if circuits:
                 panel._circuits = circuits
+                panel._feeders = parse_feeder_kinds(part)
                 if announce:
                     for info in circuits.values():
                         if info.switch is not None:

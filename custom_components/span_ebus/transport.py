@@ -134,6 +134,9 @@ class SpanTransportManager:
         self.snapshot: model.Snapshot = model.EMPTY
         self._model_listeners: list[ModelListener] = []
         self._live = False  # a message has arrived since start: values are no longer restored
+        # Monotonic time of the newest parsed message: the time integrated rows stamp
+        # each snapshot's sample with.
+        self._received_at: float | None = None
         self._logged_unmapped: set[model.Unmapped] = set()
         self._store = local_tree_store(hass, entry.entry_id)
         self._save_pending = False
@@ -197,6 +200,7 @@ class SpanTransportManager:
             self.health.state(self.tree.states.get(self._root()), now)
         if parsed is not None:
             self._live = True
+            self._received_at = now
             self._coalescer.mark()
 
     @callback
@@ -363,7 +367,12 @@ class SpanTransportManager:
         if self._stopped:
             return
         self._publish_snapshot(
-            model.build_snapshot(self.tree, self._root(), restored=not self._live)
+            model.build_snapshot(
+                self.tree,
+                self._root(),
+                restored=not self._live,
+                received_at=self._received_at if self._live else None,
+            )
         )
         if self._live:
             self._save_tree_later()
