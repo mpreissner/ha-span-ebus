@@ -191,7 +191,8 @@ PRESENTATION: dict[str, Presentation] = {
         suffix="net energy",
     ),
     "breaker_rating": Presentation(
-        unit=_A, device_class=SensorDeviceClass.CURRENT, category=_D, suffix="breaker rating"
+        unit=_A, device_class=SensorDeviceClass.CURRENT, category=_D, enabled=False,
+        suffix="breaker rating",
     ),
     "breaker": Presentation(suffix="breaker"),
     "priority": Presentation(category=EntityCategory.CONFIG, suffix="priority"),
