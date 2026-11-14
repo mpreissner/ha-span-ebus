@@ -91,6 +91,7 @@ from .span_client.backend import (
     primary_panel_for,
     same_serial,
     serial_taken,
+    sibling_answers,
 )
 from .span_client.identity import (
     RegistryEntryView,
@@ -1564,6 +1565,7 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             return "panel_not_on_account"
         site, panel = found
         self._link = {
+            "sites": sites,
             "site": site,
             "panel": panel,
             "coordinator": coordinator,
@@ -1658,6 +1660,10 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         if not onboard.firmware_supported(status.firmware):
             errors["base"] = "not_supported"
             return None
+        if sibling_answers(self._link["sites"], panel.key, status.serial):
+            # Space numbers can overlap between panels, so the circuit check
+            # alone could take a sibling for this one.
+            return self.async_abort(reason="link_other_panel")
         # SPAN's account can list the panel under another serial: the circuits
         # decide once they are read, as when a panel is picked by hand.
         self._link["serial_mismatch"] = not panel.answers_to(status.serial)

@@ -262,6 +262,7 @@
       "link_unreadable": "Couldn't read the panel or its circuits. Nothing was changed. Try again later.",
       "already_configured": "This panel is already set up in Home Assistant.",
       "unknown": "Unexpected error.",
+      "link_other_panel": "The panel at that address is another panel on this SPAN account, not the one this entry runs. Check the address.",
       "link_nothing_matched": "None of this account's entities match the local panel, so nothing was changed. Check that this is the right panel."
     },
     "progress": {

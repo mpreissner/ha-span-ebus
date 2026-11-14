@@ -1322,3 +1322,28 @@ def test_serial_taken_is_false_for_other_panels_and_blanks():
     names = ("nt-0000-test", "XC-AAAA-0000", None)
     assert not cloud.serial_taken(["acct-1", None, ""], [None, "nt-1111-test"], names)
     assert not cloud.serial_taken(["nt-0000-test"], [], [None, ""])
+
+
+# --- a sibling panel on the account ------------------------------------------------
+
+
+def _sibling_sites():
+    main = cloud.PanelInfo("site-a", "XC-AAAA", "1-02100-04", None)
+    mlo = cloud.PanelInfo("site-b", "XC-BBBB", "1-02100-04", None)
+    return [
+        cloud.SiteInfo("site-a", ("site-a",), (main,)),
+        cloud.SiteInfo("site-b", ("site-b",), (mlo,)),
+    ]
+
+
+def test_sibling_answers_is_false_for_the_chosen_panel():
+    assert not cloud.sibling_answers(_sibling_sites(), "XC-AAAA", "xc-aaaa")
+
+
+def test_sibling_answers_refuses_another_panel_on_the_account():
+    assert cloud.sibling_answers(_sibling_sites(), "XC-AAAA", "xc-bbbb")
+
+
+def test_sibling_answers_leaves_an_unknown_serial_to_the_circuits():
+    assert not cloud.sibling_answers(_sibling_sites(), "XC-AAAA", "nt-0000-test")
+    assert not cloud.sibling_answers(_sibling_sites(), "XC-AAAA", None)

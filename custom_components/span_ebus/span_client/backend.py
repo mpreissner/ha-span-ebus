@@ -1111,6 +1111,23 @@ def find_panel(sites: list[SiteInfo], key: str) -> tuple[SiteInfo, PanelInfo] | 
     return None
 
 
+def sibling_answers(sites: Iterable[SiteInfo], chosen_key: str, serial: str | None) -> bool:
+    """Whether a serial belongs to another panel on the account than the chosen one.
+
+    Overlapping space numbers (a MAIN 40 beside an MLO 48) can pass the
+    circuit check, so a sibling that answers refuses the link. A serial no
+    panel answers to (the cloud lists this one under another) is left to the
+    circuit check.
+    """
+    if not serial:
+        return False
+    return any(
+        panel.answers_to(serial) and not panel.answers_to(chosen_key)
+        for site in sites
+        for panel in (*site.panels, *site_choices(site))
+    )
+
+
 def panel_circuits(
     access_token: str,
     site: SiteInfo,
