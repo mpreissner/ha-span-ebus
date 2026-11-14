@@ -701,6 +701,21 @@ def same_serial(a: str | None, b: str | None) -> bool:
     return a.strip().casefold() == b.strip().casefold()
 
 
+def serial_taken(
+    unique_ids: Iterable[str | None],
+    local_serials: Iterable[str | None],
+    names: Iterable[str | None],
+) -> bool:
+    """Whether another entry already runs a panel known by any of `names`.
+
+    An entry runs it under its unique id, or (a cloud account entry given its
+    panel keeps the account's unique id) under the local serial in its data.
+    `names` are the spellings the panel goes by: its local serial and its key.
+    """
+    wanted = [name for name in names if name]
+    return any(same_serial(held, name) for held in (*unique_ids, *local_serials) for name in wanted)
+
+
 @dataclass(frozen=True)
 class PanelInfo:
     """One panelboard from GetSitesForUser."""

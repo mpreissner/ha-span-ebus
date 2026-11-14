@@ -1306,3 +1306,19 @@ def test_private_ids_stay_below_info_level(monkeypatch, caplog, tmp_path):
     assert "subscribable hardware ids changed" in caplog.text
     assert "subscribed 1 resource(s)" in caplog.text
     assert "secret" not in caplog.text.lower()
+
+
+# --- an entry already running the panel ------------------------------------------
+
+
+def test_serial_taken_by_unique_id_or_local_serial_in_any_case():
+    names = ("nt-0000-test", "XC-AAAA-0000")
+    assert cloud.serial_taken(["NT-0000-TEST"], [], names)
+    assert cloud.serial_taken([], ["xc-aaaa-0000"], names)
+    assert cloud.serial_taken(["acct-1"], [None, "XC-AAAA-0000"], names)
+
+
+def test_serial_taken_is_false_for_other_panels_and_blanks():
+    names = ("nt-0000-test", "XC-AAAA-0000", None)
+    assert not cloud.serial_taken(["acct-1", None, ""], [None, "nt-1111-test"], names)
+    assert not cloud.serial_taken(["nt-0000-test"], [], [None, ""])

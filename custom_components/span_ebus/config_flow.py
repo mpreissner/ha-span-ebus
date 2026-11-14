@@ -90,6 +90,7 @@ from .span_client.backend import (
     panel_traits,
     primary_panel_for,
     same_serial,
+    serial_taken,
 )
 from .span_client.identity import (
     RegistryEntryView,
@@ -767,10 +768,8 @@ class SpanEbusConfigFlow(_FeedSteps, _LocalRegistration, ConfigFlow, domain=DOMA
         A cloud account entry that was given its panel keeps the account's
         unique id, so the panel's serial is only in its data.
         """
-        return any(
-            same_serial(entry.data.get(CONF_LOCAL_SERIAL), serial)
-            for entry in self._async_current_entries(include_ignore=False)
-        )
+        entries = self._async_current_entries(include_ignore=False)
+        return serial_taken([], [entry.data.get(CONF_LOCAL_SERIAL) for entry in entries], [serial])
 
     async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo) -> ConfigFlowResult:
         host = str(discovery_info.host)
@@ -1585,19 +1584,27 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         return mine[0].host if len(mine) == 1 else ""
 
     def _panel_taken(self, serial: str, key: str) -> bool:
-        """Whether another entry already runs this panel, locally or over the cloud."""
-        for entry in self.hass.config_entries.async_entries(DOMAIN):
-            if entry.entry_id == self.config_entry.entry_id or entry.source == SOURCE_IGNORE:
-                continue
-            if entry.unique_id and same_serial(entry.unique_id, serial):
-                return True
-            if same_serial(entry.data.get(CONF_LOCAL_SERIAL), serial):
-                return True
-            if _is_cloud_account(entry.data) and (
-                _account_has_panel(entry, serial) or _account_has_panel(entry, key)
-            ):
-                return True
-        return False
+        """Whether another entry already runs this panel, locally or over the cloud.
+
+        The panel goes by its local serial and by the cloud's key, which can
+        differ, so both are checked.
+        """
+        others = [
+            entry
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+            if entry.entry_id != self.config_entry.entry_id and entry.source != SOURCE_IGNORE
+        ]
+        if serial_taken(
+            [entry.unique_id for entry in others],
+            [entry.data.get(CONF_LOCAL_SERIAL) for entry in others],
+            [serial, key],
+        ):
+            return True
+        return any(
+            _is_cloud_account(entry.data)
+            and (_account_has_panel(entry, serial) or _account_has_panel(entry, key))
+            for entry in others
+        )
 
     async def async_step_link_local(
         self, user_input: dict[str, Any] | None = None
