@@ -6,11 +6,20 @@ decides which device a circuit belongs to, on one site or two.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
+from .backend import same_serial
 from .cloud_traits import CircuitInfo
-from .link import link_from_options
+from .link import (
+    LOCAL_ONLY,
+    TRANSPORT_MODE,
+    cloud_removed_entry,
+    has_account,
+    legacy_local_only,
+    link_from_options,
+    save_options,
+)
 
 OWN_SUPPLY = "own_supply"
 # Solar or a battery sits between the utility meter and this panel, and no
@@ -135,6 +144,19 @@ def panel_label(name_by_user: str | None, model: str | None) -> str | None:
     return None
 
 
+def panel_identifiers(serial: str, linked: Iterable[tuple[str | None, str | None]]) -> list[str]:
+    """The device identifiers a panel may be shown under, best first.
+
+    The serial in each spelling (the panel reports lowercase, SPAN's cloud
+    uppercase), then the stem of any cloud device a local entry with this
+    serial was merged into. `linked` holds (local serial, stem) per entry.
+    """
+    stripped = serial.strip()
+    spellings = [serial, stripped, stripped.lower(), stripped.upper()]
+    spellings += [str(stem) for local, stem in linked if stem and same_serial(local, serial)]
+    return list(dict.fromkeys(item for item in spellings if item))
+
+
 def keep_topology(options: Mapping[str, Any]) -> dict[str, Any]:
     """Options with the Topology answer saved, for before the cloud answers go.
 
@@ -246,11 +268,10 @@ def circuit_choices(circuits: Mapping[int, CircuitInfo]) -> dict[str, str]:
     def place(info: CircuitInfo) -> tuple[int, int]:
         return (min(info.spaces, default=0), info.instance_id)
 
-    def label(info: CircuitInfo) -> str:
-        spaces = ", ".join(str(space) for space in info.spaces)
-        return f"{info.display_name} ({spaces})" if spaces else info.display_name
-
-    return {str(info.instance_id): label(info) for info in sorted(circuits.values(), key=place)}
+    return {
+        str(info.instance_id): cloud_circuit_label(info)
+        for info in sorted(circuits.values(), key=place)
+    }
 
 
 # --- a local panel's Topology step ---------------------------------------------------
@@ -265,8 +286,12 @@ NOT_LISTED_LABEL = "Not listed / not in Home Assistant"
 NOT_FOUND_LABEL = "Panel not found now"
 
 
-def _fold(serial: str) -> str:
-    return serial.casefold()
+def serial_key(serial: str) -> str:
+    """A serial as a dict key: two spellings `backend.same_serial` matches give
+    the same key (the panel reports lowercase, SPAN's cloud uppercase, either
+    may carry stray whitespace).
+    """
+    return serial.strip().casefold()
 
 
 def upstream_choices(
@@ -285,14 +310,14 @@ def upstream_choices(
     """
     found: dict[str, tuple[str, str | None]] = {}
     for serial, model in candidates:
-        if not serial or _fold(serial) == _fold(this_serial):
+        if not serial or not serial.strip() or same_serial(serial, this_serial):
             continue
-        key = _fold(serial)
+        key = serial_key(serial)
         if key not in found:
-            found[key] = (serial, model or None)
+            found[key] = (serial.strip(), model or None)
         elif found[key][1] is None and model:
             found[key] = (found[key][0], model)
-    by_name = {_fold(serial): name for serial, name in names.items() if name}
+    by_name = {serial_key(serial): name for serial, name in names.items() if name}
     labels: dict[str, str | None] = {
         key: panel_label(by_name.get(key), model) for key, (_serial, model) in found.items()
     }
@@ -318,7 +343,7 @@ def upstream_options(choices: Mapping[str, str], stored: str | None) -> tuple[di
     out = dict(choices)
     default = NOT_LISTED
     if stored:
-        match = next((serial for serial in out if _fold(serial) == _fold(stored)), None)
+        match = next((serial for serial in out if same_serial(serial, stored)), None)
         if match is None:
             out[stored] = NOT_FOUND_LABEL
             match = stored
@@ -337,11 +362,11 @@ def spaces_from_value(value: str) -> list[int]:
 
 
 def cloud_circuit_label(info: CircuitInfo) -> str:
-    """A cloud circuit's label, as `commands.circuit_choice_label` gives a local one's."""
-    spaces = "/".join(str(space) for space in info.spaces)
-    if info.label and spaces:
-        return f"{info.label} ({spaces})"
-    return info.label or f"Circuit {spaces}"
+    """A cloud circuit's label: its `display_name` and spaces, as `circuit_choices`
+    labels it, so both pickers name a circuit the same way.
+    """
+    spaces = ", ".join(str(space) for space in info.spaces)
+    return f"{info.display_name} ({spaces})" if spaces else info.display_name
 
 
 def breaker_choices(circuits: Iterable[tuple[str, Iterable[int]]]) -> dict[str, str]:
@@ -375,19 +400,19 @@ def topology_loops(
     for serial, saved in others.items():
         answer = saved_topology(saved)
         if answer is not None and "upstream" in answer:
-            chain[_fold(serial)] = {"upstream": _fold(answer["upstream"])}
-    known = {_fold(serial) for serial in serials}
+            chain[serial_key(serial)] = {"upstream": serial_key(answer["upstream"])}
+    known = {serial_key(serial) for serial in serials}
     for key, feed in cloud_answers:
         upstream = feed.get("upstream")
         if not isinstance(upstream, str) or feed.get("type") not in (LUGS, BRANCH):
             continue
-        if _fold(key) in known and _fold(upstream) in known:
-            chain.setdefault(_fold(key), {"upstream": _fold(upstream)})
+        if serial_key(key) in known and serial_key(upstream) in known:
+            chain.setdefault(serial_key(key), {"upstream": serial_key(upstream)})
     answer = saved_topology(topology)
     if answer is not None and "upstream" in answer:
-        chain[_fold(this_serial)] = {"upstream": _fold(answer["upstream"])}
+        chain[serial_key(this_serial)] = {"upstream": serial_key(answer["upstream"])}
     else:
-        chain.pop(_fold(this_serial), None)
+        chain.pop(serial_key(this_serial), None)
     return has_cycle(chain)
 
 
@@ -413,22 +438,22 @@ def others_summary(
     that is this panel reads "this panel", an unknown one "another panel".
     Empty when no other panel has an answer.
     """
-    by_serial = {_fold(serial): label for serial, label in labels.items()}
+    by_serial = {serial_key(serial): label for serial, label in labels.items()}
     lines: list[str] = []
     seen: set[str] = set()
     for serial, raw in answers:
-        key = _fold(serial)
+        key = serial_key(serial)
         answer = saved_topology(raw)
-        if key == _fold(this_serial) or key in seen or key not in by_serial:
+        if key == serial_key(this_serial) or key in seen or key not in by_serial:
             continue
         if answer is None or answer["supply"] not in _PHRASES:
             continue
         seen.add(key)
         upstream = answer.get("upstream")
-        if upstream and _fold(upstream) == _fold(this_serial):
+        if upstream and serial_key(upstream) == serial_key(this_serial):
             name = "this panel"
-        elif upstream and _fold(upstream) in by_serial:
-            name = by_serial[_fold(upstream)]
+        elif upstream and serial_key(upstream) in by_serial:
+            name = by_serial[serial_key(upstream)]
         else:
             name = "another panel"
         phrase = _PHRASES[answer["supply"]].format(upstream=name)
@@ -436,3 +461,49 @@ def others_summary(
     if not lines:
         return ""
     return "\n\nOther panels:\n" + "\n".join(lines)
+
+
+# --- saving -------------------------------------------------------------------------
+
+
+def save_topology(config_entries: Any, entry: Any, topology: Mapping[str, Any]) -> dict[str, Any]:
+    """Store a Topology answer on this entry alone and reload it; returns the options.
+
+    Each panel answers for itself: another entry's answer is read, never written.
+    """
+    return save_options(config_entries, entry, with_topology(entry.options, topology))
+
+
+async def remove_legacy_account(
+    entry: Any,
+    *,
+    update: Callable[..., Any],
+    discard_tokens: Callable[[], Awaitable[Any]],
+    data_keys: Iterable[str],
+    option_keys: Iterable[str],
+    cloud_stem_key: str,
+) -> bool:
+    """At a local entry's setup: drop a SPAN account kept behind local only.
+
+    Earlier versions could keep one, unused; it goes as the options flow's
+    remove takes it, with the Topology answer the cloud gave kept.
+    `update(entry, data=, options=, minor_version=)` stores the entry (it must
+    leave `entry.data` updated, as Home Assistant's does). Then, if the entry
+    has no account (any more), `discard_tokens()` deletes a token file left
+    from one. Returns whether an account was removed.
+    """
+    removed = False
+    if legacy_local_only(entry.data, entry.options):
+        data, options, minor_version = cloud_removed_entry(
+            entry.data,
+            keep_topology(entry.options),
+            data_keys=data_keys,
+            option_keys=option_keys,
+            cloud_stem_key=cloud_stem_key,
+        )
+        options[TRANSPORT_MODE] = LOCAL_ONLY
+        update(entry, data=data, options=options, minor_version=minor_version)
+        removed = True
+    if not has_account(entry.data):
+        await discard_tokens()
+    return removed

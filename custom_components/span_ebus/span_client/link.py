@@ -350,7 +350,7 @@ def cloud_removed_entry(
 
 _TOKENS = "tokens"
 _LOCAL_SERIAL = "local_serial"
-_TRANSPORT_MODE = "transport_mode"
+TRANSPORT_MODE = "transport_mode"
 LOCAL_FIRST = "local_first"
 LOCAL_ONLY = "local_only"
 
@@ -365,14 +365,40 @@ def connection_default(has_tokens: bool, mode: str | None) -> str:
 
 
 def connection_action(has_tokens: bool, mode: str | None, chosen: str) -> str:
-    """What saving the Connection step does: "noop", "add" or "remove".
+    """What saving the Connection step does: "noop", "add", "remove" or "enable".
 
     Without the account, local first signs in to it and local only changes
-    nothing. With it, local only removes it and local first changes nothing.
+    nothing. With it, local only removes it. Local first changes nothing,
+    unless the entry is still set to local only (setup removes such an
+    account, but not before it runs): then "enable" saves the mode alone, so
+    the stored account resumes as the fallback.
     """
     if has_tokens:
-        return "remove" if chosen == LOCAL_ONLY else "noop"
+        if chosen == LOCAL_ONLY:
+            return "remove"
+        return "enable" if mode == LOCAL_ONLY else "noop"
     return "add" if chosen == LOCAL_FIRST else "noop"
+
+
+class _ConfigEntries(Protocol):
+    def async_update_entry(self, entry: Any, **changes: Any) -> Any: ...
+    def async_schedule_reload(self, entry_id: str) -> Any: ...
+
+
+def save_options(config_entries: _ConfigEntries, entry: Any, options: dict[str, Any]) -> dict:
+    """Store new options on this entry alone and reload it; returns the options.
+
+    The integration has no update listener, so an options step that changes
+    how the entry runs reloads it here.
+    """
+    config_entries.async_update_entry(entry, options=options)
+    config_entries.async_schedule_reload(entry.entry_id)
+    return options
+
+
+def has_account(data: Mapping[str, Any]) -> bool:
+    """Whether an entry's data stores a SPAN account (its tokens)."""
+    return _TOKENS in data
 
 
 def legacy_local_only(data: Mapping[str, Any], options: Mapping[str, Any]) -> bool:
@@ -381,7 +407,7 @@ def legacy_local_only(data: Mapping[str, Any], options: Mapping[str, Any]) -> bo
     Earlier versions could keep the account behind local only; this one
     removes it at setup.
     """
-    return _TOKENS in data and _LOCAL_SERIAL in data and options.get(_TRANSPORT_MODE) == LOCAL_ONLY
+    return _TOKENS in data and _LOCAL_SERIAL in data and options.get(TRANSPORT_MODE) == LOCAL_ONLY
 
 
 def migration_ok(version: int, minor_version: int) -> bool:

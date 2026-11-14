@@ -5,17 +5,20 @@ the pure helpers it calls, and its strings and step ids by reading the files.
 """
 
 import ast
+import asyncio
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
-from span_client import backfill, feeds
+from span_client import backfill, cloud_auth, feeds
+from span_client.cloud_traits import CircuitInfo
 from span_client.link import (
     LOCAL_FIRST,
     LOCAL_ONLY,
     PanelLink,
-    cloud_removed_entry,
     connection_action,
     connection_default,
     legacy_local_only,
@@ -210,6 +213,50 @@ def test_connection_routing(has_tokens, chosen, action):
     assert connection_action(has_tokens, mode, chosen) == action
 
 
+@pytest.mark.parametrize("mode", [None, LOCAL_FIRST, "bogus"])
+def test_an_account_with_no_explicit_local_only_is_already_local_first(mode):
+    assert connection_action(True, mode, LOCAL_FIRST) == "noop"
+
+
+def test_an_account_behind_local_only_resumes_on_local_first():
+    # The stored account stays: only the mode is saved, so it is the fallback again.
+    assert connection_action(True, LOCAL_ONLY, LOCAL_FIRST) == "enable"
+    assert connection_action(True, LOCAL_ONLY, LOCAL_ONLY) == "remove"
+
+
+def _config_entries(*entries) -> Mock:
+    config_entries = Mock()
+
+    def update(entry, **changes):
+        for key, value in changes.items():
+            setattr(entry, key, value)
+
+    config_entries.async_update_entry.side_effect = update
+    config_entries.async_entries.return_value = list(entries)
+    return config_entries
+
+
+def _entry(entry_id: str, data: dict, options: dict, minor_version: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(
+        entry_id=entry_id, data=data, options=options, minor_version=minor_version
+    )
+
+
+def test_enable_saves_the_mode_on_this_entry_only():
+    from const import CONF_LOCAL_SERIAL, CONF_TOKENS
+    from span_client.link import save_options
+
+    data = {CONF_LOCAL_SERIAL: THIS, CONF_TOKENS: {"access": "x"}}
+    entry = _entry("this", dict(data), {"transport_mode": LOCAL_ONLY, "keep": 1})
+    config_entries = _config_entries(entry)
+    saved = save_options(config_entries, entry, {**entry.options, "transport_mode": LOCAL_FIRST})
+    assert saved == {"transport_mode": LOCAL_FIRST, "keep": 1}
+    config_entries.async_update_entry.assert_called_once_with(entry, options=saved)
+    config_entries.async_schedule_reload.assert_called_once_with("this")
+    assert entry.data == data  # the account stays
+    assert not legacy_local_only(entry.data, entry.options)
+
+
 @pytest.mark.parametrize(
     ("has_tokens", "mode", "default"),
     [
@@ -254,23 +301,37 @@ def test_legacy_local_only_needs_all_three():
     assert CONF_TOKENS in cloud_account
 
 
-def _remove_at_setup(data: dict, options: dict) -> tuple[dict, dict, int]:
-    """What setup does to a legacy entry (`__init__`)."""
+def _setup(entry: SimpleNamespace, token_file: Path) -> tuple[bool, Mock]:
+    """Run setup's removal (`feeds.remove_legacy_account`, as `__init__` calls it)."""
     from const import CLOUD_DATA_KEYS, CLOUD_OPTION_KEYS, CONF_CLOUD_STEM
 
-    new_data, new_options, minor = cloud_removed_entry(
-        data,
-        feeds.keep_topology(options),
-        data_keys=CLOUD_DATA_KEYS,
-        option_keys=CLOUD_OPTION_KEYS,
-        cloud_stem_key=CONF_CLOUD_STEM,
+    config_entries = _config_entries(entry)
+
+    async def discard_tokens() -> None:
+        cloud_auth.discard_tokens(token_file)
+
+    removed = asyncio.run(
+        feeds.remove_legacy_account(
+            entry,
+            update=config_entries.async_update_entry,
+            discard_tokens=discard_tokens,
+            data_keys=CLOUD_DATA_KEYS,
+            option_keys=CLOUD_OPTION_KEYS,
+            cloud_stem_key=CONF_CLOUD_STEM,
+        )
     )
-    new_options["transport_mode"] = LOCAL_ONLY
-    return new_data, new_options, minor
+    return removed, config_entries
+
+
+@pytest.fixture
+def token_file(tmp_path: Path) -> Path:
+    path = tmp_path / "tokens.json"
+    path.write_text("{}")
+    return path
 
 
 @pytest.mark.parametrize("direction", ["A", "B"])
-def test_setup_removes_a_legacy_account(direction):
+def test_setup_removes_a_legacy_account(direction, token_file):
     from const import CLOUD_DATA_KEYS, CLOUD_OPTION_KEYS, CONF_CLOUD_STEM
     from span_client.link import LINKED_MINOR_VERSION, UNLINKED_MINOR_VERSION
 
@@ -282,22 +343,81 @@ def test_setup_removes_a_legacy_account(direction):
         panels=["cloud-up", "cloud-down"],
         feeds={"cloud-down": {"type": feeds.LUGS, "upstream": "cloud-up"}},
     )
-    new_data, new_options, minor = _remove_at_setup(data, options)
-    assert not CLOUD_DATA_KEYS & set(new_data)
-    assert not CLOUD_OPTION_KEYS & set(new_options)
-    assert new_options["transport_mode"] == LOCAL_ONLY
-    assert new_options[feeds.TOPOLOGY] == {"supply": feeds.LUGS}
-    assert new_options[feeds.FED_BY_PANEL] is True
-    assert minor == (LINKED_MINOR_VERSION if direction == "A" else UNLINKED_MINOR_VERSION)
+    entry = _entry("this", data, options, minor_version=LINKED_MINOR_VERSION)
+    removed, config_entries = _setup(entry, token_file)
+    assert removed
+    config_entries.async_update_entry.assert_called_once()
+    assert not CLOUD_DATA_KEYS & set(entry.data)
+    assert not CLOUD_OPTION_KEYS & set(entry.options)
+    assert entry.options["transport_mode"] == LOCAL_ONLY
+    assert entry.options[feeds.TOPOLOGY] == {"supply": feeds.LUGS}
+    assert entry.options[feeds.FED_BY_PANEL] is True
+    expected = LINKED_MINOR_VERSION if direction == "A" else UNLINKED_MINOR_VERSION
+    assert entry.minor_version == expected
+    assert not token_file.exists()
     # A second setup has nothing left to remove.
-    assert not legacy_local_only(new_data, new_options)
+    assert not legacy_local_only(entry.data, entry.options)
+    removed, config_entries = _setup(entry, token_file)
+    assert not removed
+    config_entries.async_update_entry.assert_not_called()
 
 
-def test_setup_keeps_a_saved_tick():
+def test_setup_keeps_a_saved_tick(token_file):
     data, options = _legacy()
-    _data, new_options, _minor = _remove_at_setup(data, {**options, feeds.FED_BY_PANEL: True})
-    assert new_options[feeds.FED_BY_PANEL] is True
-    assert feeds.local_fed(new_options)
+    entry = _entry("this", data, {**options, feeds.FED_BY_PANEL: True})
+    _setup(entry, token_file)
+    assert entry.options[feeds.FED_BY_PANEL] is True
+    assert feeds.local_fed(entry.options)
+
+
+def test_setup_deletes_a_token_file_left_without_an_account(token_file):
+    from const import CONF_LOCAL_SERIAL
+
+    entry = _entry("this", {CONF_LOCAL_SERIAL: THIS}, {"transport_mode": LOCAL_ONLY})
+    removed, config_entries = _setup(entry, token_file)
+    assert not removed
+    config_entries.async_update_entry.assert_not_called()
+    assert not token_file.exists()
+
+
+@pytest.mark.parametrize("mode", [LOCAL_FIRST, None])
+def test_setup_leaves_an_account_in_use(mode, token_file):
+    data, _options = _legacy()
+    options = {} if mode is None else {"transport_mode": mode}
+    entry = _entry("this", dict(data), options)
+    removed, config_entries = _setup(entry, token_file)
+    assert not removed
+    config_entries.async_update_entry.assert_not_called()
+    assert entry.data == data
+    assert token_file.exists()
+
+
+def test_setup_calls_the_shared_removal():
+    """`__init__` runs `feeds.remove_legacy_account`, the function tested here."""
+    tree = ast.parse((COMPONENT / "__init__.py").read_text())
+    names = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "remove_legacy_account" in names
+    assert "cloud_removed_entry" not in (COMPONENT / "__init__.py").read_text()
+
+
+def test_saving_topology_writes_this_entry_only():
+    from const import CONF_LOCAL_SERIAL, CONF_TOPOLOGY
+
+    this = _entry("this", {CONF_LOCAL_SERIAL: THIS}, {"transport_mode": LOCAL_ONLY})
+    other_topology = {"supply": feeds.LUGS, "upstream": THIS}
+    other = _entry("other", {CONF_LOCAL_SERIAL: UP}, {CONF_TOPOLOGY: dict(other_topology)})
+    config_entries = _config_entries(this, other)
+    answer = {"supply": feeds.LUGS, "upstream": OTHER}
+    saved = feeds.save_topology(config_entries, this, answer)
+    config_entries.async_update_entry.assert_called_once_with(this, options=saved)
+    config_entries.async_schedule_reload.assert_called_once_with("this")
+    assert this.options[CONF_TOPOLOGY] == answer
+    assert this.options["transport_mode"] == LOCAL_ONLY
+    assert other.options == {CONF_TOPOLOGY: other_topology}
 
 
 def _log_calls(source: str, function: str | None = None) -> list[ast.Call]:
@@ -435,10 +555,60 @@ def test_a_stored_upstream_matches_any_spelling():
     assert UP.upper() not in options
 
 
+def test_upstreams_dedupe_as_same_serial_matches():
+    from span_client.backend import same_serial
+
+    candidates = [
+        (f" {UP} ", None),
+        (UP.upper(), "MAIN40"),
+        (f"{THIS.upper()} ", None),
+        (" ", None),
+    ]
+    choices = feeds.upstream_choices(THIS, candidates, {f"{UP.upper()} ": "Garage"})
+    assert choices == {UP: "Garage"}
+    for a, b in [(f" {UP}", UP.upper()), (UP, OTHER), (THIS, f"{THIS.upper()}\t")]:
+        assert same_serial(a, b) is (feeds.serial_key(a) == feeds.serial_key(b))
+    _options, default = feeds.upstream_options(choices, f"{UP.upper()} ")
+    assert default == UP
+
+
+def test_a_panel_device_is_found_under_any_spelling_or_its_stem():
+    stem = "XC-TEST-0001"
+    linked = [
+        (UP, "XC-TEST-0002"),
+        (f"{THIS.upper()} ", stem),
+        (OTHER, None),
+        (None, "XC-TEST-0003"),
+    ]
+    assert feeds.panel_identifiers(THIS, linked) == [THIS, THIS.upper(), stem]
+    assert feeds.panel_identifiers(f" {FAR}", []) == [f" {FAR}", FAR, FAR.upper()]
+
+
 def test_no_stored_upstream_defaults_to_not_listed():
     options, default = feeds.upstream_options({UP: "Panel 1"}, None)
     assert default == feeds.NOT_LISTED
     assert options[feeds.NOT_LISTED] == feeds.NOT_LISTED_LABEL
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        CircuitInfo(7, "Oven", (3, 5)),
+        CircuitInfo(8, None, (9,)),
+        CircuitInfo(9, "Spare", ()),
+        CircuitInfo(10, None, ()),
+    ],
+)
+def test_both_circuit_pickers_label_a_circuit_alike(info):
+    assert (
+        feeds.cloud_circuit_label(info) == feeds.circuit_choices({1: info})[str(info.instance_id)]
+    )
+
+
+def test_a_cloud_circuit_label_uses_its_display_name():
+    assert feeds.cloud_circuit_label(CircuitInfo(7, "Oven", (3, 5))) == "Oven (3, 5)"
+    assert feeds.cloud_circuit_label(CircuitInfo(8, None, (9,))) == "Circuit 8 (9)"
+    assert feeds.cloud_circuit_label(CircuitInfo(10, None, ())) == "Circuit 10"
 
 
 def test_breaker_choices_round_trip():

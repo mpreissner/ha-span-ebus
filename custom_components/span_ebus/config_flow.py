@@ -124,6 +124,7 @@ from .span_client.link import (
     keeps_link_without_cloud,
     link_to_options,
     match_circuits,
+    save_options,
     serial_check,
 )
 from .span_client.local import commands, discovery, onboard, tls
@@ -1387,6 +1388,11 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
                 return await self.async_step_cloud_add()
             if action == "remove":
                 return await self.async_step_cloud_remove()
+            if action == "enable":
+                options = {**entry.options, CONF_TRANSPORT_MODE: Mode.LOCAL_FIRST.value}
+                return self.async_create_entry(
+                    data=save_options(self.hass.config_entries, entry, options)
+                )
             return self.async_create_entry(data=dict(entry.options))
         schema = vol.Schema(
             {
@@ -1452,16 +1458,15 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
                         if not panel.serial:
                             continue
                         candidates.append((panel.serial, panel.model if panel.model_code else None))
-                        self._account.setdefault(panel.serial.casefold(), (site, panel))
+                        self._account.setdefault(feeds.serial_key(panel.serial), (site, panel))
         for flow in self.hass.config_entries.flow.async_progress_by_handler(DOMAIN):
             context = flow.get("context") or {}
             if context.get("source") == SOURCE_ZEROCONF:
                 candidates.append((context.get("unique_id"), None))
-        registry = dr.async_get(self.hass)
         names: dict[str, str | None] = {}
         with_models: list[tuple[str | None, str | None]] = []
         for serial, model in candidates:
-            device = registry.async_get_device(identifiers={(DOMAIN, serial)}) if serial else None
+            device = self._panel_device(serial) if serial else None
             if device is not None:
                 names.setdefault(serial, device.name_by_user)
                 model = model or device.model
@@ -1469,11 +1474,31 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         self._upstreams = feeds.upstream_choices(self._this_serial(), with_models, names)
         self._serials = [self._this_serial(), *self._upstreams]
 
+    def _panel_device(self, serial: str) -> dr.DeviceEntry | None:
+        """The device a panel is shown as, so the user's name for it is found.
+
+        Tried under the serial in each spelling (the panel reports lowercase,
+        SPAN's cloud uppercase), then, for a local entry linked to the cloud,
+        under the cloud device's stem it was merged into.
+        """
+        registry = dr.async_get(self.hass)
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        identifiers = feeds.panel_identifiers(
+            serial,
+            (
+                (entry.data.get(CONF_LOCAL_SERIAL), entry.data.get(CONF_CLOUD_STEM))
+                for entry in entries
+            ),
+        )
+        for identifier in identifiers:
+            device = registry.async_get_device(identifiers={(DOMAIN, identifier)})
+            if device is not None:
+                return device
+        return None
+
     def _this_label(self) -> str:
         """This panel's name for the circuit step: its device's, never its serial or host."""
-        device = dr.async_get(self.hass).async_get_device(
-            identifiers={(DOMAIN, self._this_serial())}
-        )
+        device = self._panel_device(self._this_serial())
         if device is None:
             return "This panel"
         return feeds.panel_label(device.name_by_user, device.model) or "This panel"
@@ -1607,7 +1632,7 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         """The upstream panel's breakers: from its loaded local entry, else a
         loaded cloud coordinator, else this entry's SPAN account; else none.
         """
-        folded = serial.casefold()
+        folded = feeds.serial_key(serial)
         for entry in self._other_entries():
             if entry.state is not ConfigEntryState.LOADED:
                 continue
@@ -1615,7 +1640,7 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             if runtime is None:
                 continue
             transport = getattr(runtime, "transport", None)
-            local = str(entry.data.get(CONF_LOCAL_SERIAL, "")).casefold()
+            local = feeds.serial_key(str(entry.data.get(CONF_LOCAL_SERIAL, "")))
             if local == folded and transport is not None:
                 choices = feeds.breaker_choices(
                     (commands.circuit_choice_label(circuit), circuit.spaces or ())
@@ -1624,7 +1649,7 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
                 if choices:
                     return choices
             for coordinator in getattr(runtime, "coordinators", None) or ():
-                if coordinator.serial.casefold() != folded:
+                if feeds.serial_key(coordinator.serial) != folded:
                     continue
                 choices = feeds.breaker_choices(
                     (feeds.cloud_circuit_label(info), info.spaces)
@@ -1657,10 +1682,7 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         )
 
     def _save_topology(self) -> ConfigFlowResult:
-        entry = self.config_entry
-        options = feeds.with_topology(entry.options, self._topology)
-        self.hass.config_entries.async_update_entry(entry, options=options)
-        self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        options = feeds.save_topology(self.hass.config_entries, self.config_entry, self._topology)
         return self.async_create_entry(data=options)
 
     # --- a local panel's cloud fallback -------------------------------------
