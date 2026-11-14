@@ -534,27 +534,27 @@ def test_missing_hour_row_lands_in_the_next_one():
 def test_settle_applied():
     gap = ready_gap(HOURS)
     bf.queue(gap, {})
-    bf.settle_queued(gap, bf.Verdict(3, 3), now=T0, at_setup=False)
+    bf.settle_queued(gap, bf.Verdict(3, 3), now=T0, drained=False)
     assert gap["status"] == bf.APPLIED
 
 
 def test_settle_changed_since_is_final():
     gap = ready_gap(HOURS)
     bf.queue(gap, {})
-    bf.settle_queued(gap, bf.Verdict(None, 3), now=T0, at_setup=False)
+    bf.settle_queued(gap, bf.Verdict(None, 3), now=T0, drained=False)
     assert gap["status"] == bf.CHANGED_SINCE
-    bf.settle_queued(gap, bf.Verdict(3, 3), now=T0, at_setup=True)
+    bf.settle_queued(gap, bf.Verdict(3, 3), now=T0, drained=True)
     assert gap["status"] == bf.CHANGED_SINCE
 
 
 def test_partial_prefix_waits_during_a_run():
     gap = ready_gap(HOURS)
     bf.queue(gap, {})
-    bf.settle_queued(gap, bf.Verdict(1, 3), now=T0, at_setup=False)
+    bf.settle_queued(gap, bf.Verdict(1, 3), now=T0, drained=False)
     assert gap["status"] == bf.QUEUED
 
 
-def test_partial_prefix_is_never_written_again_in_the_same_session():
+def test_partial_prefix_is_never_written_again_before_the_recorder_drains():
     rec = record_with((T0, T0 + 3 * H))
     gap = bf.gaps(rec)[0]
     gap["hours"] = [[bf.iso(h), k] for h, k in HOURS]
@@ -563,7 +563,7 @@ def test_partial_prefix_is_never_written_again_in_the_same_session():
     later = T0 + 6 * H
     for minutes in (0, 15, 60, 360):
         now = later + timedelta(minutes=minutes)
-        bf.settle_queued(gap, bf.Verdict(1, 3), now=now, at_setup=False)
+        bf.settle_queued(gap, bf.Verdict(1, 3), now=now, drained=False)
         assert gap["status"] == bf.QUEUED
         assert bf.plan(rec, now=now, cloud_shown=False) == bf.Plan((), (), None)
         # The same stretch reported again is cut off, not recorded afresh.
@@ -572,10 +572,10 @@ def test_partial_prefix_is_never_written_again_in_the_same_session():
 
 
 @pytest.mark.parametrize(("j", "left"), [(0, 3), (2, 1)])
-def test_partial_prefix_at_setup_requeues_only_the_rest(j, left):
+def test_partial_prefix_once_drained_requeues_only_the_rest(j, left):
     gap = ready_gap(HOURS)
     bf.queue(gap, {"x": 1.0})
-    bf.settle_queued(gap, bf.Verdict(j, 3), now=T0, at_setup=True)
+    bf.settle_queued(gap, bf.Verdict(j, 3), now=T0, drained=True)
     assert gap["status"] == bf.READY
     assert gap["sum_before"] is None
     assert bf.hours_of(gap) == HOURS[j:]

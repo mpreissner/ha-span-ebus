@@ -602,14 +602,14 @@ def classify(gap: Mapping[str, Any], rows: Iterable[tuple[datetime, float]]) -> 
     return Verdict(None, len(hours))
 
 
-def settle_queued(gap: dict[str, Any], verdict: Verdict, *, now: datetime, at_setup: bool) -> None:
+def settle_queued(gap: dict[str, Any], verdict: Verdict, *, now: datetime, drained: bool) -> None:
     """Move a queued gap on from what the rows show.
 
     All applied: done. Another pattern: someone else changed the statistic,
-    never touched again. A partial prefix is only acted on at setup, when the
-    previous run's recorder queue is gone: the rest goes back to ready (the
-    applied prefix is dropped from `hours`). During a run the recorder may
-    still be working through the queue, so the gap stays queued.
+    never touched again. A partial prefix is only acted on once the recorder's
+    queue is `drained`, when nothing more of it can land: the rest goes back
+    to ready (the applied prefix is dropped from `hours`). Before that the
+    recorder may still be working through the queue, so the gap stays queued.
     """
     if gap.get("status") != QUEUED:
         return
@@ -619,7 +619,7 @@ def settle_queued(gap: dict[str, Any], verdict: Verdict, *, now: datetime, at_se
     if verdict.applied == verdict.total:
         _settle(gap, APPLIED, now)
         return
-    if not at_setup:
+    if not drained:
         return
     gap["hours"] = (gap.get("hours") or [])[verdict.applied :]
     gap["sum_before"] = None

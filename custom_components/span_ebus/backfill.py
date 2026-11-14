@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import logging
 import threading
 from collections.abc import Callable
@@ -56,6 +57,8 @@ RETRY_SOON = timedelta(minutes=15)
 # An unload waits this long for a fetch in flight, so a refreshed token is not
 # written after the entry's token file has been discarded.
 FETCH_WAIT_S = 60.0
+# How long a re-verify waits for the recorder to work through its queue.
+DRAIN_WAIT_S = 60.0
 
 TokenWriter = Callable[[Path, dict], None]
 
@@ -146,7 +149,6 @@ class GapBackfill:
         self._halt = threading.Event()  # tells a fetch thread to leave the token file alone
         self._again = False
         self._started = False  # the startup kick has come
-        self._reverified = False
         self._stopped = False
         self._shown = transport.shown
 
@@ -263,9 +265,11 @@ class GapBackfill:
     async def _run(self) -> None:
         async with self._lock:
             now = dt_util.utcnow()
+            was = copy.deepcopy(self._record)
             bf.tidy(self._record, now)
-            if not self._reverified:
-                self._reverified = await self._reverify(now)
+            # Every run with queued gaps settles them first, so a prefix left
+            # by a recorder backlog goes back to ready without a restart.
+            verified = await self._reverify()
             plan = bf.plan(
                 self._record, now=now, cloud_shown=self._transport.shown is Transport.CLOUD
             )
@@ -278,8 +282,9 @@ class GapBackfill:
                 else:
                     await self._fetch_gaps(plan.fetch, now)
             await self._write_ready(now)
-            await self._store.async_save(self._record)
-            self._schedule(deferred or not self._reverified)
+            if self._record != was:
+                await self._store.async_save(self._record)
+            self._schedule(deferred or not verified)
 
     def _schedule(self, deferred: bool) -> None:
         if self._cancel_timer is not None:
@@ -290,7 +295,7 @@ class GapBackfill:
         now = dt_util.utcnow()
         plan = bf.plan(self._record, now=now, cloud_shown=self._transport.shown is Transport.CLOUD)
         wake = [plan.wake_at] if plan.wake_at is not None else []
-        if deferred or bf.with_status(self._record, bf.READY):
+        if deferred or bf.with_status(self._record, bf.READY, bf.QUEUED):
             wake.append(now + RETRY_SOON)
         if wake:
             self._cancel_timer = async_track_point_in_utc_time(
@@ -388,7 +393,7 @@ class GapBackfill:
         At most one gap per statistic per batch; the rest wait for the next
         run. Each gap's rows are read before anything is queued, and the record
         is saved with them as queued before the first adjustment: a queued gap
-        is never queued again (the next setup settles it from the database).
+        is never queued again (a later run settles it from the database).
         """
         batch: list[tuple[dict[str, Any], str]] = []
         for gap in bf.ready_to_write(self._record):
@@ -425,31 +430,38 @@ class GapBackfill:
                 verdict = bf.classify(gap, await self._rows(gap, eid))
                 verdicts[id(gap)] = verdict
                 if verdict.applied == verdict.total:
-                    bf.settle_queued(gap, verdict, now=dt_util.utcnow(), at_setup=False)
+                    bf.settle_queued(gap, verdict, now=dt_util.utcnow(), drained=False)
                     pending.remove(item)
         for gap, _eid in pending:
             verdict = verdicts.get(id(gap))
             if verdict is not None:
                 # Another pattern: someone else changed it. A partial prefix
-                # stays queued for the next setup.
-                bf.settle_queued(gap, verdict, now=dt_util.utcnow(), at_setup=False)
+                # stays queued until a later run has drained the recorder.
+                bf.settle_queued(gap, verdict, now=dt_util.utcnow(), drained=False)
         _LOGGER.debug("backfill: wrote %d gap(s), %s", len(batch), bf.counts(self._record))
 
-    async def _reverify(self, now: datetime) -> bool:
-        """Settle gaps a previous run queued, from what the database shows now.
+    async def _reverify(self) -> bool:
+        """Settle queued gaps from what the database shows once the recorder is drained.
 
-        Returns whether that's done; False while the recorder isn't loaded
-        (later; ready gaps on those statistics wait too). On a reload the
-        previous instance's adjustments may still be in the recorder's queue,
-        so it's drained first: classifying before they land would hand a
-        partial prefix back to ready and count it twice.
+        Returns whether that's done; False while the recorder isn't loaded or
+        doesn't drain within `DRAIN_WAIT_S` (later; ready gaps on those
+        statistics wait too). Adjustments queued earlier, by this run's
+        predecessor or a previous instance, may still be in the recorder's
+        queue: classifying before they land would hand a partial prefix back
+        to ready and count it twice. Once drained, nothing more will land, so
+        a partial prefix is final and the rest goes back to ready.
         """
         queued = bf.with_status(self._record, bf.QUEUED)
         if not queued:
             return True
         if not recorder_api.loaded(self.hass):
             return False
-        await recorder_api.async_block_till_done(self.hass)
+        try:
+            async with asyncio.timeout(DRAIN_WAIT_S):
+                await recorder_api.async_block_till_done(self.hass)
+        except TimeoutError:
+            _LOGGER.debug("backfill: recorder still busy, %d gap(s) stay queued", len(queued))
+            return False
         now = dt_util.utcnow()
         for gap in queued:
             eid = self._entity_id(gap)
@@ -457,7 +469,7 @@ class GapBackfill:
                 bf.give_up(gap, now, bf.NO_STATISTICS)
                 continue
             bf.settle_queued(
-                gap, bf.classify(gap, await self._rows(gap, eid)), now=now, at_setup=True
+                gap, bf.classify(gap, await self._rows(gap, eid)), now=now, drained=True
             )
         _LOGGER.debug("backfill: re-verified %d gap(s), %s", len(queued), bf.counts(self._record))
         return True
