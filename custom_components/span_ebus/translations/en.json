@@ -207,7 +207,7 @@
       },
       "cloud_remove": {
         "title": "Remove cloud fallback",
-        "description": "Home Assistant forgets your SPAN account for this panel and runs it over the local connection only. Entities and their history stay."
+        "description": "Home Assistant forgets your SPAN account for this panel and runs it over the local connection only. Entities and their history stay.{warning}"
       },
       "cloud_pick_panel": {
         "title": "Which panel is this?",
@@ -344,7 +344,8 @@
     "link_note": {
       "options": {
         "serial_mismatch": "The SPAN account lists this panel under a different serial. {matched} of {total} circuits sit on the same breaker spaces, so it looks like the same panel; check that it is before you submit.",
-        "grid_energy": "Site grid energy is one of the sensors only updated while the local connection is down, because this site has several panels. If your Energy dashboard uses it, switch to the panel's imported energy sensor."
+        "grid_energy": "Site grid energy is one of the sensors only updated while the local connection is down, because this site has several panels. If your Energy dashboard uses it, switch to the panel's imported energy sensor.",
+        "cloud_remove_fallback_only": "{count} sensors that only your SPAN account provides stop updating. You can remove them afterwards."
       }
     },
     "legacy_group": {

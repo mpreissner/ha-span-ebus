@@ -10,13 +10,17 @@ from span_client.link import (
     DOWNSTREAM,
     FEEDER_FEEDTHROUGH,
     FEEDER_MAIN_BREAKER,
+    LINKED_MINOR_VERSION,
     PANEL_CIRCUITS_MISMATCH,
+    UNLINKED_MINOR_VERSION,
     UPSTREAM,
     HistoryTarget,
     PanelLink,
     circuits_verified,
     classify_feeds,
+    cloud_removed_entry,
     feeds_from_kinds,
+    keeps_link_without_cloud,
     link_from_options,
     link_to_options,
     match_circuits,
@@ -300,3 +304,77 @@ def test_a_lone_feed_is_upstream_without_values():
 def test_without_downstream_lugs_only_upstream_is_checked():
     feeds = classify_feeds({}, {7: 1000.0, 8: 60.0}, upstream_w=1020.0, downstream_w=None)
     assert feeds == {7: UPSTREAM}
+
+
+def _cloud_entry(**extra):
+    from const import CONF_EMAIL, CONF_LOCAL_SERIAL, CONF_PANELS, CONF_TOKENS, CONF_TRANSPORT_MODE
+
+    data = {
+        CONF_LOCAL_SERIAL: SERIAL,
+        "host": "panel.invalid",
+        CONF_TOKENS: {"refresh_token": "r"},
+        CONF_EMAIL: "user@example.invalid",
+        **extra,
+    }
+    options = link_to_options(
+        {CONF_TRANSPORT_MODE: "local_first", CONF_PANELS: [CLOUD_KEY]}, _link()
+    )
+    return data, options
+
+
+def test_only_an_entry_with_a_cloud_stem_keeps_its_link():
+    from const import CONF_CLOUD_STEM
+
+    assert keeps_link_without_cloud(
+        {CONF_CLOUD_STEM: "XC-AAAA-0000"}, cloud_stem_key=CONF_CLOUD_STEM
+    )
+    assert not keeps_link_without_cloud({}, cloud_stem_key=CONF_CLOUD_STEM)
+    assert not keeps_link_without_cloud({CONF_CLOUD_STEM: ""}, cloud_stem_key=CONF_CLOUD_STEM)
+
+
+def test_removing_the_cloud_from_a_local_entry_drops_the_link():
+    from const import CLOUD_DATA_KEYS, CLOUD_OPTION_KEYS, CONF_CLOUD_STEM, CONF_TOKENS
+
+    data, options = _cloud_entry()
+    new_data, new_options, minor = cloud_removed_entry(
+        data,
+        options,
+        data_keys=CLOUD_DATA_KEYS,
+        option_keys=CLOUD_OPTION_KEYS,
+        cloud_stem_key=CONF_CLOUD_STEM,
+    )
+    assert minor == UNLINKED_MINOR_VERSION
+    assert CONF_TOKENS not in new_data
+    assert CONF_LINKS not in new_options
+
+
+def test_removing_the_cloud_from_a_linked_cloud_entry_keeps_the_link():
+    from const import (
+        CLOUD_DATA_KEYS,
+        CLOUD_OPTION_KEYS,
+        CONF_CLOUD_STEM,
+        CONF_CLOUD_UNMATCHED,
+        CONF_EMAIL,
+        CONF_PANELS,
+        CONF_TOKENS,
+    )
+
+    data, options = _cloud_entry(
+        **{CONF_CLOUD_STEM: "XC-AAAA-0000", CONF_CLOUD_UNMATCHED: ["circuit-9/power"]}
+    )
+    new_data, new_options, minor = cloud_removed_entry(
+        data,
+        options,
+        data_keys=CLOUD_DATA_KEYS,
+        option_keys=CLOUD_OPTION_KEYS,
+        cloud_stem_key=CONF_CLOUD_STEM,
+    )
+    assert minor == LINKED_MINOR_VERSION
+    assert CONF_TOKENS not in new_data and CONF_EMAIL not in new_data
+    assert new_data[CONF_CLOUD_STEM] == "XC-AAAA-0000"
+    assert new_data[CONF_CLOUD_UNMATCHED] == ["circuit-9/power"]
+    assert new_options[CONF_LINKS] == options[CONF_LINKS]
+    assert CONF_PANELS not in new_options
+    assert link_from_options(new_options) == link_from_options(options)
+    # The originals are left alone.
+    assert CONF_TOKENS in data

@@ -309,6 +309,40 @@ UNLINKED_MINOR_VERSION = 1
 LINKED_MINOR_VERSION = 2
 
 
+def keeps_link_without_cloud(data: Mapping[str, Any], *, cloud_stem_key: str) -> bool:
+    """Whether removing the cloud keeps the entry's link (direction A).
+
+    A cloud entry linked to its panel recorded the stem its kept cloud entities'
+    uids start with. Its stand-ins need the link's cloud key for those uids, so
+    the link outlives the account. A local entry that only added the cloud as a
+    fallback (direction B) has no stem, and drops the link with the account.
+    """
+    return bool(data.get(cloud_stem_key))
+
+
+def cloud_removed_entry(
+    data: Mapping[str, Any],
+    options: Mapping[str, Any],
+    *,
+    data_keys: Iterable[str],
+    option_keys: Iterable[str],
+    cloud_stem_key: str,
+) -> tuple[dict[str, Any], dict[str, Any], int]:
+    """An entry's data, options and minor version once its cloud is removed.
+
+    Direction B goes back to an unlinked entry. Direction A drops the same
+    account keys but keeps its link, so it stays at the linked minor version.
+    """
+    new_data, new_options = unlinked_entry(
+        data, options, data_keys=data_keys, option_keys=option_keys
+    )
+    if not keeps_link_without_cloud(data, cloud_stem_key=cloud_stem_key):
+        return new_data, new_options, UNLINKED_MINOR_VERSION
+    if CONF_LINKS in options:
+        new_options[CONF_LINKS] = options[CONF_LINKS]
+    return new_data, new_options, LINKED_MINOR_VERSION
+
+
 def migration_ok(version: int, minor_version: int) -> bool:
     """Whether this code can run an entry stored at this version.
 

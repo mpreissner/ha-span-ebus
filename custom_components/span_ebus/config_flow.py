@@ -47,7 +47,7 @@ from homeassistant.util import dt as dt_util
 from zeroconf import IPVersion, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo
 
-from . import energy_step, recorder_api
+from . import energy_step, legacy_repair, recorder_api
 from .const import (
     CLOUD_DATA_KEYS,
     CLOUD_OPTION_KEYS,
@@ -105,16 +105,16 @@ from .span_client.identity import (
 )
 from .span_client.link import (
     LINKED_MINOR_VERSION,
-    UNLINKED_MINOR_VERSION,
     HistoryTarget,
     PanelLink,
     circuits_verified,
     classify_feeds,
+    cloud_removed_entry,
     feeds_from_kinds,
+    keeps_link_without_cloud,
     link_to_options,
     match_circuits,
     serial_check,
-    unlinked_entry,
 )
 from .span_client.local import discovery, onboard, tls
 from .span_client.local.health import Mode
@@ -165,6 +165,7 @@ STEP_LINK_SCHEMA = vol.Schema(
 LINK_NOTE_SELECTOR = "link_note"
 LINK_NOTE_GRID_ENERGY = "grid_energy"
 LINK_NOTE_SERIAL = "serial_mismatch"
+LINK_NOTE_CLOUD_REMOVE = "cloud_remove_fallback_only"
 
 _FEED_POWER = re.compile(r"feed-(\d+)/power")
 
@@ -1505,20 +1506,32 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         """Drop the account: the panel runs over its local API alone."""
         entry = self.config_entry
         if not _is_linked(entry.data):
-            # TODO(5c): a cloud entry linked to a local one keeps its link and
-            # stays at 1.2; removing that link is not this step's to do.
             return self.async_abort(reason="cloud_remove_unsupported")
         if user_input is None:
-            return self.async_show_form(step_id="cloud_remove", data_schema=vol.Schema({}))
-        data, options = unlinked_entry(
+            warning = ""
+            if keeps_link_without_cloud(entry.data, cloud_stem_key=CONF_CLOUD_STEM):
+                # A cloud entry linked to its panel: stand-ins keep updating,
+                # and what only the account fed stops, for the legacy repair.
+                listed = legacy_repair.current(self.hass, entry)
+                if count := len(listed.unmatched) + len(listed.fallback_only):
+                    note = await self._note(LINK_NOTE_CLOUD_REMOVE)
+                    warning = "\n\n" + _fill(note, {"count": str(count)})
+            return self.async_show_form(
+                step_id="cloud_remove",
+                data_schema=vol.Schema({}),
+                description_placeholders={"warning": warning},
+            )
+        # Direction A keeps its link: the stand-ins' uids carry its cloud key.
+        data, options, minor_version = cloud_removed_entry(
             entry.data,
             entry.options,
             data_keys=CLOUD_DATA_KEYS,
             option_keys=CLOUD_OPTION_KEYS,
+            cloud_stem_key=CONF_CLOUD_STEM,
         )
         options[CONF_TRANSPORT_MODE] = Mode.LOCAL_ONLY.value
         self.hass.config_entries.async_update_entry(
-            entry, data=data, options=options, minor_version=UNLINKED_MINOR_VERSION
+            entry, data=data, options=options, minor_version=minor_version
         )
         # Stop the cloud before its token file goes, so no refresh writes it
         # back; the unload after the reload removes it again for good measure.
