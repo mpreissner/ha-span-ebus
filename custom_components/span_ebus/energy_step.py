@@ -75,6 +75,7 @@ class EnergyStepTracker:
         self._lock = asyncio.Lock()
         self._unsub_state: CALLBACK_TYPE | None = None
         self._unsub_check: CALLBACK_TYPE | None = None
+        self._unsub_issue: CALLBACK_TYPE | None = None
 
     @property
     def active(self) -> bool:
@@ -102,6 +103,7 @@ class EnergyStepTracker:
     def async_stop(self) -> None:
         self._unsubscribe_state()
         self._stop_checks()
+        self._unwatch_issue()
 
     def _subscribe(self) -> None:
         self._unsubscribe_state()
@@ -203,7 +205,33 @@ class EnergyStepTracker:
             record["issue_raised"] = True
             await self._save()
 
+    def _watch_issue(self) -> None:
+        """While the issue is up, drop the record as soon as the user ignores it."""
+        if self._unsub_issue is None:
+            self._unsub_issue = self.hass.bus.async_listen(
+                ir.EVENT_REPAIRS_ISSUE_REGISTRY_UPDATED, self._on_issue, self._is_mine
+            )
+
+    def _unwatch_issue(self) -> None:
+        if self._unsub_issue is not None:
+            self._unsub_issue()
+            self._unsub_issue = None
+
+    @callback
+    def _is_mine(self, data: Mapping[str, Any]) -> bool:
+        return (
+            data.get("action") == "update"
+            and data.get("domain") == DOMAIN
+            and data.get("issue_id") == issue_id(self.entry.entry_id)
+        )
+
+    @callback
+    def _on_issue(self, _event: Event) -> None:
+        if self._record is not None and self._dismissed():
+            self.hass.async_create_task(self._check(), "span_ebus energy step dismissed")
+
     def _raise(self) -> None:
+        self._watch_issue()
         ir.async_create_issue(
             self.hass,
             DOMAIN,
