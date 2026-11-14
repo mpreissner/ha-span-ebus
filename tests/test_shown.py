@@ -105,3 +105,15 @@ def test_unknown_and_unavailable_are_different_states() -> None:
     gate = ChangeGate()
     assert gate.changed((True, None))
     assert gate.changed((False, None))
+
+
+@pytest.mark.parametrize("unit", ["W", "A", "V", "Hz"])
+def test_a_non_finite_fallback_reading_is_unknown_and_written_once(unit) -> None:
+    # The fallback-only sensor shows (True, cloud_reading(...)) while the cloud
+    # carries the entry: a NaN must neither raise nor count as a change each time.
+    gate = ChangeGate()
+    assert gate.changed((True, cloud_reading(float("nan"), unit)))
+    assert not gate.changed((True, cloud_reading(float("nan"), unit)))
+    assert not gate.changed((True, cloud_reading(float("inf"), unit)))
+    assert not gate.changed((True, cloud_reading(None, unit)))
+    assert gate.changed((True, cloud_reading(1.0, unit)))

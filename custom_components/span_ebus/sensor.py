@@ -179,7 +179,8 @@ class _WriteOnChange(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
     not this entity's reading moved. Availability is part of what is compared,
     so a liveness flip (the coordinator calls its listeners when the stream goes
     stale) and an unload are still written. These sensors carry no state
-    attributes, so the pair is all there is to compare.
+    attributes, so the pair is all there is to compare. Any attribute added
+    later must join the compared pair, or a change to it alone is dropped.
     """
 
     def __init__(self, coordinator: SpanCloudCoordinator) -> None:
@@ -964,11 +965,8 @@ class SpanFallbackOnlySensor(_SpanKeptSensor):
         if reading is model.NO_FALLBACK:
             shown: tuple[bool, Any] = (False, None)
         else:
-            try:
-                value = None if reading is None else float(reading)
-            except (TypeError, ValueError):
-                value = None
-            shown = (True, round_value(value, self._attr_native_unit_of_measurement))
+            # Present but unknown when there is no finite reading to show.
+            shown = (True, cloud_reading(reading, self._attr_native_unit_of_measurement))
         changed = shown != self._shown
         self._shown = shown
         self._attr_available, self._attr_native_value = shown
