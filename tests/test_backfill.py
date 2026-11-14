@@ -432,6 +432,24 @@ def test_snapshot_keeps_the_row_before_and_every_gap_hour():
     assert list(snap) == [bf.iso(t) for t, _ in ROWS[1:]]
 
 
+def test_one_gap_per_statistic_per_batch():
+    rec = bf.new_record()
+    now = T0 + 6 * H
+    assert bf.add_gap(rec, "site_energy", T0 + 3 * H, T0 + 4 * H, now=now, target="uid-a")
+    assert bf.add_gap(rec, "site_energy", T0, T0 + H, now=now, target="uid-a")
+    assert bf.add_gap(rec, "site_energy", T0, T0 + H, now=now, target="uid-b")
+    later_a, early_a, only_b = bf.gaps(rec)
+    for gap in bf.gaps(rec):
+        gap["status"] = bf.READY
+    # The oldest gap of each statistic; the other waits for the next run.
+    assert bf.ready_to_write(rec) == [early_a, only_b]
+    early_a["status"] = bf.QUEUED
+    # Nothing more on a statistic while one of its gaps is still queued.
+    assert bf.ready_to_write(rec) == [only_b]
+    early_a["status"] = bf.APPLIED
+    assert bf.ready_to_write(rec) == [only_b, later_a]
+
+
 def test_snapshot_needs_a_compiled_row():
     gap = ready_gap(HOURS)
     assert bf.snapshot(gap, ROWS[:2]) is None

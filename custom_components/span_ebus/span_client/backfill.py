@@ -512,6 +512,29 @@ def snapshot(
     return {iso(t): float(s) for t, s in picked}
 
 
+def ready_to_write(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The ready gaps one batch may queue: the oldest per statistic.
+
+    A gap's adjustments shift every later row of its statistic, so a second
+    gap on it would be snapshotted, and then judged, against rows that move
+    under it. It waits for a later run, as does every gap on a statistic
+    with a gap still queued.
+    """
+    busy = {target_of(g) for g in with_status(record, QUEUED)}
+    ready = sorted(
+        with_status(record, READY),
+        key=lambda g: parse_time(g.get("start")) or datetime.max.replace(tzinfo=UTC),
+    )
+    picked: list[dict[str, Any]] = []
+    for gap in ready:
+        target = target_of(gap)
+        if target in busy:
+            continue
+        busy.add(target)
+        picked.append(gap)
+    return picked
+
+
 def queue(gap: dict[str, Any], sums: Mapping[str, float]) -> None:
     gap["sum_before"] = dict(sums)
     gap["status"] = QUEUED

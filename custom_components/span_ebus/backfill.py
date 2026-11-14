@@ -369,14 +369,15 @@ class GapBackfill:
         return await recorder_api.sums(self.hass, eid, *window, "hour")
 
     async def _write_ready(self, now: datetime) -> None:
-        """Queue every ready gap's hours, once, and prove they took effect.
+        """Queue ready gaps' hours, once, and prove they took effect.
 
-        Each gap's rows are read before anything is queued, and the record is
-        saved with them as queued before the first adjustment: a queued gap is
-        never queued again (the next setup settles it from the database).
+        At most one gap per statistic per batch; the rest wait for the next
+        run. Each gap's rows are read before anything is queued, and the record
+        is saved with them as queued before the first adjustment: a queued gap
+        is never queued again (the next setup settles it from the database).
         """
         batch: list[tuple[dict[str, Any], str]] = []
-        for gap in bf.with_status(self._record, bf.READY):
+        for gap in bf.ready_to_write(self._record):
             eid = await self._writable(gap, now)
             if eid is None:
                 continue
