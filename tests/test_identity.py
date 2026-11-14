@@ -242,8 +242,16 @@ def test_cloud_and_local_uids_never_collide():
 
 def test_collisions_count_new_uids_already_taken():
     plan = rewrite_plan(entries("circuit-1/power", "transport"), link(), local_rows())
-    assert collisions(plan, [f"{K}_circuit-1/power"]) == 0
-    assert collisions(plan, [f"{S}_circuit/c-1/meter/active-power", f"{S}_transport"]) == 2
+    assert collisions(plan, [("sensor", f"{K}_circuit-1/power")]) == 0
+    taken = [("sensor", f"{S}_circuit/c-1/meter/active-power"), ("sensor", f"{S}_transport")]
+    assert collisions(plan, taken) == 2
+
+
+def test_collisions_only_count_the_same_domain():
+    plan = rewrite_plan(entries("circuit-1/power"), link(), local_rows())
+    new = f"{S}_circuit/c-1/meter/active-power"
+    assert collisions(plan, [("switch", new), ("binary_sensor", new)]) == 0
+    assert collisions(plan, [("switch", new), ("sensor", new)]) == 1
 
 
 @pytest.mark.parametrize("suffix", sorted(FALLBACK_ONLY))

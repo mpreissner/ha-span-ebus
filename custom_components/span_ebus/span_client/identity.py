@@ -61,10 +61,14 @@ class RewritePlan:
         return tuple((eid, new, old) for eid, old, new in reversed(self.changes))
 
 
-def collisions(plan: RewritePlan, existing_uids: Iterable[str]) -> int:
-    """How many new uids already belong to some entity (abort if any)."""
-    existing = set(existing_uids)
-    return sum(1 for _eid, _old, new in plan.changes if new in existing)
+def collisions(plan: RewritePlan, existing: Iterable[tuple[str, str]]) -> int:
+    """How many new uids already belong to an entity of the same domain (abort if any).
+
+    `existing` holds (entity domain, unique_id) pairs: the registry keys a
+    unique_id per platform and domain, so a sensor and a switch may share one.
+    """
+    taken = set(existing)
+    return sum(1 for eid, _old, new in plan.changes if (eid.partition(".")[0], new) in taken)
 
 
 # Cloud property -> local source, per node kind.

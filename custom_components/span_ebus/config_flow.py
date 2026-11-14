@@ -1802,8 +1802,11 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         if (reason := plan_problem(plan)) is not None:
             return self.async_abort(reason=reason)
         registry = er.async_get(self.hass)
-        taken = [e.unique_id for e in registry.entities.values() if e.platform == DOMAIN]
-        if collisions(plan, taken):
+        taken = [
+            (e.domain, e.unique_id) for e in registry.entities.values() if e.platform == DOMAIN
+        ]
+        if count := collisions(plan, taken):
+            _LOGGER.error("linking the local panel would collide on %d unique ids", count)
             return self.async_abort(reason="uid_collision")
         # Read before the re-point: the entities keep their state, but the
         # last cloud reading is what the step is measured from.
