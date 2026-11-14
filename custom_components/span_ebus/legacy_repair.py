@@ -29,7 +29,14 @@ from .const import (
 )
 from .energy_step import panel_name
 from .span_client.identity import RegistryEntryView
-from .span_client.legacy import DUPLICATE, LegacyEntities, legacy_entities, still_listed
+from .span_client.legacy import (
+    DUPLICATE,
+    LegacyEntities,
+    legacy_entities,
+    produced_uids,
+    still_listed,
+)
+from .span_client.local import model
 from .span_client.local.health import Mode
 from .span_client.standin import FALLBACK, UNMATCHED
 
@@ -63,6 +70,13 @@ def current(hass: HomeAssistant, entry: ConfigEntry) -> LegacyEntities:
     """What the repair lists for this entry now."""
     if CONF_LOCAL_SERIAL not in entry.data:
         return LegacyEntities()
+    serial = entry.data[CONF_LOCAL_SERIAL]
+    runtime = getattr(entry, "runtime_data", None)
+    transport = getattr(runtime, "transport", None)
+    if transport is not None:
+        produced = produced_uids(transport.snapshot, transport.panel_key)
+    else:
+        produced = produced_uids(model.EMPTY, serial)
     registry = er.async_get(hass)
     views = [
         RegistryEntryView(row.entity_id, row.unique_id)
@@ -71,9 +85,10 @@ def current(hass: HomeAssistant, entry: ConfigEntry) -> LegacyEntities:
     ]
     return legacy_entities(
         views,
-        local_serial=entry.data[CONF_LOCAL_SERIAL],
+        local_serial=serial,
         cloud_stem=entry.data.get(CONF_CLOUD_STEM),
         unmatched=entry.data.get(CONF_CLOUD_UNMATCHED) or (),
+        produced=produced,
     )
 
 

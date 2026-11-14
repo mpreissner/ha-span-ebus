@@ -14,6 +14,10 @@ On an entry with a local panel, a cloud-shaped entity is one of:
 - a duplicate: any other stem, or the cloud's own transport sensor. Releases
   before the link step had the cloud coordinator add its own entities next to
   the local ones, and nothing creates them now.
+
+As a safety net, a uid the entry's platforms create now (`produced_uids`: the
+local rows, derived rows and the transport sensor) is never listed, whatever its
+shape: a wrong removal is worse than a missed duplicate.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .identity import RegistryEntryView, transport_uid
+from .local import model
 from .standin import FALLBACK, STANDIN, UNMATCHED, classify_kept
 
 DUPLICATE = "duplicate"
@@ -49,6 +54,20 @@ def cloud_suffix(unique_id: str, stem: str | None = None) -> str | None:
         return suffix if _CLOUD_UID.fullmatch(f"x_{suffix}") else None
     m = _CLOUD_UID.fullmatch(unique_id)
     return m.group("suffix") if m else None
+
+
+def produced_uids(snapshot: model.Snapshot, panel_key: str) -> frozenset[str]:
+    """Every uid the local platforms create, or may create, for this snapshot.
+
+    A superset on purpose: rows are counted whether or not they exist yet, and
+    whether or not a stand-in shows them instead.
+    """
+    uids = {transport_uid(panel_key)}
+    for row in model.ROWS:
+        for device_id in model.row_devices(snapshot, row):
+            uids.add(model.row_uid(row, panel_key, device_id))
+    uids.update(model.panel_uid(panel_key, row.source) for row in model.DERIVED_ROWS)
+    return frozenset(uids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,19 +104,22 @@ def legacy_entities(
     local_serial: str,
     cloud_stem: str | None,
     unmatched: Iterable[str] = (),
+    produced: Iterable[str] = (),
 ) -> LegacyEntities:
     """Sort a local entry's cloud-shaped entities into the groups to list.
 
     `entries` are this entry's own registry rows (this integration's platform).
     `cloud_stem` and `unmatched` are what a link recorded (`CONF_CLOUD_STEM`,
     `CONF_CLOUD_UNMATCHED`); both are empty on an entry that was never a cloud
-    entry. The local transport sensor and stand-ins are never listed.
+    entry. `produced` are the uids the entry's platforms create now
+    (`produced_uids`). Those, the local transport sensor and stand-ins are never
+    listed.
     """
-    current = transport_uid(local_serial)
+    live = {transport_uid(local_serial), *produced}
     on_stem: dict[str, str] = {}
     duplicate: list[str] = []
     for entry in entries:
-        if entry.unique_id == current:
+        if entry.unique_id in live:
             continue
         if cloud_stem and (suffix := cloud_suffix(entry.unique_id, cloud_stem)) is not None:
             if suffix == _TRANSPORT:

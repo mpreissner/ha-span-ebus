@@ -11,10 +11,13 @@ from span_client.legacy import (
     LegacyEntities,
     cloud_suffix,
     legacy_entities,
+    produced_uids,
     still_listed,
 )
 from span_client.local import model
 from span_client.standin import FALLBACK, STANDIN_SUFFIXES, UNMATCHED
+
+from tests.test_local_capture import PANEL, capture_tree
 
 S = "nt-0000-test"
 K = "XC-AAAA-0000"
@@ -171,6 +174,59 @@ def test_cloud_entities_on_another_stem_of_a_linked_entry_are_duplicates():
     got = legacy_entities(views, local_serial=S, cloud_stem=K)
     assert got.duplicate == ("sensor.home_old",)
     assert got.fallback_only == got.unmatched == ()
+
+
+# --- the safety net: what the entry creates now is never listed --------------------
+
+
+def test_produced_uids_cover_the_local_rows_derived_rows_and_transport():
+    snapshot = model.build_snapshot(capture_tree(), PANEL, received_at=0.0)
+    produced = produced_uids(snapshot, PANEL)
+    assert transport_uid(PANEL) in produced
+    assert all(model.panel_uid(PANEL, r.source) in produced for r in model.DERIVED_ROWS)
+    for row in model.ROWS:
+        for device_id in model.row_devices(snapshot, row):
+            assert model.row_uid(row, PANEL, device_id) in produced
+    assert any("_circuit/" in uid for uid in produced)
+
+
+def test_no_uid_the_capture_produces_is_ever_listed():
+    snapshot = model.build_snapshot(capture_tree(), PANEL, received_at=0.0)
+    produced = produced_uids(snapshot, PANEL)
+    views = [view(f"sensor.e{i}", uid) for i, uid in enumerate(sorted(produced))]
+    for stem in (None, PANEL, K):
+        got = legacy_entities(views, local_serial=PANEL, cloud_stem=stem, produced=produced)
+        assert len(got) == 0
+
+
+def test_a_produced_uid_shaped_like_a_cloud_uid_is_not_listed():
+    lookalike = f"{S}_panel/overhead"
+    views = [view("sensor.lookalike", lookalike), view("sensor.old", f"{K}_panel/overhead")]
+    got = legacy_entities(views, local_serial=S, cloud_stem=None, produced={lookalike})
+    assert got.entity_ids == ("sensor.old",)
+    # On the cloud stem too: produced wins over the fallback-only rule.
+    got = legacy_entities(
+        [view("sensor.x", f"{K}_site/balance")],
+        local_serial=S,
+        cloud_stem=K,
+        produced={f"{K}_site/balance"},
+    )
+    assert len(got) == 0
+
+
+def test_the_safety_net_with_the_current_transport_a_foreign_stem_and_a_standin():
+    standin = min(STANDIN_SUFFIXES)
+    views = [
+        view("sensor.transport", transport_uid(S)),
+        view("sensor.foreign", "XC-BBBB-0000_circuit-2/power"),
+        view("sensor.standin", f"{K}_{standin}"),
+        view("sensor.fallback", f"{K}_site/balance"),
+    ]
+    got = legacy_entities(views, local_serial=S, cloud_stem=K, produced={transport_uid(S)})
+    assert got.duplicate == ("sensor.foreign",)
+    assert got.fallback_only == ("sensor.fallback",)
+    assert "sensor.standin" not in got.entity_ids
+    assert "sensor.transport" not in got.entity_ids
 
 
 # --- what the confirm step shows ----------------------------------------------------
