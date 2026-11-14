@@ -15,9 +15,11 @@ On an entry with a local panel, a cloud-shaped entity is one of:
   before the link step had the cloud coordinator add its own entities next to
   the local ones, and nothing creates them now.
 
-As a safety net, a uid the entry's platforms create now (`produced_uids`: the
-local rows, derived rows and the transport sensor) is never listed, whatever its
-shape: a wrong removal is worse than a missed duplicate.
+As a safety net, a uid in `live` is never listed, whatever its shape: a wrong
+removal is worse than a missed duplicate. `live` is what the entry's platforms
+create now: the loaded entities other than the kept fallback-only and unmatched
+ones (which this repair exists to remove), plus `produced_uids` for local rows
+not added yet.
 """
 
 from __future__ import annotations
@@ -98,24 +100,36 @@ class LegacyEntities:
         return ids[:limit], max(0, len(ids) - limit)
 
 
+def live_uids(loaded: Iterable[tuple[str | None, bool]], produced: Iterable[str]) -> frozenset[str]:
+    """The uids `legacy_entities` must never list.
+
+    `loaded` is `(unique_id, kept_without_local_row)` for each entity this
+    entry's platforms hold now; the kept fallback-only and unmatched entities
+    are left out, since listing them is the repair's job. `produced` adds the
+    local rows a platform has not added yet (`produced_uids`).
+    """
+    uids = {uid for uid, kept in loaded if uid and not kept}
+    uids.update(produced)
+    return frozenset(uids)
+
+
 def legacy_entities(
     entries: Iterable[RegistryEntryView],
     *,
     local_serial: str,
     cloud_stem: str | None,
     unmatched: Iterable[str] = (),
-    produced: Iterable[str] = (),
+    live: Iterable[str] = (),
 ) -> LegacyEntities:
     """Sort a local entry's cloud-shaped entities into the groups to list.
 
     `entries` are this entry's own registry rows (this integration's platform).
     `cloud_stem` and `unmatched` are what a link recorded (`CONF_CLOUD_STEM`,
     `CONF_CLOUD_UNMATCHED`); both are empty on an entry that was never a cloud
-    entry. `produced` are the uids the entry's platforms create now
-    (`produced_uids`). Those, the local transport sensor and stand-ins are never
-    listed.
+    entry. `live` are the uids the entry's platforms create now. Those, the
+    local transport sensor and stand-ins are never listed.
     """
-    live = {transport_uid(local_serial), *produced}
+    live = {transport_uid(local_serial), *live}
     on_stem: dict[str, str] = {}
     duplicate: list[str] = []
     for entry in entries:

@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.translation import async_get_translations
@@ -33,6 +34,7 @@ from .span_client.legacy import (
     DUPLICATE,
     LegacyEntities,
     legacy_entities,
+    live_uids,
     produced_uids,
     still_listed,
 )
@@ -66,17 +68,33 @@ def _local_only(entry: ConfigEntry) -> bool:
 
 
 @callback
-def current(hass: HomeAssistant, entry: ConfigEntry) -> LegacyEntities:
-    """What the repair lists for this entry now."""
-    if CONF_LOCAL_SERIAL not in entry.data:
-        return LegacyEntities()
-    serial = entry.data[CONF_LOCAL_SERIAL]
+def live(hass: HomeAssistant, entry: ConfigEntry, serial: str) -> frozenset[str]:
+    """The uids this entry's platforms create now: never listed.
+
+    The loaded entities, less the kept ones no local row feeds, plus the model's
+    local rows for any a platform has not added yet.
+    """
+    loaded = [
+        (entity.unique_id, getattr(entity, "kept_without_local_row", False))
+        for platform in entity_platform.async_get_platforms(hass, DOMAIN)
+        if platform.config_entry is not None and platform.config_entry.entry_id == entry.entry_id
+        for entity in platform.entities.values()
+    ]
     runtime = getattr(entry, "runtime_data", None)
     transport = getattr(runtime, "transport", None)
     if transport is not None:
         produced = produced_uids(transport.snapshot, transport.panel_key)
     else:
         produced = produced_uids(model.EMPTY, serial)
+    return live_uids(loaded, produced)
+
+
+@callback
+def current(hass: HomeAssistant, entry: ConfigEntry) -> LegacyEntities:
+    """What the repair lists for this entry now."""
+    if CONF_LOCAL_SERIAL not in entry.data:
+        return LegacyEntities()
+    serial = entry.data[CONF_LOCAL_SERIAL]
     registry = er.async_get(hass)
     views = [
         RegistryEntryView(row.entity_id, row.unique_id)
@@ -88,7 +106,7 @@ def current(hass: HomeAssistant, entry: ConfigEntry) -> LegacyEntities:
         local_serial=serial,
         cloud_stem=entry.data.get(CONF_CLOUD_STEM),
         unmatched=entry.data.get(CONF_CLOUD_UNMATCHED) or (),
-        produced=produced,
+        live=live(hass, entry, serial),
     )
 
 

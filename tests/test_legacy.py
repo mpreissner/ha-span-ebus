@@ -11,6 +11,7 @@ from span_client.legacy import (
     LegacyEntities,
     cloud_suffix,
     legacy_entities,
+    live_uids,
     produced_uids,
     still_listed,
 )
@@ -195,21 +196,21 @@ def test_no_uid_the_capture_produces_is_ever_listed():
     produced = produced_uids(snapshot, PANEL)
     views = [view(f"sensor.e{i}", uid) for i, uid in enumerate(sorted(produced))]
     for stem in (None, PANEL, K):
-        got = legacy_entities(views, local_serial=PANEL, cloud_stem=stem, produced=produced)
+        got = legacy_entities(views, local_serial=PANEL, cloud_stem=stem, live=produced)
         assert len(got) == 0
 
 
 def test_a_produced_uid_shaped_like_a_cloud_uid_is_not_listed():
     lookalike = f"{S}_panel/overhead"
     views = [view("sensor.lookalike", lookalike), view("sensor.old", f"{K}_panel/overhead")]
-    got = legacy_entities(views, local_serial=S, cloud_stem=None, produced={lookalike})
+    got = legacy_entities(views, local_serial=S, cloud_stem=None, live={lookalike})
     assert got.entity_ids == ("sensor.old",)
-    # On the cloud stem too: produced wins over the fallback-only rule.
+    # On the cloud stem too: live wins over the fallback-only rule.
     got = legacy_entities(
         [view("sensor.x", f"{K}_site/balance")],
         local_serial=S,
         cloud_stem=K,
-        produced={f"{K}_site/balance"},
+        live={f"{K}_site/balance"},
     )
     assert len(got) == 0
 
@@ -222,11 +223,50 @@ def test_the_safety_net_with_the_current_transport_a_foreign_stem_and_a_standin(
         view("sensor.standin", f"{K}_{standin}"),
         view("sensor.fallback", f"{K}_site/balance"),
     ]
-    got = legacy_entities(views, local_serial=S, cloud_stem=K, produced={transport_uid(S)})
+    got = legacy_entities(views, local_serial=S, cloud_stem=K, live={transport_uid(S)})
     assert got.duplicate == ("sensor.foreign",)
     assert got.fallback_only == ("sensor.fallback",)
     assert "sensor.standin" not in got.entity_ids
     assert "sensor.transport" not in got.entity_ids
+
+
+def test_live_uids_leave_out_kept_rows_and_add_the_produced_ones():
+    loaded = [
+        (f"{S}_circuit/c1/power", False),
+        (f"{K}_circuit-3/power", False),  # a stand-in
+        (f"{K}_site/balance", True),  # fallback-only, kept
+        (f"{K}_circuit-9/relay", True),  # unmatched, kept
+        (None, False),
+    ]
+    got = live_uids(loaded, {transport_uid(S)})
+    assert got == {f"{S}_circuit/c1/power", f"{K}_circuit-3/power", transport_uid(S)}
+
+
+def test_a_cloud_shaped_uid_or_a_standin_in_live_is_not_listed():
+    standin = min(STANDIN_SUFFIXES)
+    views = [
+        view("sensor.shaped", "XC-BBBB-0000_panel/overhead"),
+        view("sensor.standin", f"{K}_{standin}"),
+        view("sensor.fallback", f"{K}_site/balance"),
+        view("switch.unmatched", f"{K}_circuit-9/relay"),
+    ]
+    live = live_uids(
+        [
+            ("XC-BBBB-0000_panel/overhead", False),
+            (f"{K}_{standin}", False),
+            (f"{K}_site/balance", True),
+            (f"{K}_circuit-9/relay", True),
+        ],
+        (),
+    )
+    got = legacy_entities(
+        views, local_serial=S, cloud_stem=K, unmatched=["circuit-9/relay"], live=live
+    )
+    assert "sensor.shaped" not in got.entity_ids
+    assert "sensor.standin" not in got.entity_ids
+    # Loaded but kept: still listed, so the repair can remove them.
+    assert got.fallback_only == ("sensor.fallback",)
+    assert got.unmatched == ("switch.unmatched",)
 
 
 # --- what the confirm step shows ----------------------------------------------------
