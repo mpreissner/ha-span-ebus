@@ -50,6 +50,7 @@ class Refusal(StrEnum):
     STORAGE_OR_SOLAR = "storage_or_solar"  # feeds a battery or PV, no override
     NOT_OPTED_IN = "not_opted_in"  # the islanding control is off in options
     GATED = "gated"  # an availability gate failed at call time
+    OUT_OF_RANGE = "out_of_range"  # outside the bounds the device publishes now
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,16 +108,21 @@ class Pending(NamedTuple):
     context: Any  # the service call's context, so HA records who sent it
 
 
-def final_outcome(pending: Pending, presence: Presence, shown: Any, now: float) -> Outcome | None:
+def final_outcome(
+    pending: Pending, presence: Presence, reported: Any, now: float, *, blocked: bool = False
+) -> Outcome | None:
     """The outcome once it is final, else None (still waiting).
 
-    `shown` is what the panel reports now. An entity gone unavailable ends the
-    wait first; an echo confirms; a window that has passed does not.
+    `presence` and `reported` are what the panel reports now, before any
+    safety rule hides the entity; `blocked` says whether one does. An echo
+    confirms even when the echo itself blocks the control (clearing an
+    islanding assertion once the grid is back does). Otherwise an entity gone
+    unavailable ends the wait; a window that has passed does not confirm.
     """
-    if presence is Presence.UNAVAILABLE:
-        return Outcome.UNAVAILABLE
-    if shown == pending.value:
+    if presence is not Presence.UNAVAILABLE and reported == pending.value:
         return Outcome.CONFIRMED
+    if presence is Presence.UNAVAILABLE or blocked:
+        return Outcome.UNAVAILABLE
     if now >= pending.deadline:
         return Outcome.NOT_CONFIRMED
     return None
@@ -144,10 +150,14 @@ class SafetyRules:
             return self._relay(device_id)
         if key == model.ISLANDING_KEY:
             return self._islanding(value)
+        if key == model.EVSE_LIMIT_KEY:
+            return self._evse_limit(device_id, value)
         return None
 
     def _relay(self, device_id: str) -> Refusal | None:
-        # Checked even for a circuit the snapshot does not hold: fail closed.
+        # Protection is checked even for a circuit the snapshot does not hold;
+        # the storage-or-solar rule needs the circuit's link, so an unknown
+        # circuit passes it.
         if device_id in self.options.protected:
             return Refusal.PROTECTED
         if model.relay_blocked(self.snapshot, device_id, self.options.relay_override):
@@ -164,6 +174,16 @@ class SafetyRules:
             return Refusal.GATED
         return None
 
+    def _evse_limit(self, device_id: str, value: Any) -> Refusal | None:
+        facts = self.snapshot.evse.get(device_id)
+        if facts is None or model.evse_limit_bounds(facts) is None:
+            return Refusal.GATED  # the ceiling is unknown
+        if value is None:
+            return None
+        if model.evse_limit_problem(facts, value) is not None:
+            return Refusal.OUT_OF_RANGE
+        return None
+
 
 # --- the options form ------------------------------------------------------------------
 
@@ -174,8 +194,9 @@ class ControlsForm:
 
     Choices map a circuit's device id (the stored value) to its label (the
     circuit's name and spaces, never an id). Defaults are the saved options,
-    filtered to the current choices, so a circuit that is gone drops out on
-    the next save.
+    filtered to the current choices. A protected circuit the snapshot does
+    not hold right now stays protected (offered under a placeholder label);
+    one dropped only when the panel reports it without a relay switch.
     """
 
     protected: dict[str, str]
@@ -201,6 +222,9 @@ def controls_form(snapshot: Snapshot, options: Mapping[str, Any] | None) -> Cont
     current = ControlOptions.from_options(options)
     switchable = [c for c in snapshot.circuits.values() if c.has_switch]
     protected = {c.device_id: circuit_choice_label(c) for c in switchable}
+    absent = sorted(i for i in current.protected if i not in snapshot.circuits)
+    for number, device_id in enumerate(absent, start=1):
+        protected[device_id] = f"Circuit not reported now ({number})"
     override = {
         c.device_id: circuit_choice_label(c) for c in switchable if model.feeds_storage_or_solar(c)
     }

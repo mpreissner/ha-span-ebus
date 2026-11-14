@@ -488,7 +488,9 @@ class SpanLocalEntity(Entity):
         self._pending: Pending | None = None
         self._cancel_confirm: CALLBACK_TYPE | None = None
         # What the panel reports, before a pending command's value is shown.
-        self._reported: tuple[Presence, Any] = (Presence.UNAVAILABLE, None)
+        # What the panel reports for a control, before any safety rule hides
+        # it: (presence, value, blocked).
+        self._reported: tuple[Presence, Any, bool] = (Presence.UNAVAILABLE, None, False)
         snapshot = transport.snapshot
         facts = model.row_facts(snapshot, row, device_id)
         self._attr_unique_id = model.row_uid(row, transport.panel_key, device_id)
@@ -576,13 +578,18 @@ class SpanLocalEntity(Entity):
                     self._attr_name = self._look.suffix.capitalize()
                 else:
                     self._attr_name = f"{model.circuit_label(facts)} {self._look.suffix}"
-        if self._blocked(snapshot):
-            presence = Presence.UNAVAILABLE
         if presence is not Presence.VALUE:
             value = None
+        blocked = self._blocked(snapshot)
         if row.kind is ValueKind.CONTROL:
-            self._reported = (presence, value)
-            value = self._confirm(presence, value)
+            # Judged before the block: a control its own echo gates (clearing
+            # an islanding assertion once the grid is back) still confirms.
+            self._reported = (presence, value, blocked)
+            self._confirm()
+        if blocked:
+            presence, value = Presence.UNAVAILABLE, None
+        elif self._pending is not None:
+            value = self._pending.value  # optimistic until the panel confirms
         self._presence, self._value, self._attrs = presence, value, attrs
         # Whether a command is pending counts too: a lock shows "locking".
         shown = (presence, value, attrs, getattr(self, "_attr_name", None), self._pending)
@@ -606,15 +613,15 @@ class SpanLocalEntity(Entity):
 
     # --- controls: optimistic until the panel confirms ---------------------
 
-    def _confirm(self, presence: Presence, value: Any) -> Any:
+    def _confirm(self) -> None:
+        """End the pending command once what the panel reports makes it final."""
         pending = self._pending
         if pending is None:
-            return value
-        outcome = final_outcome(pending, presence, value, time.monotonic())
-        if outcome is None:
-            return pending.value
-        self._finish(outcome)
-        return value
+            return
+        presence, reported, blocked = self._reported
+        outcome = final_outcome(pending, presence, reported, time.monotonic(), blocked=blocked)
+        if outcome is not None:
+            self._finish(outcome)
 
     def _finish(self, outcome: Outcome) -> None:
         """End the pending command with its outcome and record it."""
@@ -670,7 +677,7 @@ class SpanLocalEntity(Entity):
         context = self._context
         control = self._command_control()
         requested = as_text(value) or ""
-        previous = as_text(self._value)
+        previous = as_text(self._reported[1])  # what the panel reports, not what is shown
 
         def record(outcome: Outcome, refusal: Any = None) -> None:
             self._record(
@@ -691,6 +698,12 @@ class SpanLocalEntity(Entity):
         except HomeAssistantError:
             record(Outcome.NOT_SENT)
             raise
+        except Exception:
+            # Unexpected, but the command still ends in one event. A cancelled
+            # send (CancelledError, a BaseException) propagates with no event:
+            # the call itself was abandoned, so there is no outcome to record.
+            record(Outcome.NOT_SENT)
+            raise
         if self._pending is not None:
             self._finish(Outcome.SUPERSEDED)
         pending = Pending(value, time.monotonic() + CONFIRM_WINDOW, previous, delivery, context)
@@ -702,9 +715,9 @@ class SpanLocalEntity(Entity):
             # deadline, so judge what the panel reports as at the deadline.
             self._cancel_confirm = None
             if self._pending is pending:
-                presence, reported = self._reported
+                presence, reported, blocked = self._reported
                 self._finish(
-                    final_outcome(pending, presence, reported, pending.deadline)
+                    final_outcome(pending, presence, reported, pending.deadline, blocked=blocked)
                     or Outcome.NOT_CONFIRMED
                 )
             self._refresh(self._transport.snapshot)

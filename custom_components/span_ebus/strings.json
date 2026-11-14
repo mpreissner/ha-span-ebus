@@ -681,6 +681,9 @@
     "control_gated": {
       "message": "This control is not available right now, so the command was not sent."
     },
+    "control_out_of_range": {
+      "message": "That value is outside the range the device accepts right now, so the command was not sent."
+    },
     "evse_limit_out_of_range": {
       "message": "The charge current limit must be between {min} and {max} A."
     }

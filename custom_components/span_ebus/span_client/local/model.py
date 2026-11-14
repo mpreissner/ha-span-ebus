@@ -55,7 +55,6 @@ BATTERY_TO_CLOUD_SIGN = -1
 
 # Property keys that carry a command.
 RELAY_KEY = "switch/relay"
-PRIORITY_KEY = "shed/priority"
 ISLANDING_KEY = "shed/asserted-islanding-state"
 EVSE_LIMIT_KEY = "config/user-max-charge-current"
 EVSE_CEILING_KEY = "config/max-charge-current"

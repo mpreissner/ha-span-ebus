@@ -20,9 +20,8 @@ from . import SpanConfigEntry
 from .const import DOMAIN
 from .local_entity import SpanLocalEntity, async_setup_local
 from .span_client.local import model
-from .span_client.local.commands import Control, Refusal
+from .span_client.local.commands import Control
 from .span_client.local.model import Snapshot
-from .transport import ControlRefused
 
 
 async def async_setup_entry(
@@ -51,21 +50,28 @@ class SpanLocalEvseLimit(SpanLocalEntity, NumberEntity):
         return None if facts is None else model.evse_limit_bounds(facts)
 
     def _blocked(self, snapshot: Snapshot) -> bool:
+        # Side effect: refresh native min/max here. _blocked runs on every
+        # snapshot, before the state is written, and is the one place that
+        # already reads the bounds; setting them here keeps the range Home
+        # Assistant validates against in step with the ceiling the charger
+        # publishes now. Unknown bounds leave the old range, but the number is
+        # then unavailable (the safety rules gate it), so nothing can be set.
         bounds = self._bounds(snapshot)
         if bounds is not None:
             self._attr_native_min_value, self._attr_native_max_value = bounds
-        return bounds is None or super()._blocked(snapshot)
+        return super()._blocked(snapshot)
 
     @property
     def native_value(self) -> float | None:
         return self._value
 
     def _check(self, value: Any) -> None:
+        """An out-of-range value is the caller's mistake: INVALID, with the
+        range in the message. An unknown ceiling is left to the transport's
+        safety rules, which refuse it as gated.
+        """
         facts = model.row_facts(self._transport.snapshot, self._row, self._device_id)
-        problem = model.evse_limit_problem(facts, value)
-        if problem == model.EVSE_LIMIT_GATED:
-            raise ControlRefused(Refusal.GATED)
-        if problem is not None:
+        if model.evse_limit_problem(facts, value) == model.EVSE_LIMIT_OUT_OF_RANGE:
             low, high = model.evse_limit_bounds(facts) or (0, 0)
             raise ServiceValidationError(
                 translation_domain=DOMAIN,

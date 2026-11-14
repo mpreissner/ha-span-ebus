@@ -120,6 +120,36 @@ def test_final_outcome(presence, shown, now, outcome):
     assert commands.final_outcome(_PENDING, presence, shown, now) is outcome
 
 
+@pytest.mark.parametrize(
+    ("reported", "now", "outcome"),
+    [
+        ("OPEN", 101.0, Outcome.CONFIRMED),  # the echo itself blocks: still confirmed
+        ("CLOSED", 101.0, Outcome.UNAVAILABLE),  # blocked by something else
+        (None, 111.0, Outcome.UNAVAILABLE),
+    ],
+)
+def test_a_blocked_control_confirms_only_on_its_echo(reported, now, outcome):
+    assert commands.final_outcome(_PENDING, Presence.VALUE, reported, now, blocked=True) is (
+        outcome
+    )
+
+
+def test_clearing_an_assertion_once_the_grid_is_back_is_confirmed():
+    """ON_GRID asserted, the panel senses the grid again, the user clears it:
+    the echo (NONE) gates the control, but the command was confirmed."""
+    rules = {model.ISLANDING_CONTROL: True}
+    before = _island(mid_state="ON_GRID", asserted="ON_GRID")
+    assert _rules(before, **rules).check(PANEL, model.ISLANDING_KEY, "NONE") is None
+    pending = Pending("NONE", 110.0, "ON_GRID", Delivery.ACKED, None)
+    echoed = _island(mid_state="ON_GRID", asserted="NONE")
+    blocked = _rules(echoed, **rules).check(PANEL, model.ISLANDING_KEY) is not None
+    reported = row("asserted_islanding").value(echoed.panel)
+    assert blocked
+    assert reported == "NONE"
+    outcome = commands.final_outcome(pending, Presence.VALUE, reported, 101.0, blocked=blocked)
+    assert outcome is Outcome.CONFIRMED
+
+
 # --- control options ---------------------------------------------------------------------
 
 
@@ -194,9 +224,7 @@ def test_a_protected_relay_is_still_created():
     assert model.row_exists(s, row("breaker"), CIRCUIT, options)
 
 
-@pytest.mark.parametrize(
-    "key", ["circuit/priority", model.EVSE_LIMIT_KEY, "switch/lock-state", "anything/else"]
-)
+@pytest.mark.parametrize("key", ["load-shed/priority", "switch/lock-state", "anything/else"])
 def test_other_keys_are_never_guarded(key):
     s = snap(_relay_tree(**STORAGE))
     rules = _rules(s, **{model.PROTECTED_CIRCUITS: [CIRCUIT]})
@@ -372,6 +400,18 @@ def test_evse_limit_problem(facts, value, problem):
     assert model.evse_limit_problem(facts, value) == problem
 
 
+def test_the_safety_rules_guard_the_evse_limit(monkeypatch):
+    s = _settable_evse(monkeypatch, model.EVSE_LIMIT_KEY)
+    rules = _rules(s)
+    assert rules.check(EVSE, model.EVSE_LIMIT_KEY) is None
+    assert rules.check(EVSE, model.EVSE_LIMIT_KEY, 16) is None
+    assert rules.check(EVSE, model.EVSE_LIMIT_KEY, 49) is Refusal.OUT_OF_RANGE
+    assert rules.check("evse-syn-gone", model.EVSE_LIMIT_KEY, 16) is Refusal.GATED
+    no_ceiling = snap(site({EVSE: "evse"}, drop={EVSE: ("config/max-charge-current",)}))
+    assert _rules(no_ceiling).check(EVSE, model.EVSE_LIMIT_KEY) is Refusal.GATED
+    assert _rules(no_ceiling).check(EVSE, model.EVSE_LIMIT_KEY, 16) is Refusal.GATED
+
+
 @pytest.mark.parametrize(("value", "payload"), [(16.0, 16), (16.9, 16), (6, 6)])
 def test_evse_limit_payload_floors_to_whole_amps(value, payload):
     result = model.evse_limit_payload(value)
@@ -425,7 +465,7 @@ def test_the_form_offers_islanding_only_with_a_battery_and_a_settable_property()
     assert not commands.controls_form(snap(site({MID: "mid"})), {}).show_islanding
 
 
-def test_the_form_defaults_drop_circuits_that_are_gone():
+def test_the_form_keeps_a_protected_circuit_the_snapshot_does_not_hold():
     s = snap(_relay_tree(**STORAGE))
     saved = {
         model.PROTECTED_CIRCUITS: ["circuit-gone", CIRCUIT],
@@ -433,9 +473,21 @@ def test_the_form_defaults_drop_circuits_that_are_gone():
         model.ISLANDING_CONTROL: True,
     }
     form = commands.controls_form(s, saved)
-    assert form.protected_default == [CIRCUIT]
+    assert form.protected_default == [CIRCUIT, "circuit-gone"]
+    assert "circuit-gone" not in form.protected["circuit-gone"]  # a placeholder label
     assert form.override_default == []
     assert form.islanding_default
+    kept = commands.controls_options(form, saved, {model.PROTECTED_CIRCUITS: ["circuit-gone"]})
+    assert kept[model.PROTECTED_CIRCUITS] == ["circuit-gone"]
+
+
+def test_the_form_drops_a_protected_circuit_that_lost_its_switch():
+    s = snap(_relay_tree(**{"switch/relay-controllable": "false"}))
+    assert CIRCUIT in s.circuits
+    assert not s.circuits[CIRCUIT].has_switch
+    form = commands.controls_form(s, {model.PROTECTED_CIRCUITS: [CIRCUIT]})
+    assert form.protected == {}
+    assert form.protected_default == []
 
 
 @pytest.mark.parametrize(
