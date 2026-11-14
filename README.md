@@ -162,7 +162,10 @@ In the Energy dashboard:
   the circuit on the panel that feeds it.
 
 A circuit that feeds another panel carries a `feeds_panel` attribute on its power
-and energy sensors, holding that panel's device name.
+and energy sensors. It holds the name you gave that panel's device, or "SPAN"
+and its model if you have not named it; never its serial or host. Local entries
+without a cloud link do not get `feeds_panel`: the feed answers come from the
+cloud entry.
 
 ## How it gets your live data
 
