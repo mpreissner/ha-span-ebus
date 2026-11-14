@@ -437,6 +437,20 @@ class SpanTransportManager:
     # --- the Transport sensor ---------------------------------------------
 
     @callback
+    @property
+    def cloud_in_use(self) -> bool:
+        """Whether the cloud fallback holds the entry's tokens, or is about to.
+
+        From the failover decision until its streams stop; also once the
+        credentials are being removed. The gap backfill shares the token file
+        and waits while this is true.
+        """
+        return (
+            self._build_cloud is None
+            or self._cloud_running
+            or self.switch.active is Transport.CLOUD
+        )
+
     def async_add_listener(self, listener: CALLBACK_TYPE) -> CALLBACK_TYPE:
         self._listeners.append(listener)
 

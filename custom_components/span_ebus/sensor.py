@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -607,16 +608,18 @@ class SpanDerivedPowerSensor(_SpanDerivedSensor):
 
 @dataclass
 class _IntegratedData(ExtraStoredData):
-    """The stored total, readable as sensor data, plus when it last advanced."""
+    """The stored total, readable as sensor data, plus its last sample: when, and the watts."""
 
     total_kwh: float
     last_at: str | None
+    last_w: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "native_value": self.total_kwh,
             "native_unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
             "last_at": self.last_at,
+            "last_w": self.last_w,
         }
 
 
@@ -639,6 +642,7 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
         self, entry: SpanConfigEntry, transport: SpanTransportManager, row: DerivedRow
     ) -> None:
         super().__init__(entry, transport, row)
+        self._entry = entry
         self._run = SourcedRun(MAX_INTEGRATION_GAP_SECONDS)
         # UTC ISO time the total last took a sample, persisted with it. The 5d
         # backfill (spec §8.3) reads it at setup to find the stretch HA was down.
@@ -646,6 +650,12 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
         # The last gap the run refused to bridge, in seconds; 5d records it as a
         # backfill gap ending at the sample that reported it.
         self._last_gap: float | None = None
+        # The power of the last sample taken, persisted too: whether the panel
+        # was drawing either side of a gap (an all-zero cloud answer is then no
+        # answer).
+        self._last_w: float | None = None
+        # Set from the restore: the first sample taken ends the stretch HA was down.
+        self._down_since: datetime | None = None
         self._written: float | None = None
         # Nothing is integrated until the stored total is back.
         self._restoring = True
@@ -661,13 +671,18 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
         cached = pick_restored(None if last is None else last.native_value, None)
         extra = await self.async_get_last_extra_data()
         if extra is not None:
-            last_at = extra.as_dict().get("last_at")
+            data = extra.as_dict()
+            last_at = data.get("last_at")
             self._last_at = last_at if isinstance(last_at, str) else None
+            last_w = data.get("last_w")
+            if isinstance(last_w, int | float) and not isinstance(last_w, bool):
+                self._last_w = float(last_w)
         recorded, recorded_at = await self._async_recorded()
         total = pick_restored(cached, recorded)
         if total > cached:
             self._last_at = recorded_at
         self._run.total_kwh = total
+        self._down_since = dt_util.parse_datetime(self._last_at) if self._last_at else None
         self._restoring = False
         await super().async_added_to_hass()
 
@@ -694,7 +709,7 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
 
     @property
     def extra_restore_state_data(self) -> _IntegratedData:
-        return _IntegratedData(self._run.total_kwh, self._last_at)
+        return _IntegratedData(self._run.total_kwh, self._last_at, self._last_w)
 
     def _recompute(self, snapshot: Snapshot) -> bool:
         if self._restoring:
@@ -706,16 +721,30 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
             # integrated across a failover or a failback.
             power = None if shown is Transport.OFFLINE else self._power(snapshot)
             taken, gap = self._run.sample_from(shown, power, timestamp)
-            if taken:
-                self._last_at = dt_util.utcnow().isoformat()
-            if gap is not None:
-                self._last_gap = gap
-                _LOGGER.debug("%s: not bridging a %.0f s gap", self._row.key, gap)
+            if taken and power is not None:
+                now = dt_util.utcnow()
+                at = now - timedelta(seconds=max(0.0, time.monotonic() - timestamp))
+                drew = self._last_w is not None and self._last_w > 0 and power > 0
+                if self._down_since is not None:
+                    self._record_gap(self._down_since, at, drew)
+                    self._down_since = None
+                if gap is not None:
+                    self._last_gap = gap
+                    _LOGGER.debug("%s: not bridging a %.0f s gap", self._row.key, gap)
+                    self._record_gap(at - timedelta(seconds=gap), at, drew)
+                self._last_at = now.isoformat()
+                self._last_w = power
         value = round(self._run.total_kwh, ENERGY_PRECISION)
         if value == self._written:
             return False
         self._written = value
         return True
+
+    def _record_gap(self, start: datetime, end: datetime, draw: bool) -> None:
+        """Hand a stretch this total missed to the cloud backfill, if the entry has one."""
+        runner = getattr(self._entry.runtime_data, "backfill", None)
+        if runner is not None and self.unique_id is not None:
+            runner.record_gap(self.unique_id, self._row.key, start, end, draw=draw)
 
     @property
     def native_value(self) -> float:
