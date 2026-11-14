@@ -98,7 +98,9 @@ from .span_client.identity import (
     collisions,
     confirm_counts,
     local_rows,
+    plan_problem,
     rewrite_plan,
+    stem_problem,
 )
 from .span_client.link import (
     LINKED_MINOR_VERSION,
@@ -1539,6 +1541,8 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         coordinator = self._coordinator_for(panels[0])
         if coordinator is None:
             return "link_not_running"
+        if (reason := stem_problem(coordinator.serial)) is not None:
+            return reason
         try:
             sites = await self.hass.async_add_executor_job(
                 _sites_from_token_store, self._token_path()
@@ -1671,7 +1675,7 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
     async def async_step_link_failed(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        return self.async_abort(reason="link_unreadable")
+        return self.async_abort(reason=self._link.pop("abort", "link_unreadable"))
 
     async def _plan_link(self) -> bool:
         """Read the panel and match it to the cloud's; whether that worked. Never raises."""
@@ -1680,6 +1684,11 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         if local is None:
             return False
         coordinator = state["coordinator"]
+        # The entities were created under the running coordinator's serial; the
+        # placeholder it reports before it knows the panel names none of them.
+        if (reason := stem_problem(coordinator.serial)) is not None:
+            state["abort"] = reason
+            return False
         site: SiteInfo = state["site"]
         panel: PanelInfo = state["panel"]
         try:
@@ -1757,6 +1766,8 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             return self.async_abort(reason="unknown")
         link: PanelLink = self._link["link"]
         plan = self._link_plan()
+        if (reason := plan_problem(plan)) is not None:
+            return self.async_abort(reason=reason)
         if user_input is None:
             placeholders = {name: str(n) for name, n in confirm_counts(plan).items()}
             placeholders["grid_energy_note"] = (
@@ -1788,6 +1799,8 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         entry = self.config_entry
         local = self._local
         assert local is not None  # noqa: S101 — checked by the step that calls this
+        if (reason := plan_problem(plan)) is not None:
+            return self.async_abort(reason=reason)
         registry = er.async_get(self.hass)
         taken = [e.unique_id for e in registry.entities.values() if e.platform == DOMAIN]
         if collisions(plan, taken):

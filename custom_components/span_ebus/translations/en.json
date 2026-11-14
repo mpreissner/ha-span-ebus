@@ -262,7 +262,8 @@
       "link_not_running": "This SPAN account isn't running. Wait for it to load and try again.",
       "link_unreadable": "Couldn't read the panel or its circuits. Nothing was changed. Try again later.",
       "already_configured": "This panel is already set up in Home Assistant.",
-      "unknown": "Unexpected error."
+      "unknown": "Unexpected error.",
+      "link_nothing_matched": "None of this account's entities match the local panel, so nothing was changed. Check that this is the right panel."
     },
     "progress": {
       "link_check": "Reading the panel and matching its circuits. This takes up to 20 seconds."

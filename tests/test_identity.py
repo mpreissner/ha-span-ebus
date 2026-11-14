@@ -298,3 +298,25 @@ def test_cloud_stem_reads_uids_under_the_coordinator_serial():
     plan = rewrite_plan(views, link(), local_rows(), cloud_stem=stem)
     assert [r[0] for r in plan.repoint] == ["sensor.a"]
     assert rewrite_plan(views, link(), local_rows()).repoint[0][0] == "sensor.b"
+
+
+# --- aborts before any write -----------------------------------------------------
+
+
+def test_stem_problem():
+    from span_client.identity import LINK_NOT_RUNNING, PLACEHOLDER_SERIAL, stem_problem
+
+    assert stem_problem(PLACEHOLDER_SERIAL) == LINK_NOT_RUNNING
+    assert stem_problem("") == stem_problem(None) == LINK_NOT_RUNNING
+    assert stem_problem("XC-AAAA") is None
+
+
+def test_plan_problem():
+    from span_client.identity import LINK_NOTHING_MATCHED, plan_problem
+
+    nothing = rewrite_plan(entries("circuit-9/power", *sorted(FALLBACK_ONLY)), link(), local_rows())
+    assert nothing.repoint == ()
+    assert plan_problem(nothing) == LINK_NOTHING_MATCHED
+    assert plan_problem(rewrite_plan(entries(), link(), local_rows())) == LINK_NOTHING_MATCHED
+    some = rewrite_plan(entries("circuit-1/power"), link(), local_rows())
+    assert plan_problem(some) is None

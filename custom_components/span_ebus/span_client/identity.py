@@ -125,6 +125,24 @@ def confirm_counts(plan: RewritePlan) -> dict[str, int]:
     }
 
 
+# What the cloud reports as its serial before it knows the panel's: names no panel.
+PLACEHOLDER_SERIAL = "span-cloud"
+LINK_NOT_RUNNING = "link_not_running"
+LINK_NOTHING_MATCHED = "link_nothing_matched"
+
+
+def stem_problem(stem: str | None) -> str | None:
+    """An abort reason if the cloud entities' uid stem can't name this panel."""
+    if not stem or stem == PLACEHOLDER_SERIAL:
+        return LINK_NOT_RUNNING
+    return None
+
+
+def plan_problem(plan: RewritePlan) -> str | None:
+    """An abort reason if linking would move no entity onto the panel."""
+    return LINK_NOTHING_MATCHED if not plan.repoint else None
+
+
 def transport_uid(panel_key: str) -> str:
     return f"{panel_key}_{_TRANSPORT}"
 
