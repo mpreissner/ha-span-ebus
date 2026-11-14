@@ -1,0 +1,12 @@
+rotate_credentials:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: span_ebus
+    device_id:
+      required: false
+      selector:
+        device:
+          integration: span_ebus

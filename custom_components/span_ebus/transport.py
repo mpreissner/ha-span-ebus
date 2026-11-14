@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -63,8 +63,9 @@ from .span_client.local.health import (
     Transport,
     TransportSwitch,
 )
-from .span_client.local.mqtt import LocalMqtt
+from .span_client.local.mqtt import LocalMqtt, MessageHandler, StateHandler
 from .span_client.local.rest import CannotConnect, OutcomeUnknown
+from .span_client.local.rotation import reauth_due
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -92,6 +93,30 @@ def fallback_issue_id(entry_id: str) -> str:
 def local_tree_store(hass: HomeAssistant, entry_id: str) -> Store:
     """The last descriptions and values of a local panel, for a restart without it."""
     return Store(hass, model.STORE_VERSION, f"{DOMAIN}.{entry_id}.local_tree")
+
+
+def local_mqtt_for(
+    data: Mapping[str, Any],
+    password: str | None,
+    *,
+    on_message: MessageHandler,
+    on_connection: StateHandler | None = None,
+) -> LocalMqtt:
+    """A broker client for a local entry's data, with the given password.
+
+    The transport's own link, and the one-off login that checks a rotated
+    password before the entry is reloaded with it.
+    """
+    return LocalMqtt(
+        host=data[CONF_HOST],
+        port=data[CONF_MQTTS_PORT],
+        username=data[CONF_BROKER_USERNAME],
+        password=password,
+        ca_pem=data[CONF_CA_PEM],
+        client_id=data[CONF_CLIENT_NAME],
+        on_message=on_message,
+        on_connection=on_connection,
+    )
 
 
 class ControlRefused(HomeAssistantError):
@@ -125,16 +150,15 @@ class SpanTransportManager:
         self.health = LocalHealth(time.monotonic())
         self.switch = TransportSwitch(mode if build_cloud is not None else Mode.LOCAL_ONLY)
         self.tree = homie.DeviceTree()
-        self._mqtt = LocalMqtt(
-            host=entry.data[CONF_HOST],
-            port=entry.data[CONF_MQTTS_PORT],
-            username=entry.data[CONF_BROKER_USERNAME],
-            password=entry.data.get(CONF_BROKER_PASSWORD),
-            ca_pem=entry.data[CONF_CA_PEM],
-            client_id=entry.data[CONF_CLIENT_NAME],
+        self._mqtt = local_mqtt_for(
+            entry.data,
+            entry.data.get(CONF_BROKER_PASSWORD),
             on_message=self._on_message,
             on_connection=self._on_connection,
         )
+        # Set for the length of a credential rotation: the old session may be
+        # refused meanwhile, and that must not open a reauth.
+        self.rotating = False
         self._cloud: list[SpanCloudCoordinator] | None = None
         self._cloud_running = False
         # Which cloud circuit and feed stand for which local one. Read once
@@ -251,7 +275,7 @@ class SpanTransportManager:
     async def _evaluate(self, now: float) -> None:
         if self._stopped:
             return
-        if self._mqtt.auth_failed:
+        if reauth_due(self._mqtt.auth_failed, self.rotating):
             if not self._reauth_logged:
                 self._reauth_logged = True
                 _LOGGER.warning("the panel broker refused this entry's credentials")
