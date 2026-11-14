@@ -112,6 +112,7 @@ from .span_client.link import (
     feeds_from_kinds,
     link_to_options,
     match_circuits,
+    serial_check,
     unlinked_entry,
 )
 from .span_client.local import discovery, onboard, tls
@@ -162,6 +163,7 @@ STEP_LINK_SCHEMA = vol.Schema(
 # options: placeholders are not translated.
 LINK_NOTE_SELECTOR = "link_note"
 LINK_NOTE_GRID_ENERGY = "grid_energy"
+LINK_NOTE_SERIAL = "serial_mismatch"
 
 _FEED_POWER = re.compile(r"feed-(\d+)/power")
 
@@ -337,6 +339,13 @@ def _match_placeholders(link: PanelLink, total: int) -> dict[str, str]:
         "total": str(total),
         "unmatched": str(max(total - matched, 0)),
     }
+
+
+def _fill(text: str, placeholders: Mapping[str, str]) -> str:
+    """Put counts into a note: a selector option is not formatted for us."""
+    for name, value in placeholders.items():
+        text = text.replace(f"{{{name}}}", value)
+    return text
 
 
 def _sites_from_token_store(token_path: Path) -> list[SiteInfo]:
@@ -1649,9 +1658,9 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         if not onboard.firmware_supported(status.firmware):
             errors["base"] = "not_supported"
             return None
-        if not panel.answers_to(status.serial):
-            errors["base"] = "wrong_panel"
-            return None
+        # SPAN's account can list the panel under another serial: the circuits
+        # decide once they are read, as when a panel is picked by hand.
+        self._link["serial_mismatch"] = not panel.answers_to(status.serial)
         if self._panel_taken(status.serial, panel.key):
             return self.async_abort(reason="already_configured")
         self._host, self._ca_pem, self._serial = host, ca_pem, status.serial
@@ -1683,7 +1692,10 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
     async def async_step_link_failed(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        return self.async_abort(reason=self._link.pop("abort", "link_unreadable"))
+        return self.async_abort(
+            reason=self._link.pop("abort", "link_unreadable"),
+            description_placeholders=self._link.pop("abort_placeholders", None),
+        )
 
     async def _plan_link(self) -> bool:
         """Read the panel and match it to the cloud's; whether that worked. Never raises."""
@@ -1733,6 +1745,14 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             circuits,
             feeders,
         )
+        total = len(snapshot.circuits)
+        check = serial_check(not state.get("serial_mismatch"), len(link.circuits), total)
+        state["match"] = _match_placeholders(link, total)
+        if check.refuse is not None:
+            _LOGGER.debug("the local panel's circuits don't match the cloud's")
+            state.update(abort=check.refuse, abort_placeholders=state["match"])
+            return False
+        state["serial_note"] = check.note
         upstream, downstream = snapshot.upstream, snapshot.downstream
         target = coordinator.site_history_target()
         link = dataclasses.replace(
@@ -1780,6 +1800,11 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             placeholders = {name: str(n) for name, n in confirm_counts(plan).items()}
             placeholders["grid_energy_note"] = (
                 "" if link.single_panel_site else await self._note(LINK_NOTE_GRID_ENERGY)
+            )
+            placeholders["serial_note"] = (
+                _fill(await self._note(LINK_NOTE_SERIAL), self._link["match"]) + "\n\n"
+                if self._link.get("serial_note")
+                else ""
             )
             return self.async_show_form(
                 step_id="link_confirm",

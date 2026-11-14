@@ -121,6 +121,30 @@ def circuits_verified(matched: int, local_total: int) -> bool:
     return local_total > 0 and 2 * matched >= local_total
 
 
+PANEL_CIRCUITS_MISMATCH = "panel_circuits_mismatch"
+
+
+@dataclass(frozen=True)
+class SerialCheck:
+    """Whether to link a panel the cloud may list under another serial."""
+
+    refuse: str | None  # the abort reason, else None
+    note: bool  # show that the serial differs on the confirm step
+
+
+def serial_check(answers: bool, matched: int, local_total: int) -> SerialCheck:
+    """Accept a panel that answers to the cloud's serial; else only if its circuits agree.
+
+    SPAN's account can list a panel under a serial that differs from the one
+    the panel reports, so a mismatch alone does not refuse the link.
+    """
+    if answers:
+        return SerialCheck(None, note=False)
+    if circuits_verified(matched, local_total):
+        return SerialCheck(None, note=True)
+    return SerialCheck(PANEL_CIRCUITS_MISMATCH, note=False)
+
+
 def feeds_from_kinds(kinds: Mapping[int, int]) -> dict[int, str]:
     """Which cloud feed supplies the panel and which feeds a panel downstream.
 

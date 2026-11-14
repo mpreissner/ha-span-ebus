@@ -10,6 +10,7 @@ from span_client.link import (
     DOWNSTREAM,
     FEEDER_FEEDTHROUGH,
     FEEDER_MAIN_BREAKER,
+    PANEL_CIRCUITS_MISMATCH,
     UPSTREAM,
     HistoryTarget,
     PanelLink,
@@ -21,6 +22,7 @@ from span_client.link import (
     match_circuits,
     migration_ok,
     options_without_link,
+    serial_check,
     unlinked_entry,
 )
 
@@ -229,6 +231,25 @@ def test_unlinked_entry_keeps_the_local_panel_and_drops_the_account():
 )
 def test_circuits_verified_needs_half_the_local_circuits(matched, total, ok):
     assert circuits_verified(matched, total) is ok
+
+
+def test_a_panel_that_answers_to_the_cloud_serial_links_without_a_note():
+    check = serial_check(True, 0, 0)
+    assert check.refuse is None
+    assert check.note is False
+
+
+def test_a_serial_mismatch_links_with_a_note_when_the_circuits_agree():
+    check = serial_check(False, 6, 12)
+    assert check.refuse is None
+    assert check.note is True
+
+
+@pytest.mark.parametrize(("matched", "total"), [(5, 12), (0, 0), (0, 4)])
+def test_a_serial_mismatch_is_refused_when_the_circuits_do_not_agree(matched, total):
+    check = serial_check(False, matched, total)
+    assert check.refuse == PANEL_CIRCUITS_MISMATCH
+    assert check.note is False
 
 
 def test_a_picked_panel_keeps_its_own_cloud_key_and_the_local_serial():

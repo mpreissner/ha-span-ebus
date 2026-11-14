@@ -230,7 +230,7 @@
       },
       "link_confirm": {
         "title": "Link the local panel",
-        "description": "{matched} of {total} entities move onto the local panel and keep their history. {standins} are kept, now fed by the panel. {fallback_only} are only updated while the local connection is down. {unmatched} are no longer updated.\n\nEnergy totals jump once when they switch to the panel's own meters. Home Assistant will offer to fix that in Repairs.\n\n{grid_energy_note}"
+        "description": "{matched} of {total} entities move onto the local panel and keep their history. {standins} are kept, now fed by the panel. {fallback_only} are only updated while the local connection is down. {unmatched} are no longer updated.\n\nEnergy totals jump once when they switch to the panel's own meters. Home Assistant will offer to fix that in Repairs.\n\n{serial_note}{grid_energy_note}"
       }
     },
     "error": {
@@ -246,8 +246,7 @@
       "broker_auth": "The panel registered Home Assistant but its broker refused the login. Try again.",
       "no_ready_state": "Connected to the panel, but it didn't report ready in time. Try again.",
       "panel_unreachable": "Could not reach the panel at that address.",
-      "not_supported": "This panel's firmware doesn't offer the local API yet.",
-      "wrong_panel": "The panel at that address isn't the one on this SPAN account. Check the address."
+      "not_supported": "This panel's firmware doesn't offer the local API yet."
     },
     "abort": {
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
@@ -328,6 +327,7 @@
     },
     "link_note": {
       "options": {
+        "serial_mismatch": "The SPAN account lists this panel under a different serial. {matched} of {total} circuits sit on the same breaker spaces, so it looks like the same panel; check that it is before you submit.",
         "grid_energy": "Site grid energy is one of the sensors only updated while the local connection is down, because this site has several panels. If your Energy dashboard uses it, switch to the panel's imported energy sensor."
       }
     }
