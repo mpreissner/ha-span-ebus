@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import contextlib
 import dataclasses
 import json
 import logging
@@ -1819,24 +1818,46 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         except Exception as err:  # noqa: BLE001 — skipped with no prior reading
             _LOGGER.debug("could not read last energy readings: %s", type(err).__name__)
         applied: list[tuple[str, str, str]] = []
+        devices = dr.async_get(self.hass)
+        merged: tuple[str, set[tuple[str, str]]] | None = None
+        record_store = energy_step.store(self.hass, entry.entry_id) if lasts else None
+        stem: str = self._link["stem"]
+        # One undo for every write: the re-points, the device merge, the
+        # energy-step record and the entry. The entry update comes last, so
+        # whatever fails leaves the entry at the cloud minor version.
         try:
             for entity_id, old, new in plan.changes:
                 registry.async_update_entity(entity_id, new_unique_id=new)
                 applied.append((entity_id, old, new))
-            stem: str = self._link["stem"]
             if stem != local[CONF_LOCAL_SERIAL]:
-                devices = dr.async_get(self.hass)
                 device = devices.async_get_device(identifiers={(DOMAIN, stem)})
                 if device is not None:
+                    merged = (device.id, set(device.identifiers))
                     devices.async_update_device(
                         device.id, merge_identifiers={(DOMAIN, local[CONF_LOCAL_SERIAL])}
                     )
+            if record_store is not None:
+                await record_store.async_save(es.new_record(dt_util.utcnow(), lasts))
+            unmatched = sorted(
+                uid[len(stem) + 1 :]
+                for entity_id in plan.unmatched
+                if (row := registry.async_get(entity_id)) is not None
+                and (uid := row.unique_id).startswith(f"{stem}_")
+            )
+            data = {
+                **entry.data,
+                **local,
+                CONF_CLOUD_STEM: stem,
+                CONF_CLOUD_UNMATCHED: unmatched,
+            }
+            options = link_to_options(
+                {**entry.options, CONF_TRANSPORT_MODE: Mode.LOCAL_FIRST.value}, link
+            )
+            self.hass.config_entries.async_update_entry(
+                entry, data=data, options=options, minor_version=LINKED_MINOR_VERSION
+            )
         except Exception as err:  # noqa: BLE001 — undone and reported as an abort
-            for entity_id, old, _new in reversed(applied):
-                try:
-                    registry.async_update_entity(entity_id, new_unique_id=old)
-                except Exception as undo:  # noqa: BLE001 — keep undoing the rest
-                    _LOGGER.error("could not undo a re-point: %s", type(undo).__name__)
+            await self._undo_link(registry, devices, applied, merged, record_store)
             _LOGGER.error(
                 "linking the local panel failed after %d of %d re-points: %s",
                 len(applied),
@@ -1844,43 +1865,35 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
                 type(err).__name__,
             )
             return self.async_abort(reason="migration_failed")
-        if lasts:
-            await self._save_energy_step(lasts)
-        unmatched = sorted(
-            uid[len(stem) + 1 :]
-            for entity_id in plan.unmatched
-            if (row := registry.async_get(entity_id)) is not None
-            and (uid := row.unique_id).startswith(f"{stem}_")
-        )
-        data = {
-            **entry.data,
-            **local,
-            CONF_CLOUD_STEM: stem,
-            CONF_CLOUD_UNMATCHED: unmatched,
-        }
-        options = link_to_options(
-            {**entry.options, CONF_TRANSPORT_MODE: Mode.LOCAL_FIRST.value}, link
-        )
-        self.hass.config_entries.async_update_entry(
-            entry, data=data, options=options, minor_version=LINKED_MINOR_VERSION
-        )
         self._committed = True
         self.hass.config_entries.async_schedule_reload(entry.entry_id)
         return self.async_create_entry(data=options)
 
-    async def _save_energy_step(self, lasts: dict[str, float | None]) -> None:
-        """Record the last cloud readings, for the fix offered after the first local ones."""
-        record_store = energy_step.store(self.hass, self.config_entry.entry_id)
-        try:
-            await record_store.async_save(es.new_record(dt_util.utcnow(), lasts))
-        except Exception as err:  # noqa: BLE001 — the fix is optional; the link is not
-            _LOGGER.warning(
-                "energy step record for %d entities not saved: %s",
-                len(lasts),
-                type(err).__name__,
-            )
-            with contextlib.suppress(Exception):
+    async def _undo_link(
+        self,
+        registry: er.EntityRegistry,
+        devices: dr.DeviceRegistry,
+        applied: list[tuple[str, str, str]],
+        merged: tuple[str, set[tuple[str, str]]] | None,
+        record_store: Any,
+    ) -> None:
+        """Put back what a failed link wrote, newest first; keep going past errors."""
+        if record_store is not None:
+            try:
                 await record_store.async_remove()
+            except Exception as undo:  # noqa: BLE001 — keep undoing the rest
+                _LOGGER.error("could not remove the energy step record: %s", type(undo).__name__)
+        if merged is not None:
+            device_id, identifiers = merged
+            try:
+                devices.async_update_device(device_id, new_identifiers=identifiers)
+            except Exception as undo:  # noqa: BLE001 — keep undoing the rest
+                _LOGGER.error("could not undo the device merge: %s", type(undo).__name__)
+        for entity_id, old, _new in reversed(applied):
+            try:
+                registry.async_update_entity(entity_id, new_unique_id=old)
+            except Exception as undo:  # noqa: BLE001 — keep undoing the rest
+                _LOGGER.error("could not undo a re-point: %s", type(undo).__name__)
 
     @callback
     def async_remove(self) -> None:
