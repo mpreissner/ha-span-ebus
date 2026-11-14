@@ -210,15 +210,7 @@ async def wait_until_ready(
     return root
 
 
-def panel_root(tree: homie.DeviceTree, serial: str) -> str:
-    """The panel's root device: its serial, or the only root if that differs."""
-    if serial in tree.states or serial in tree.descriptions:
-        return serial
-    roots = tree.roots()
-    return roots[0] if len(roots) == 1 else serial
-
-
-async def read_circuits(
+async def read_snapshot(
     *,
     host: str,
     port: int,
@@ -229,12 +221,12 @@ async def read_circuits(
     serial: str,
     seconds: float = CIRCUIT_READ_SECONDS,
     mqtt_factory: MqttFactory = LocalMqtt,
-) -> Mapping[str, model.CircuitFacts]:
-    """Log in to the broker, gather what it holds, and return the panel's circuits.
+) -> model.Snapshot:
+    """Log in to the broker, gather what it holds, and return the panel's snapshot.
 
-    For checking a cloud panel picked by hand before there is an entry, and so
-    a transport, to read them from. Raises AuthFailed or CannotConnect from the
-    login. The connection is always closed again.
+    For reading a panel before its entry has a transport: checking a cloud
+    panel picked by hand, or planning a cloud entry's link. Raises AuthFailed
+    or CannotConnect from the login. The connection is always closed again.
     """
     tree = homie.DeviceTree()
     broker = mqtt_factory(
@@ -252,7 +244,34 @@ async def read_circuits(
     finally:
         with contextlib.suppress(Exception):
             await broker.stop()
-    return model.build_snapshot(tree, panel_root(tree, serial)).circuits
+    return model.build_snapshot(tree, tree.panel_root(serial))
+
+
+async def read_circuits(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str | None,
+    ca_pem: str,
+    client_id: str,
+    serial: str,
+    seconds: float = CIRCUIT_READ_SECONDS,
+    mqtt_factory: MqttFactory = LocalMqtt,
+) -> Mapping[str, model.CircuitFacts]:
+    """The panel's circuits, read as `read_snapshot` reads them."""
+    snapshot = await read_snapshot(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        ca_pem=ca_pem,
+        client_id=client_id,
+        serial=serial,
+        seconds=seconds,
+        mqtt_factory=mqtt_factory,
+    )
+    return snapshot.circuits
 
 
 def form_error(exc: BaseException) -> tuple[str, dict[str, str]]:

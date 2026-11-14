@@ -121,6 +121,30 @@ def circuits_verified(matched: int, local_total: int) -> bool:
     return local_total > 0 and 2 * matched >= local_total
 
 
+PANEL_CIRCUITS_MISMATCH = "panel_circuits_mismatch"
+
+
+@dataclass(frozen=True)
+class SerialCheck:
+    """Whether to link a panel the cloud may list under another serial."""
+
+    refuse: str | None  # the abort reason, else None
+    note: bool  # show that the serial differs on the confirm step
+
+
+def serial_check(answers: bool, matched: int, local_total: int) -> SerialCheck:
+    """Accept a panel that answers to the cloud's serial; else only if its circuits agree.
+
+    SPAN's account can list a panel under a serial that differs from the one
+    the panel reports, so a mismatch alone does not refuse the link.
+    """
+    if answers:
+        return SerialCheck(None, note=False)
+    if circuits_verified(matched, local_total):
+        return SerialCheck(None, note=True)
+    return SerialCheck(PANEL_CIRCUITS_MISMATCH, note=False)
+
+
 def feeds_from_kinds(kinds: Mapping[int, int]) -> dict[int, str]:
     """Which cloud feed supplies the panel and which feeds a panel downstream.
 
@@ -135,6 +159,54 @@ def feeds_from_kinds(kinds: Mapping[int, int]) -> dict[int, str]:
             feeds[instance] = DOWNSTREAM
     if not feeds and len(kinds) == 1:
         feeds[next(iter(kinds))] = UPSTREAM
+    return feeds
+
+
+# Value check: a feed is within this band of a lugs row's power to be taken for
+# it, and the two lugs rows must differ by more than the floor to tell apart.
+_BAND_FLOOR_W = 50.0
+_BAND_FRACTION = 0.1
+_INDISTINCT_W = 100.0
+
+
+def _near(feed_w: float, lugs_w: float) -> bool:
+    band = max(_BAND_FLOOR_W, _BAND_FRACTION * abs(lugs_w))
+    return abs(abs(feed_w) - abs(lugs_w)) <= band
+
+
+def classify_feeds(
+    kinds: Mapping[int, int | None],
+    means: Mapping[int, float],
+    upstream_w: float | None,
+    downstream_w: float | None,
+) -> dict[int, str]:
+    """Which cloud feed is U and which D: by feeder kind, else by value.
+
+    `kinds` is each feed's trait kind (None if not known), `means` its mean
+    cloud power over the link window, and `upstream_w`/`downstream_w` the
+    local lugs' mean active power over the same window (None if the panel has
+    no such lugs). A kind always wins. Otherwise a feed is assigned to the lugs
+    row whose band it falls in and not the other's; magnitudes are compared,
+    since the feed's sign is normalised differently. If the two lugs rows are
+    within 100 W of each other nothing is classified by value. Feeds left out
+    of the result are unclassified.
+    """
+    instances = set(kinds) | set(means)
+    feeds = feeds_from_kinds({n: kinds.get(n) or 0 for n in sorted(instances)})
+    if upstream_w is None:
+        return feeds
+    if downstream_w is not None and abs(abs(upstream_w) - abs(downstream_w)) <= _INDISTINCT_W:
+        return feeds
+    for n in sorted(instances - set(feeds)):
+        mean = means.get(n)
+        if mean is None:
+            continue
+        near_u = _near(mean, upstream_w)
+        near_d = downstream_w is not None and _near(mean, downstream_w)
+        if near_u and not near_d:
+            feeds[n] = UPSTREAM
+        elif near_d and not near_u:
+            feeds[n] = DOWNSTREAM
     return feeds
 
 

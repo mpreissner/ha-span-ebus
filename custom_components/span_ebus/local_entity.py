@@ -29,11 +29,13 @@ from homeassistant.const import (
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_call_later
 
-from .const import CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER
+from .const import CONF_CLOUD_STEM, CONF_CLOUD_UNMATCHED, CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER
+from .span_client import standin
 from .span_client.fallback import RELAY
 from .span_client.local import model
 from .span_client.local.health import Transport
@@ -347,6 +349,63 @@ def async_track_panel_device(
     entry.async_on_unload(transport.async_add_model_listener(update))
 
 
+@dataclass(frozen=True, slots=True)
+class KeptEntry:
+    """A cloud entity a link kept on its cloud uid, as the registry holds it."""
+
+    suffix: str
+    kind: str  # standin.STANDIN, FALLBACK or UNMATCHED
+    unique_id: str
+    name: str | None
+    device_class: str | None
+
+
+def kept_cloud_entries(hass: HomeAssistant, entry: ConfigEntry, domain: str) -> list[KeptEntry]:
+    """This platform's kept cloud entities, for a cloud entry linked to its panel.
+
+    Read from the registry, so only entities that already exist are built and
+    each keeps its enabled state. Empty for an entry that was never linked.
+    """
+    stem = entry.data.get(CONF_CLOUD_STEM)
+    if not stem:
+        return []
+    prefix = f"{stem}_"
+    rows = {
+        row.unique_id[len(prefix) :]: row
+        for row in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+        if row.domain == domain and row.platform == DOMAIN and row.unique_id.startswith(prefix)
+    }
+    kinds = standin.classify_kept(rows, entry.data.get(CONF_CLOUD_UNMATCHED) or ())
+    return [
+        KeptEntry(
+            suffix=suffix,
+            kind=kind,
+            unique_id=rows[suffix].unique_id,
+            name=rows[suffix].original_name,
+            device_class=rows[suffix].original_device_class,
+        )
+        for suffix, kind in sorted(kinds.items())
+    ]
+
+
+class SpanUnmatchedEntity(Entity):
+    """A kept cloud entity of a circuit the link could not pair: never fed.
+
+    Kept so its history and automations are not orphaned; always unavailable.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_available = False
+
+    def __init__(
+        self, entry: ConfigEntry, transport: SpanTransportManager, kept: KeptEntry
+    ) -> None:
+        self._attr_unique_id = kept.unique_id
+        self._attr_name = kept.name
+        self._attr_device_info = panel_device_info(entry, transport.snapshot)
+
+
 type EntityFactory = Callable[[ConfigEntry, SpanTransportManager, Row, str], Entity]
 
 
@@ -357,11 +416,13 @@ def async_setup_local(
     async_add_entities: AddEntitiesCallback,
     platform: str,
     factory: EntityFactory,
+    skip: frozenset[tuple[Scope, str]] = frozenset(),
 ) -> None:
     """Create this platform's local entities now and as devices are described.
 
     Entities are never removed here: one whose device or property vanishes
-    becomes unavailable.
+    becomes unavailable. Rows in `skip` (scope, key) are left out: a kept
+    cloud entity shows their value instead.
     """
     known: set[str] = set()
 
@@ -369,7 +430,7 @@ def async_setup_local(
     def add(snapshot: Snapshot) -> None:
         new: list[Entity] = []
         for row in model.ROWS:
-            if row.platform != platform:
+            if row.platform != platform or (row.scope, row.key) in skip:
                 continue
             for device_id in model.row_devices(snapshot, row):
                 uid = model.row_uid(row, transport.panel_key, device_id)

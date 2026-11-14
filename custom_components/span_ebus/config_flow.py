@@ -12,6 +12,7 @@ import binascii
 import dataclasses
 import json
 import logging
+import re
 import tempfile
 import uuid
 from collections.abc import Mapping
@@ -20,10 +21,17 @@ from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant.components import zeroconf as ha_zeroconf
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    SOURCE_IGNORE,
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     SelectOptionDict,
@@ -34,10 +42,12 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.helpers.translation import async_get_translations
 from homeassistant.util import dt as dt_util
 from zeroconf import IPVersion, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo
 
+from . import energy_step, recorder_api
 from .const import (
     CLOUD_DATA_KEYS,
     CLOUD_OPTION_KEYS,
@@ -46,6 +56,8 @@ from .const import (
     CONF_BROKER_USERNAME,
     CONF_CA_PEM,
     CONF_CLIENT_NAME,
+    CONF_CLOUD_STEM,
+    CONF_CLOUD_UNMATCHED,
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_EMAIL,
@@ -63,7 +75,9 @@ from .const import (
     TOKEN_DIR,
 )
 from .span_client import cloud_auth, feeds
+from .span_client import energy_step as es
 from .span_client.backend import (
+    SITE_NODE,
     CloudBackend,
     PanelInfo,
     SiteInfo,
@@ -76,15 +90,30 @@ from .span_client.backend import (
     panel_traits,
     primary_panel_for,
     same_serial,
+    serial_taken,
+    sibling_answers,
+)
+from .span_client.identity import (
+    RegistryEntryView,
+    RewritePlan,
+    collisions,
+    confirm_counts,
+    local_rows,
+    plan_problem,
+    rewrite_plan,
+    stem_problem,
 )
 from .span_client.link import (
     LINKED_MINOR_VERSION,
     UNLINKED_MINOR_VERSION,
+    HistoryTarget,
     PanelLink,
     circuits_verified,
+    classify_feeds,
     feeds_from_kinds,
     link_to_options,
     match_circuits,
+    serial_check,
     unlinked_entry,
 )
 from .span_client.local import discovery, onboard, tls
@@ -121,6 +150,38 @@ STEP_USER_SCHEMA = vol.Schema(
 
 
 STEP_HOST_SCHEMA = vol.Schema({vol.Required(CONF_HOST): TextSelector()})
+# The passphrase is never stored or logged, as below.
+STEP_LINK_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_HOST): TextSelector(),
+        vol.Required(CONF_PASSPHRASE): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
+    }
+)
+
+# Lines of text a link step shows inside a placeholder are kept as selector
+# options: placeholders are not translated.
+LINK_NOTE_SELECTOR = "link_note"
+LINK_NOTE_GRID_ENERGY = "grid_energy"
+LINK_NOTE_SERIAL = "serial_mismatch"
+
+_FEED_POWER = re.compile(r"feed-(\d+)/power")
+
+
+def _feed_powers(data: Mapping[str, Any] | None) -> dict[int, float]:
+    """Each cloud feed's current power, from the coordinator's readings."""
+    powers: dict[int, float] = {}
+    for key, reading in (data or {}).items():
+        if (m := _FEED_POWER.fullmatch(key)) is None:
+            continue
+        try:
+            powers[int(m.group(1))] = float(reading.value)
+        except (TypeError, ValueError):
+            continue
+    return powers
+
+
 # Never stored or logged: it buys a client registration and is dropped.
 STEP_PASSPHRASE_SCHEMA = vol.Schema(
     {
@@ -239,6 +300,21 @@ def _pick_schema(labels: dict[str, str]) -> vol.Schema:
     return vol.Schema({vol.Required(PICKED_PANEL): _select(labels)})
 
 
+# Setup's pick also offers to skip the cloud and keep the panel local only.
+PICK_LOCAL_ONLY = "local_only"
+
+
+def _setup_pick_schema(labels: dict[str, str]) -> vol.Schema:
+    options = [SelectOptionDict(value=key, label=label) for key, label in labels.items()]
+    options.append(SelectOptionDict(value=PICK_LOCAL_ONLY, label=PICK_LOCAL_ONLY))
+    selector = SelectSelector(
+        SelectSelectorConfig(
+            options=options, mode=SelectSelectorMode.LIST, translation_key="cloud_pick_panel"
+        )
+    )
+    return vol.Schema({vol.Required(PICKED_PANEL): selector})
+
+
 def _matched_link(
     link: PanelLink,
     local: Mapping[str, Any],
@@ -264,6 +340,13 @@ def _match_placeholders(link: PanelLink, total: int) -> dict[str, str]:
         "total": str(total),
         "unmatched": str(max(total - matched, 0)),
     }
+
+
+def _fill(text: str, placeholders: Mapping[str, str]) -> str:
+    """Put counts into a note: a selector option is not formatted for us."""
+    for name, value in placeholders.items():
+        text = text.replace(f"{{{name}}}", value)
+    return text
 
 
 def _sites_from_token_store(token_path: Path) -> list[SiteInfo]:
@@ -382,7 +465,165 @@ class _FeedSteps:
         )
 
 
-class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
+async def _browse_panels(hass: HomeAssistant) -> list[discovery.Candidate]:
+    """Ask Home Assistant's shared zeroconf for `_ebus._tcp` panels."""
+    aiozc = await ha_zeroconf.async_get_async_instance(hass)
+    names: set[str] = set()
+
+    def on_change(
+        zeroconf: Any, service_type: str, name: str, state_change: ServiceStateChange
+    ) -> None:
+        if state_change is not ServiceStateChange.Removed:
+            names.add(name)
+
+    browser = AsyncServiceBrowser(aiozc.zeroconf, [discovery.SERVICE_TYPE], handlers=[on_change])
+    try:
+        await asyncio.sleep(BROWSE_SECONDS)
+    finally:
+        await browser.async_cancel()
+
+    async def resolve(name: str) -> list[discovery.Candidate]:
+        info = AsyncServiceInfo(discovery.SERVICE_TYPE, name)
+        if not await info.async_request(aiozc.zeroconf, RESOLVE_MS):
+            return []
+        label = discovery.instance_name(name)
+        return [
+            discovery.Candidate(address, label)
+            for address in info.parsed_scoped_addresses(IPVersion.V4Only)
+        ]
+
+    # All at once, so several panels cost one resolve timeout, not several;
+    # one that will not resolve is left out rather than spoiling the rest.
+    results = await asyncio.gather(
+        *(resolve(name) for name in sorted(names)), return_exceptions=True
+    )
+    found: list[discovery.Candidate] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            _LOGGER.debug("could not resolve a discovered panel: %s", type(result).__name__)
+        else:
+            found.extend(result)
+    return found
+
+
+class _LocalRegistration:
+    """Registering a client with a panel, shared by setup and the options' link step."""
+
+    hass: HomeAssistant
+
+    def __init__(self) -> None:
+        super().__init__()
+        # The panel being registered: where it is and its pinned CA, then,
+        # once registered, the entry data for it.
+        self._host = ""
+        self._ca_pem = ""
+        self._serial = ""
+        self._local: dict[str, Any] | None = None
+        self._committed = False
+        # Names registered whose outcome was never confirmed; removed with
+        # the token of the registration that does succeed.
+        self._unconfirmed: list[str] = []
+
+    def _session(self) -> Any:
+        return async_get_clientsession(self.hass)
+
+    async def _register(self, passphrase: str) -> dict[str, Any]:
+        """Register a client and prove its broker login; the local entry data.
+
+        A registration that fails the broker test is removed again, and so is
+        every earlier one whose outcome was never confirmed.
+        """
+        session = self._session()
+        registration, name = await onboard.register_client(
+            session,
+            self._host,
+            self._ca_pem,
+            onboard.new_client_name(),
+            passphrase,
+            unconfirmed=self._unconfirmed,
+        )
+        token = registration.access_token
+        stale, self._unconfirmed = self._unconfirmed, []
+        for old in stale:
+            await onboard.discard_client(session, self._host, self._ca_pem, token, old)
+        try:
+            if registration.serial != self._serial:
+                raise UnexpectedResponse("registration is for another panel")
+            await onboard.wait_until_ready(registration, self._host, self._ca_pem, name)
+        except asyncio.CancelledError:
+            # The flow is going away: don't await on a cancelled task.
+            self.hass.async_create_background_task(
+                onboard.discard_client(session, self._host, self._ca_pem, token, name),
+                "span_ebus remove unused client",
+            )
+            raise
+        except Exception:
+            await onboard.discard_client(session, self._host, self._ca_pem, token, name)
+            raise
+        return {
+            CONF_HOST: self._host,
+            CONF_LOCAL_SERIAL: self._serial,
+            CONF_CA_PEM: self._ca_pem,
+            CONF_CLIENT_NAME: name,
+            CONF_ACCESS_TOKEN: registration.access_token,
+            CONF_BROKER_USERNAME: registration.broker_username,
+            CONF_BROKER_PASSWORD: registration.broker_password,
+            CONF_MQTTS_PORT: registration.mqtts_port,
+        }
+
+    async def _passphrase_step(
+        self, step_id: str, user_input: dict[str, Any] | None
+    ) -> tuple[dict[str, Any] | None, ConfigFlowResult | None]:
+        """Ask for the passphrase until a client registers.
+
+        Returns the entry data once registered, else the form to show.
+        """
+        errors: dict[str, str] = {}
+        placeholders = {"retry_after": "60", "host": self._host}
+        if user_input is not None:
+            data = await self._try_register(user_input[CONF_PASSPHRASE], errors, placeholders)
+            if data is not None:
+                return data, None
+        placeholders["fingerprint"] = tls.ca_fingerprint(self._ca_pem)
+        return None, self.async_show_form(
+            step_id=step_id,
+            data_schema=STEP_PASSPHRASE_SCHEMA,
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def _try_register(
+        self, passphrase: str, errors: dict[str, str], placeholders: dict[str, str]
+    ) -> dict[str, Any] | None:
+        """The entry data once registered, else None with the form error set."""
+        try:
+            return await self._register(passphrase)
+        except SpanLocalError as exc:
+            errors["base"], extra = onboard.form_error(exc)
+            placeholders.update(extra)
+        except Exception:
+            _LOGGER.exception("unexpected error registering with a SPAN panel")
+            errors["base"] = "unknown"
+        return None
+
+    def _discard_local(self) -> None:
+        """Unregister the client of a flow that left before saving it."""
+        if self._local is None or self._committed:
+            return
+        local, self._local = self._local, None
+        self.hass.async_create_background_task(
+            onboard.discard_client(
+                self._session(),
+                local[CONF_HOST],
+                local[CONF_CA_PEM],
+                local[CONF_ACCESS_TOKEN],
+                local[CONF_CLIENT_NAME],
+            ),
+            "span_ebus remove unused client",
+        )
+
+
+class SpanEbusConfigFlow(_FeedSteps, _LocalRegistration, ConfigFlow, domain=DOMAIN):
     """Handle the SPAN eBus config, discovery, reauth and reconfigure flows.
 
     A panel is added over its local API (host, then passphrase) with the cloud
@@ -396,19 +637,9 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         self._reauth_entry_data: Mapping[str, Any] | None = None
         self._entry_data: dict[str, Any] = {}
         self._token = ""
-        # The panel being added locally: where it is and its pinned CA, then,
-        # once registered, the entry data for it.
-        self._host = ""
         self._candidates: list[discovery.Candidate] = []
-        self._ca_pem = ""
-        self._serial = ""
-        self._local: dict[str, Any] | None = None
-        self._committed = False
         # Setup with the cloud when SPAN lists no panel under the local serial.
         self._pick: dict[str, Any] = {}
-        # Names registered whose outcome was never confirmed; removed with
-        # the token of the registration that does succeed.
-        self._unconfirmed: list[str] = []
 
     @staticmethod
     @callback
@@ -426,9 +657,6 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         return self.async_show_menu(step_id="user", menu_options=["local", "cloud"])
 
     # --- local ------------------------------------------------------------------
-
-    def _session(self) -> Any:
-        return async_get_clientsession(self.hass)
 
     async def async_step_local(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Offer the panels found on the network; ask for an address if there are none."""
@@ -485,6 +713,8 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(status.serial, raise_on_progress=False)
                 # No host update here: only the pinned CA proves it is the same panel.
                 self._abort_if_unique_id_configured()
+                if self._local_serial_taken(status.serial):
+                    return self.async_abort(reason="already_configured")
                 if self._cloud_runs_panel(status.serial):
                     return self.async_abort(reason="cloud_account_configured")
                 self._host, self._ca_pem, self._serial = host, ca_pem, status.serial
@@ -526,46 +756,7 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         )
 
     async def _browse(self) -> list[discovery.Candidate]:
-        """Ask Home Assistant's shared zeroconf for `_ebus._tcp` panels."""
-        aiozc = await ha_zeroconf.async_get_async_instance(self.hass)
-        names: set[str] = set()
-
-        def on_change(
-            zeroconf: Any, service_type: str, name: str, state_change: ServiceStateChange
-        ) -> None:
-            if state_change is not ServiceStateChange.Removed:
-                names.add(name)
-
-        browser = AsyncServiceBrowser(
-            aiozc.zeroconf, [discovery.SERVICE_TYPE], handlers=[on_change]
-        )
-        try:
-            await asyncio.sleep(BROWSE_SECONDS)
-        finally:
-            await browser.async_cancel()
-
-        async def resolve(name: str) -> list[discovery.Candidate]:
-            info = AsyncServiceInfo(discovery.SERVICE_TYPE, name)
-            if not await info.async_request(aiozc.zeroconf, RESOLVE_MS):
-                return []
-            label = discovery.instance_name(name)
-            return [
-                discovery.Candidate(address, label)
-                for address in info.parsed_scoped_addresses(IPVersion.V4Only)
-            ]
-
-        # All at once, so several panels cost one resolve timeout, not several;
-        # one that will not resolve is left out rather than spoiling the rest.
-        results = await asyncio.gather(
-            *(resolve(name) for name in sorted(names)), return_exceptions=True
-        )
-        found: list[discovery.Candidate] = []
-        for result in results:
-            if isinstance(result, BaseException):
-                _LOGGER.debug("could not resolve a discovered panel: %s", type(result).__name__)
-            else:
-                found.extend(result)
-        return found
+        return await _browse_panels(self.hass)
 
     async def async_step_local_unsupported(
         self, user_input: dict[str, Any] | None = None
@@ -580,6 +771,15 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
             _is_cloud_account(entry.data) and _account_has_panel(entry, serial)
             for entry in self._async_current_entries(include_ignore=False)
         )
+
+    def _local_serial_taken(self, serial: str) -> bool:
+        """Whether an entry already runs this panel locally under another unique id.
+
+        A cloud account entry that was given its panel keeps the account's
+        unique id, so the panel's serial is only in its data.
+        """
+        entries = self._async_current_entries(include_ignore=False)
+        return serial_taken([], [entry.data.get(CONF_LOCAL_SERIAL) for entry in entries], [serial])
 
     async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo) -> ConfigFlowResult:
         host = str(discovery_info.host)
@@ -608,81 +808,11 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="not_supported")
         await self.async_set_unique_id(status.serial)
         self._abort_if_unique_id_configured()
-        if self._cloud_runs_panel(status.serial):
+        if self._local_serial_taken(status.serial) or self._cloud_runs_panel(status.serial):
             return self.async_abort(reason="already_configured")
         self._host, self._ca_pem, self._serial = host, ca_pem, status.serial
         self.context["title_placeholders"] = {"host": host}
         return await self.async_step_local_auth()
-
-    async def _register(self, passphrase: str) -> dict[str, Any]:
-        """Register a client and prove its broker login; the local entry data.
-
-        A registration that fails the broker test is removed again, and so is
-        every earlier one whose outcome was never confirmed.
-        """
-        session = self._session()
-        registration, name = await onboard.register_client(
-            session,
-            self._host,
-            self._ca_pem,
-            onboard.new_client_name(),
-            passphrase,
-            unconfirmed=self._unconfirmed,
-        )
-        token = registration.access_token
-        stale, self._unconfirmed = self._unconfirmed, []
-        for old in stale:
-            await onboard.discard_client(session, self._host, self._ca_pem, token, old)
-        try:
-            if registration.serial != self._serial:
-                raise UnexpectedResponse("registration is for another panel")
-            await onboard.wait_until_ready(registration, self._host, self._ca_pem, name)
-        except asyncio.CancelledError:
-            # The flow is going away: don't await on a cancelled task.
-            self.hass.async_create_background_task(
-                onboard.discard_client(session, self._host, self._ca_pem, token, name),
-                "span_ebus remove unused client",
-            )
-            raise
-        except Exception:
-            await onboard.discard_client(session, self._host, self._ca_pem, token, name)
-            raise
-        return {
-            CONF_HOST: self._host,
-            CONF_LOCAL_SERIAL: self._serial,
-            CONF_CA_PEM: self._ca_pem,
-            CONF_CLIENT_NAME: name,
-            CONF_ACCESS_TOKEN: registration.access_token,
-            CONF_BROKER_USERNAME: registration.broker_username,
-            CONF_BROKER_PASSWORD: registration.broker_password,
-            CONF_MQTTS_PORT: registration.mqtts_port,
-        }
-
-    async def _passphrase_step(
-        self, step_id: str, user_input: dict[str, Any] | None
-    ) -> tuple[dict[str, Any] | None, ConfigFlowResult | None]:
-        """Ask for the passphrase until a client registers.
-
-        Returns the entry data once registered, else the form to show.
-        """
-        errors: dict[str, str] = {}
-        placeholders = {"retry_after": "60", "host": self._host}
-        if user_input is not None:
-            try:
-                return await self._register(user_input[CONF_PASSPHRASE]), None
-            except SpanLocalError as exc:
-                errors["base"], extra = onboard.form_error(exc)
-                placeholders.update(extra)
-            except Exception:
-                _LOGGER.exception("unexpected error registering with a SPAN panel")
-                errors["base"] = "unknown"
-        placeholders["fingerprint"] = tls.ca_fingerprint(self._ca_pem)
-        return None, self.async_show_form(
-            step_id=step_id,
-            data_schema=STEP_PASSPHRASE_SCHEMA,
-            errors=errors,
-            description_placeholders=placeholders,
-        )
 
     async def async_step_local_auth(
         self, user_input: dict[str, Any] | None = None
@@ -719,19 +849,9 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
     @callback
     def async_remove(self) -> None:
         """A flow left before its entry was made: unregister its client."""
-        if self._local is None or self._committed:
-            return
-        local, self._local = self._local, None
-        self.hass.async_create_background_task(
-            onboard.discard_client(
-                self._session(),
-                local[CONF_HOST],
-                local[CONF_CA_PEM],
-                local[CONF_ACCESS_TOKEN],
-                local[CONF_CLIENT_NAME],
-            ),
-            "span_ebus remove unused client",
-        )
+        if (task := self._pick.get("task")) is not None:
+            task.cancel()
+        self._discard_local()
 
     async def _link_cloud(
         self, local: dict[str, Any], cloud: dict[str, Any], token: str
@@ -777,21 +897,66 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
     async def async_step_cloud_pick_panel(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Which of the account's panels this one is, when no serial matches."""
+        """Which of the account's panels this one is, when no serial matches.
+
+        A pick that fails comes back here with the error, and the panel's
+        registration is kept: the user can pick again or keep it local only.
+        """
         local, pick = self._local, self._pick
         if local is None or not pick:
             return self.async_abort(reason="unknown")
         sites: list[SiteInfo] = pick["sites"]
-        if user_input is None:
-            return self.async_show_form(
-                step_id="cloud_pick_panel", data_schema=_pick_schema(panel_labels(sites))
+        if user_input is not None:
+            choice = user_input[PICKED_PANEL]
+            if choice == PICK_LOCAL_ONLY:
+                return await self.async_step_local_only()
+            found = find_panel(sites, choice)
+            if found is None:
+                pick["error"] = ("panel_not_on_account", {})
+            elif self._cloud_runs_panel(found[1].key):
+                pick["error"] = ("panel_on_cloud_entry", {})
+            else:
+                pick["task"] = self.hass.async_create_task(
+                    self._check_pick(*found), f"{DOMAIN} check picked panel"
+                )
+                return await self.async_step_cloud_pick_check()
+        error, placeholders = pick.pop("error", (None, {}))
+        return self.async_show_form(
+            step_id="cloud_pick_panel",
+            data_schema=_setup_pick_schema(panel_labels(sites)),
+            errors={"base": error} if error else None,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_cloud_pick_check(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show progress while the picked panel's circuits are read (5-20 s)."""
+        task: asyncio.Task[tuple[str | None, dict[str, str], PanelLink | None]] | None = (
+            self._pick.get("task")
+        )
+        if task is None:
+            return self.async_abort(reason="unknown")
+        if not task.done():
+            return self.async_show_progress(
+                step_id="cloud_pick_check",
+                progress_action="check_circuits",
+                progress_task=task,
             )
-        found = find_panel(sites, user_input[PICKED_PANEL])
-        if found is None:
-            return self.async_abort(reason="panel_not_on_account")
-        site, panel = found
-        if self._cloud_runs_panel(panel.key):
-            return self.async_abort(reason="panel_on_cloud_entry")
+        del self._pick["task"]
+        error, placeholders, link = task.result()
+        if error is not None or link is None:
+            self._pick["error"] = (error or "panel_unverified", placeholders)
+            return self.async_show_progress_done(next_step_id="cloud_pick_panel")
+        self._pick.update(link=link, placeholders=placeholders)
+        return self.async_show_progress_done(next_step_id="cloud_pick_confirm")
+
+    async def _check_pick(
+        self, site: SiteInfo, panel: PanelInfo
+    ) -> tuple[str | None, dict[str, str], PanelLink | None]:
+        """(error key or None, placeholders, link): never raises."""
+        local, pick = self._local, self._pick
+        assert local is not None  # noqa: S101 — checked by the step that starts this
         cloud = pick["cloud"]
         try:
             # No entry yet, so no transport: read the circuits straight off
@@ -817,17 +982,14 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
             )
         except Exception as err:  # noqa: BLE001 — without circuits there's no check
             _LOGGER.debug("could not read circuits to check the panel: %s", type(err).__name__)
-            return self.async_abort(reason="panel_unverified")
+            return "panel_unverified", {}, None
         link = _matched_link(
             _new_link(panel.key, local[CONF_LOCAL_SERIAL], site), local_circuits, circuits, feeders
         )
         placeholders = _match_placeholders(link, len(local_circuits))
         if not circuits_verified(len(link.circuits), len(local_circuits)):
-            return self.async_abort(
-                reason="panel_circuits_mismatch", description_placeholders=placeholders
-            )
-        pick.update(link=link, placeholders=placeholders)
-        return await self.async_step_cloud_pick_confirm()
+            return "panel_circuits_mismatch", placeholders, None
+        return None, placeholders, link
 
     async def async_step_cloud_pick_confirm(
         self, user_input: dict[str, Any] | None = None
@@ -1077,7 +1239,7 @@ class SpanEbusConfigFlow(_FeedSteps, ConfigFlow, domain=DOMAIN):
         )
 
 
-class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
+class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
     """Change which of the account's panels run here, and what feeds them."""
 
     def __init__(self) -> None:
@@ -1085,6 +1247,8 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
         self._chosen: list[str] = []
         # "Add cloud fallback": what the sign-in found, kept for the confirm step.
         self._add: dict[str, Any] = {}
+        # "Link the local panel": the cloud panel, its coordinator and the plan.
+        self._link: dict[str, Any] = {}
 
     def _token_path(self) -> Path:
         return Path(self.hass.config.path(TOKEN_DIR)) / f"{self.config_entry.entry_id}.json"
@@ -1100,6 +1264,9 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
             return await self.async_step_linked()
         if CONF_LOCAL_SERIAL in self.config_entry.data:
             return await self.async_step_cloud_add()
+        return self.async_show_menu(step_id="init", menu_options=["panels", "link_local"])
+
+    async def async_step_panels(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is None:
             try:
@@ -1125,7 +1292,7 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
             else:
                 return await self._ask_feeds()
         return self.async_show_form(
-            step_id="init", data_schema=_panels_schema(self._labels, self._ticked), errors=errors
+            step_id="panels", data_schema=_panels_schema(self._labels, self._ticked), errors=errors
         )
 
     async def async_step_transport(
@@ -1362,6 +1529,418 @@ class SpanEbusOptionsFlow(_FeedSteps, OptionsFlow):
         await self.hass.async_add_executor_job(cloud_auth.discard_tokens, self._token_path())
         self.hass.config_entries.async_schedule_reload(entry.entry_id)
         return self.async_create_entry(data=options)
+
+    # --- a cloud entry gets its local panel -----------------------------------
+
+    def _coordinator_for(self, key: str) -> Any:
+        """The running cloud coordinator of the entry's one panel, or None."""
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        coordinators = list(runtime.coordinators) if runtime is not None else []
+        for coordinator in coordinators:
+            if coordinator.cloud_key == key:
+                return coordinator
+        # A lone coordinator is expected not to match: the stem is the entity
+        # uid prefix, not the link key, so the one panel is the right one.
+        return coordinators[0] if len(coordinators) == 1 else None
+
+    async def _link_prechecks(self) -> str | None:
+        """Find the entry's panel and its coordinator; an abort reason if they can't be."""
+        panels = list(self.config_entry.options.get(CONF_PANELS) or [])
+        if len(panels) != 1:
+            return "multi_panel_upgrade"
+        coordinator = self._coordinator_for(panels[0])
+        if coordinator is None:
+            return "link_not_running"
+        if (reason := stem_problem(coordinator.serial)) is not None:
+            return reason
+        try:
+            sites = await self.hass.async_add_executor_job(
+                _sites_from_token_store, self._token_path()
+            )
+        except Exception as err:  # noqa: BLE001 — nothing to link without the account
+            _LOGGER.debug("could not list SPAN panels: %s", type(err).__name__)
+            return "cannot_connect"
+        found = find_panel(sites, panels[0])
+        if found is None:
+            return "panel_not_on_account"
+        site, panel = found
+        self._link = {
+            "sites": sites,
+            "site": site,
+            "panel": panel,
+            "coordinator": coordinator,
+            "host": await self._suggest_host(panel),
+        }
+        return None
+
+    async def _suggest_host(self, panel: PanelInfo) -> str:
+        """The address of the one unconfigured panel on the network that may be this one."""
+        try:
+            found = await _browse_panels(self.hass)
+        except Exception as err:  # noqa: BLE001 — the user types the address instead
+            _LOGGER.debug("mDNS browse for SPAN panels failed: %s", type(err).__name__)
+            return ""
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        offer = discovery.offerable(
+            found,
+            configured_hosts=[e.data[CONF_HOST] for e in entries if CONF_HOST in e.data],
+            configured_serials=[
+                serial
+                for e in entries
+                for serial in (e.unique_id, e.data.get(CONF_LOCAL_SERIAL))
+                if serial
+            ],
+        )
+        mine = [c for c in offer if c.serial is None or panel.answers_to(c.serial)]
+        return mine[0].host if len(mine) == 1 else ""
+
+    def _panel_taken(self, serial: str, key: str) -> bool:
+        """Whether another entry already runs this panel, locally or over the cloud.
+
+        The panel goes by its local serial and by the cloud's key, which can
+        differ, so both are checked.
+        """
+        others = [
+            entry
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+            if entry.entry_id != self.config_entry.entry_id and entry.source != SOURCE_IGNORE
+        ]
+        if serial_taken(
+            [entry.unique_id for entry in others],
+            [entry.data.get(CONF_LOCAL_SERIAL) for entry in others],
+            [serial, key],
+        ):
+            return True
+        return any(
+            _is_cloud_account(entry.data)
+            and (_account_has_panel(entry, serial) or _account_has_panel(entry, key))
+            for entry in others
+        )
+
+    async def async_step_link_local(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Where the panel is and its passphrase: register a client with it."""
+        errors: dict[str, str] = {}
+        placeholders = {"retry_after": "60"}
+        if not self._link and (reason := await self._link_prechecks()) is not None:
+            return self.async_abort(reason=reason)
+        host = self._link.get("host", "")
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            result = await self._link_register(
+                host, user_input[CONF_PASSPHRASE], errors, placeholders
+            )
+            if result is not None:
+                return result
+        return self.async_show_form(
+            step_id="link_local",
+            data_schema=self.add_suggested_values_to_schema(STEP_LINK_SCHEMA, {CONF_HOST: host}),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def _link_register(
+        self, host: str, passphrase: str, errors: dict[str, str], placeholders: dict[str, str]
+    ) -> ConfigFlowResult | None:
+        """Probe the host and register; the next step, else None with the form error set."""
+        panel: PanelInfo = self._link["panel"]
+        try:
+            status, ca_pem = await onboard.probe_panel(self._session(), host)
+        except NotFound:
+            errors["base"] = "not_supported"
+            return None
+        except UnexpectedResponse:
+            errors["base"] = "not_a_panel"
+            return None
+        except SpanLocalError as exc:
+            errors["base"], extra = onboard.form_error(exc)
+            placeholders.update(extra)
+            return None
+        if not onboard.firmware_supported(status.firmware):
+            errors["base"] = "not_supported"
+            return None
+        if sibling_answers(self._link["sites"], panel.key, status.serial):
+            # Space numbers can overlap between panels, so the circuit check
+            # alone could take a sibling for this one.
+            return self.async_abort(reason="link_other_panel")
+        # SPAN's account can list the panel under another serial: the circuits
+        # decide once they are read, as when a panel is picked by hand.
+        self._link["serial_mismatch"] = not panel.answers_to(status.serial)
+        if self._panel_taken(status.serial, panel.key):
+            return self.async_abort(reason="already_configured")
+        self._host, self._ca_pem, self._serial = host, ca_pem, status.serial
+        data = await self._try_register(passphrase, errors, placeholders)
+        if data is None:
+            return None
+        self._local = data
+        self._link["task"] = self.hass.async_create_task(
+            self._plan_link(), f"{DOMAIN} plan local link"
+        )
+        return await self.async_step_link_check()
+
+    async def async_step_link_check(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show progress while the panel and its cloud twin are read."""
+        task: asyncio.Task[bool] | None = self._link.get("task")
+        if task is None:
+            return self.async_abort(reason="unknown")
+        if not task.done():
+            return self.async_show_progress(
+                step_id="link_check", progress_action="link_check", progress_task=task
+            )
+        del self._link["task"]
+        if not task.result():
+            return self.async_show_progress_done(next_step_id="link_failed")
+        return self.async_show_progress_done(next_step_id="link_confirm")
+
+    async def async_step_link_failed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_abort(
+            reason=self._link.pop("abort", "link_unreadable"),
+            description_placeholders=self._link.pop("abort_placeholders", None),
+        )
+
+    async def _plan_link(self) -> bool:
+        """Read the panel and match it to the cloud's; whether that worked. Never raises."""
+        local = self._local
+        state = self._link
+        if local is None:
+            return False
+        coordinator = state["coordinator"]
+        # The entities were created under the running coordinator's serial; the
+        # placeholder it reports before it knows the panel names none of them.
+        if (reason := stem_problem(coordinator.serial)) is not None:
+            state["abort"] = reason
+            return False
+        site: SiteInfo = state["site"]
+        panel: PanelInfo = state["panel"]
+        try:
+            snapshot = await onboard.read_snapshot(
+                host=local[CONF_HOST],
+                port=local[CONF_MQTTS_PORT],
+                username=local[CONF_BROKER_USERNAME],
+                password=local.get(CONF_BROKER_PASSWORD),
+                ca_pem=local[CONF_CA_PEM],
+                client_id=local[CONF_CLIENT_NAME],
+                serial=local[CONF_LOCAL_SERIAL],
+            )
+            circuits, feeders = coordinator.traits()
+            if not circuits:
+                token_path = self._token_path()
+                user_id = self.config_entry.data.get(CONF_USER_ID)
+                device_uuid = self.config_entry.data.get(CONF_DEVICE_UUID) or _new_device_uuid()
+                circuits, feeders = await self.hass.async_add_executor_job(
+                    lambda: panel_traits(
+                        cloud_auth.access_token_from_store(token_path),
+                        site,
+                        panel,
+                        user_id=user_id,
+                        device_uuid=device_uuid,
+                        primary_panel=None,
+                    )
+                )
+        except Exception as err:  # noqa: BLE001 — shown as an abort
+            _LOGGER.debug("could not read the panel to link it: %s", type(err).__name__)
+            return False
+        link = _matched_link(
+            _new_link(panel.key, local[CONF_LOCAL_SERIAL], site),
+            snapshot.circuits,
+            circuits,
+            feeders,
+        )
+        total = len(snapshot.circuits)
+        check = serial_check(not state.get("serial_mismatch"), len(link.circuits), total)
+        state["match"] = _match_placeholders(link, total)
+        if check.refuse is not None:
+            _LOGGER.debug("the local panel's circuits don't match the cloud's")
+            state.update(abort=check.refuse, abort_placeholders=state["match"])
+            return False
+        state["serial_note"] = check.note
+        upstream, downstream = snapshot.upstream, snapshot.downstream
+        target = coordinator.site_history_target()
+        link = dataclasses.replace(
+            link,
+            feeds=classify_feeds(
+                feeders,
+                _feed_powers(coordinator.data),
+                upstream.active_power if upstream is not None else None,
+                downstream.active_power if downstream is not None else None,
+            ),
+            site_history=HistoryTarget(*target, SITE_NODE) if target is not None else None,
+        )
+        state.update(link=link, rows=local_rows(snapshot), stem=coordinator.serial)
+        return True
+
+    def _link_plan(self) -> RewritePlan:
+        registry = er.async_get(self.hass)
+        views = [
+            RegistryEntryView(e.entity_id, e.unique_id)
+            for e in er.async_entries_for_config_entry(registry, self.config_entry.entry_id)
+        ]
+        return rewrite_plan(
+            views, self._link["link"], self._link["rows"], cloud_stem=self._link["stem"]
+        )
+
+    async def _note(self, key: str) -> str:
+        """A line of text kept as a selector option: placeholders aren't translated."""
+        option = f"component.{DOMAIN}.selector.{LINK_NOTE_SELECTOR}.options.{key}"
+        strings = await async_get_translations(
+            self.hass, self.hass.config.language, "selector", {DOMAIN}
+        )
+        return strings.get(option, "")
+
+    async def async_step_link_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show what becomes of each entity; on submit, move them onto the panel."""
+        if self._local is None or "link" not in self._link:
+            return self.async_abort(reason="unknown")
+        link: PanelLink = self._link["link"]
+        plan = self._link_plan()
+        if (reason := plan_problem(plan)) is not None:
+            return self.async_abort(reason=reason)
+        if user_input is None:
+            placeholders = {name: str(n) for name, n in confirm_counts(plan).items()}
+            placeholders["grid_energy_note"] = (
+                "" if link.single_panel_site else await self._note(LINK_NOTE_GRID_ENERGY)
+            )
+            placeholders["serial_note"] = (
+                _fill(await self._note(LINK_NOTE_SERIAL), self._link["match"]) + "\n\n"
+                if self._link.get("serial_note")
+                else ""
+            )
+            return self.async_show_form(
+                step_id="link_confirm",
+                data_schema=vol.Schema({}),
+                description_placeholders=placeholders,
+            )
+        return await self._link_commit(link, plan)
+
+    async def _last_kwh(self, entity_id: str) -> float | None:
+        """An energy entity's last cloud reading in kWh: its state, else its statistics."""
+        state = self.hass.states.get(entity_id)
+        if state is not None:
+            value = es.to_kwh(state.state, state.attributes.get("unit_of_measurement"))
+            if value is not None:
+                return value
+        if not recorder_api.loaded(self.hass):
+            return None
+        row = await recorder_api.last_short_term(self.hass, entity_id, {"state"})
+        if row is None or row.get("state") is None:
+            return None
+        return float(row["state"])
+
+    async def _link_commit(self, link: PanelLink, plan: RewritePlan) -> ConfigFlowResult:
+        """Re-point the entities, merge the device, record the energy step, save."""
+        entry = self.config_entry
+        local = self._local
+        assert local is not None  # noqa: S101 — checked by the step that calls this
+        if (reason := plan_problem(plan)) is not None:
+            return self.async_abort(reason=reason)
+        registry = er.async_get(self.hass)
+        taken = [
+            (e.domain, e.unique_id) for e in registry.entities.values() if e.platform == DOMAIN
+        ]
+        if count := collisions(plan, taken):
+            _LOGGER.error("linking the local panel would collide on %d unique ids", count)
+            return self.async_abort(reason="uid_collision")
+        # Read before the re-point: the entities keep their state, but the
+        # last cloud reading is what the step is measured from.
+        lasts: dict[str, float | None] = dict.fromkeys(plan.energy)
+        try:
+            for entity_id in plan.energy:
+                lasts[entity_id] = await self._last_kwh(entity_id)
+        except Exception as err:  # noqa: BLE001 — skipped with no prior reading
+            _LOGGER.debug("could not read last energy readings: %s", type(err).__name__)
+        applied: list[tuple[str, str, str]] = []
+        devices = dr.async_get(self.hass)
+        merged: tuple[str, set[tuple[str, str]]] | None = None
+        record_store = energy_step.store(self.hass, entry.entry_id) if lasts else None
+        stem: str = self._link["stem"]
+        # One undo for every write: the re-points, the device merge, the
+        # energy-step record and the entry. The entry update comes last, so
+        # whatever fails leaves the entry at the cloud minor version.
+        try:
+            for entity_id, old, new in plan.changes:
+                registry.async_update_entity(entity_id, new_unique_id=new)
+                applied.append((entity_id, old, new))
+            if stem != local[CONF_LOCAL_SERIAL]:
+                device = devices.async_get_device(identifiers={(DOMAIN, stem)})
+                if device is not None:
+                    merged = (device.id, set(device.identifiers))
+                    devices.async_update_device(
+                        device.id, merge_identifiers={(DOMAIN, local[CONF_LOCAL_SERIAL])}
+                    )
+            if record_store is not None:
+                await record_store.async_save(es.new_record(dt_util.utcnow(), lasts))
+            unmatched = sorted(
+                uid[len(stem) + 1 :]
+                for entity_id in plan.unmatched
+                if (row := registry.async_get(entity_id)) is not None
+                and (uid := row.unique_id).startswith(f"{stem}_")
+            )
+            data = {
+                **entry.data,
+                **local,
+                CONF_CLOUD_STEM: stem,
+                CONF_CLOUD_UNMATCHED: unmatched,
+            }
+            options = link_to_options(
+                {**entry.options, CONF_TRANSPORT_MODE: Mode.LOCAL_FIRST.value}, link
+            )
+            self.hass.config_entries.async_update_entry(
+                entry, data=data, options=options, minor_version=LINKED_MINOR_VERSION
+            )
+        except BaseException as err:  # undone; a cancellation goes on up after the undo
+            await self._undo_link(registry, devices, applied, merged, record_store)
+            if not isinstance(err, Exception):
+                raise
+            _LOGGER.error(
+                "linking the local panel failed after %d of %d re-points: %s",
+                len(applied),
+                len(plan.changes),
+                type(err).__name__,
+            )
+            return self.async_abort(reason="migration_failed")
+        self._committed = True
+        self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_create_entry(data=options)
+
+    async def _undo_link(
+        self,
+        registry: er.EntityRegistry,
+        devices: dr.DeviceRegistry,
+        applied: list[tuple[str, str, str]],
+        merged: tuple[str, set[tuple[str, str]]] | None,
+        record_store: Any,
+    ) -> None:
+        """Put back what a failed link wrote, newest first; keep going past errors."""
+        if record_store is not None:
+            try:
+                await record_store.async_remove()
+            except Exception as undo:  # noqa: BLE001 — keep undoing the rest
+                _LOGGER.error("could not remove the energy step record: %s", type(undo).__name__)
+        if merged is not None:
+            device_id, identifiers = merged
+            try:
+                devices.async_update_device(device_id, new_identifiers=identifiers)
+            except Exception as undo:  # noqa: BLE001 — keep undoing the rest
+                _LOGGER.error("could not undo the device merge: %s", type(undo).__name__)
+        for entity_id, old, _new in reversed(applied):
+            try:
+                registry.async_update_entity(entity_id, new_unique_id=old)
+            except Exception as undo:  # noqa: BLE001 — keep undoing the rest
+                _LOGGER.error("could not undo a re-point: %s", type(undo).__name__)
+
+    @callback
+    def async_remove(self) -> None:
+        """The flow left before saving: unregister the client it made."""
+        if (task := self._link.get("task")) is not None:
+            task.cancel()
+        self._discard_local()
 
     async def async_step_confirm_remove(
         self, user_input: dict[str, Any] | None = None

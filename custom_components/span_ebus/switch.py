@@ -11,12 +11,18 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SpanConfigEntry
 from .coordinator import SpanCloudCoordinator
-from .local_entity import SpanLocalEntity, async_setup_local
+from .local_entity import (
+    SpanLocalEntity,
+    SpanUnmatchedEntity,
+    async_setup_local,
+    kept_cloud_entries,
+)
 from .span_client.backend import RELAY_PROPERTY
 from .span_client.local import model
 from .span_client.local.model import Row, Snapshot
@@ -38,6 +44,11 @@ async def async_setup_entry(
         async_setup_local(
             entry, runtime.transport, async_add_entities, "switch", SpanLocalRelaySwitch
         )
+        # A linked cloud entry's relays the link could not pair keep their
+        # entity, unavailable; no kept switch has any other source.
+        kept = kept_cloud_entries(hass, entry, "switch")
+        if kept:
+            async_add_entities(SpanUnmatchedSwitch(entry, runtime.transport, k) for k in kept)
         return  # the cloud fallback creates no entities of its own
     runtime.add_platform(lambda c: _register(c, async_add_entities))
 
@@ -133,3 +144,16 @@ class SpanLocalRelaySwitch(SpanLocalEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._async_command(STATE_OPEN)
+
+
+class SpanUnmatchedSwitch(SpanUnmatchedEntity, SwitchEntity):
+    """A relay the link could not pair with a local circuit."""
+
+    _attr_device_class = SwitchDeviceClass.SWITCH
+    _attr_is_on = None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        raise HomeAssistantError("This circuit is not paired with the local panel")
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        raise HomeAssistantError("This circuit is not paired with the local panel")

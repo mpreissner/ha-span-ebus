@@ -701,6 +701,21 @@ def same_serial(a: str | None, b: str | None) -> bool:
     return a.strip().casefold() == b.strip().casefold()
 
 
+def serial_taken(
+    unique_ids: Iterable[str | None],
+    local_serials: Iterable[str | None],
+    names: Iterable[str | None],
+) -> bool:
+    """Whether another entry already runs a panel known by any of `names`.
+
+    An entry runs it under its unique id, or (a cloud account entry given its
+    panel keeps the account's unique id) under the local serial in its data.
+    `names` are the spellings the panel goes by: its local serial and its key.
+    """
+    wanted = [name for name in names if name]
+    return any(same_serial(held, name) for held in (*unique_ids, *local_serials) for name in wanted)
+
+
 @dataclass(frozen=True)
 class PanelInfo:
     """One panelboard from GetSitesForUser."""
@@ -1094,6 +1109,23 @@ def find_panel(sites: list[SiteInfo], key: str) -> tuple[SiteInfo, PanelInfo] | 
             if panel.answers_to(key):
                 return site, panel
     return None
+
+
+def sibling_answers(sites: Iterable[SiteInfo], chosen_key: str, serial: str | None) -> bool:
+    """Whether a serial belongs to another panel on the account than the chosen one.
+
+    Overlapping space numbers (a MAIN 40 beside an MLO 48) can pass the
+    circuit check, so a sibling that answers refuses the link. A serial no
+    panel answers to (the cloud lists this one under another) is left to the
+    circuit check.
+    """
+    if not serial:
+        return False
+    return any(
+        panel.answers_to(serial) and not panel.answers_to(chosen_key)
+        for site in sites
+        for panel in (*site.panels, *site_choices(site))
+    )
 
 
 def panel_circuits(

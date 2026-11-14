@@ -230,11 +230,7 @@ class SpanTransportManager:
         self._refresh_shown()
 
     def _root(self) -> str:
-        """The panel's root device: its serial, or the only root if that differs."""
-        if self.serial in self.tree.states or self.serial in self.tree.descriptions:
-            return self.serial
-        roots = self.tree.roots()
-        return roots[0] if len(roots) == 1 else self.serial
+        return self.tree.panel_root(self.serial)
 
     # --- the switch -------------------------------------------------------
 
@@ -513,6 +509,26 @@ class SpanTransportManager:
             if total is not None:
                 return total
         return None
+
+    def _cloud_live(self) -> bool:
+        return self._fallback_ready() and any(c.stream_is_live for c in self._cloud or ())
+
+    def cloud_reading(self, key: str) -> Any:
+        """A kept cloud entity's own reading, in the cloud's frame.
+
+        NO_FALLBACK unless the cloud is live and shown; None where it has no
+        reading for `key` yet.
+        """
+        if not self._cloud_live():
+            return model.NO_FALLBACK
+        reading = self._cloud_data().get(key)
+        return None if reading is None else getattr(reading, "value", None)
+
+    def cloud_energy(self, key: str) -> float | None:
+        """The cloud ledger's total for `key` while the cloud is shown, else None."""
+        if not self._fallback_ready():
+            return None
+        return self._cloud_energy(key)
 
     def fallback_value(self, scope: model.Scope, device_id: str, key: str) -> Any:
         """The cloud's reading for a local entity while on the fallback, in the
