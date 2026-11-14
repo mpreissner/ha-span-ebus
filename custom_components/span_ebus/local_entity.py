@@ -35,6 +35,7 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_call_later
 
 from .const import CONF_CLOUD_STEM, CONF_CLOUD_UNMATCHED, CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER
+from .shown import round_value
 from .span_client import standin
 from .span_client.fallback import RELAY
 from .span_client.local import model
@@ -60,15 +61,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Decimal places kept per unit, so a reading that only jitters below what
-# anyone reads does not write a recorder row every second. Energy is not
-# rounded: it is shown to sensor.ENERGY_PRECISION and statistics need the register.
-ROUNDING: dict[str, int] = {
-    UnitOfPower.WATT: 0,
-    UnitOfElectricCurrent.AMPERE: 1,
-    UnitOfElectricPotential.VOLT: 1,
-    UnitOfFrequency.HERTZ: 2,
-}
 # How long a control shows what it was set to before the panel confirms.
 CONFIRM_WINDOW = 10.0
 
@@ -256,19 +248,6 @@ PRESENTATION: dict[str, Presentation] = {
     "mid:grid/grid-state": _enum("up", "down", "degraded", "unknown"),
     "mid:grid/islanding-state": _enum("on_grid", "off_grid", "unknown"),
 }  # fmt: skip
-
-
-def round_value(value: Any, unit: str | None, digits: int | None = None) -> Any:
-    """Round a reading to what its unit is worth showing. -0 is shown as 0.
-    `digits` overrides the unit's default.
-    """
-    if digits is None:
-        digits = ROUNDING.get(unit) if unit is not None else None
-    if digits is None or isinstance(value, bool) or not isinstance(value, int | float):
-        return value
-    if digits == 0:
-        return round(value)
-    return round(value, digits) + 0.0
 
 
 def panel_device_info(entry: ConfigEntry, snapshot: Snapshot | None = None) -> DeviceInfo:

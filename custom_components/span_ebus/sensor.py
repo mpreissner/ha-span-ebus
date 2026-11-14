@@ -58,8 +58,8 @@ from .local_entity import (
     async_track_panel_device,
     kept_cloud_entries,
     panel_device_info,
-    round_value,
 )
+from .shown import ChangeGate, cloud_reading, round_value
 from .span_client import backfill as backfill_gaps
 from .span_client import standin
 from .span_client.backend import (
@@ -172,7 +172,30 @@ def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntities
     coordinator.register_entity_adder(add_specs, lambda spec: not spec.settable)
 
 
-class SpanSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
+class _WriteOnChange(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
+    """A cloud measurement that writes state only when what it shows changed.
+
+    The stream wakes every listener on each frame, twice a second, whether or
+    not this entity's reading moved. Availability is part of what is compared,
+    so a liveness flip (the coordinator calls its listeners when the stream goes
+    stale) and an unload are still written. These sensors carry no state
+    attributes, so the pair is all there is to compare.
+    """
+
+    def __init__(self, coordinator: SpanCloudCoordinator) -> None:
+        super().__init__(coordinator)
+        self._gate = ChangeGate()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # Like Home Assistant's own state write, the value is only read while
+        # available: before the first frame there may be no data to read it from.
+        available = self.available
+        if self._gate.changed((available, self.native_value if available else None)):
+            self.async_write_ha_state()
+
+
+class SpanSensor(_WriteOnChange):
     """A single SPAN property, updated by the push coordinator."""
 
     _attr_has_entity_name = True
@@ -201,10 +224,7 @@ class SpanSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
         reading = self.coordinator.data.get(self._key)
         if reading is None:
             return None
-        try:
-            return float(reading.value)
-        except (TypeError, ValueError):
-            return None
+        return cloud_reading(reading.value, self._attr_native_unit_of_measurement)
 
     @property
     def available(self) -> bool:
@@ -281,7 +301,7 @@ class SpanEnergySensor(RestoreSensor):
         return self.native_value is not None
 
 
-class SpanPanelOverheadSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
+class SpanPanelOverheadSensor(_WriteOnChange):
     """Power the panel takes in that its branch circuits do not account for.
 
     Derived rather than reported: the main feed less the sum of every branch
@@ -307,7 +327,7 @@ class SpanPanelOverheadSensor(CoordinatorEntity[SpanCloudCoordinator], SensorEnt
         schema = self.coordinator.schema
         if schema is None:
             return None
-        return panel_overhead(schema, self.coordinator.data or {})
+        return cloud_reading(panel_overhead(schema, self.coordinator.data or {}), UnitOfPower.WATT)
 
     @property
     def available(self) -> bool:
