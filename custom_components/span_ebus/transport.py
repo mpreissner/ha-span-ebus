@@ -436,7 +436,6 @@ class SpanTransportManager:
 
     # --- the Transport sensor ---------------------------------------------
 
-    @callback
     @property
     def cloud_in_use(self) -> bool:
         """Whether the cloud fallback holds the entry's tokens, or is about to.
@@ -451,6 +450,7 @@ class SpanTransportManager:
             or self.switch.active is Transport.CLOUD
         )
 
+    @callback
     def async_add_listener(self, listener: CALLBACK_TYPE) -> CALLBACK_TYPE:
         self._listeners.append(listener)
 
