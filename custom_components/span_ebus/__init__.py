@@ -15,7 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from . import energy_step, legacy_repair
+from . import backfill, energy_step, legacy_repair
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_CA_PEM,
@@ -46,6 +46,7 @@ from .span_client.backend import (
     site_routes,
     stream_identity,
 )
+from .span_client.backfill import should_run as backfill_wanted
 from .span_client.link import migration_ok
 from .span_client.local import model, onboard
 from .span_client.local.health import Mode
@@ -188,6 +189,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         runtime.energy_step = EnergyStepTracker(hass, entry)
         entry.async_on_unload(runtime.energy_step.async_stop)
         await runtime.energy_step.async_start()
+        # Before the platforms: the integrated rows report gaps to it as they restore.
+        await _start_backfill(hass, entry, runtime)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         # Old cloud entities nothing local feeds: offer to remove them.
         legacy_repair.async_check(hass, entry)
@@ -209,6 +212,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _start_backfill(
+    hass: HomeAssistant, entry: SpanConfigEntry, runtime: SpanRuntime
+) -> None:
+    """Fill integrated-energy gaps from the cloud's history, on entries that can ask."""
+    transport = runtime.transport
+    if transport is None or not backfill_wanted(
+        _transport_mode(entry).value,
+        has_tokens=CONF_TOKENS in entry.data,
+        has_target=transport.link is not None and transport.link.site_history is not None,
+        single_panel_site=transport.link is not None and transport.link.single_panel_site,
+    ):
+        return
+    runtime.backfill = backfill.GapBackfill(
+        hass,
+        entry,
+        transport,
+        runtime.energy_step,
+        token_path=_token_path(hass, entry),
+        write_tokens=_write_token_file,
+    )
+    entry.async_on_unload(runtime.backfill.async_stop)
+    await runtime.backfill.async_setup()
 
 
 async def _cloud_coordinators(
@@ -263,6 +290,9 @@ async def _cloud_coordinators(
 
 async def async_unload_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
     runtime = entry.runtime_data
+    # Before the token file is discarded: a fetch in flight may refresh it.
+    if runtime.backfill is not None:
+        await runtime.backfill.async_stop()
     # The transport goes first: a failover in flight would otherwise add cloud
     # coordinators, and entities, to platforms that are being taken down.
     if runtime.transport is not None:
@@ -318,6 +348,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> Non
             entry.data[CONF_CLIENT_NAME],
         )
     await energy_step.async_remove(hass, entry.entry_id)
+    await backfill.async_remove(hass, entry.entry_id)
     await energy_store(hass, entry.entry_id).async_remove()
     await local_tree_store(hass, entry.entry_id).async_remove()
     storage = Path(hass.config.path(".storage"))

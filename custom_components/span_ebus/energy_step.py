@@ -97,6 +97,10 @@ class EnergyStepTracker:
     def active(self) -> bool:
         return self._record is not None
 
+    def tracks(self, entity_id: str) -> bool:
+        """Whether the entity has a step on record (the gap backfill keeps off it)."""
+        return self._record is not None and entity_id in es.entities(self._record)
+
     # --- lifecycle -------------------------------------------------------------------
 
     async def async_start(self) -> None:
