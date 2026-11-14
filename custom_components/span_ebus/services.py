@@ -119,8 +119,8 @@ async def _async_rotate_credentials(hass: HomeAssistant, call: ServiceCall) -> S
                 access_token=data.get(CONF_ACCESS_TOKEN),
             )
         except (SpanLocalError, ssl.SSLError, ValueError):
-            # A stored CA that will not load: nothing was sent, and reauth
-            # pins a fresh one.
+            # A stored CA that will not load: nothing was sent. Unreachable on
+            # a loaded entry, since the transport pins the same CA at setup.
             raise _error(rotation.Problem.NO_CA) from None
 
         async def store(password: str) -> None:
