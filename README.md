@@ -141,6 +141,29 @@ within a few seconds. Relay state is read from the panel roughly once a minute a
 right after any change, so toggling a breaker in the SPAN app shows up here too.
 Details: [docs/specs/circuit-control.md](docs/specs/circuit-control.md).
 
+## Several panels
+
+A panel's "grid" readings are power and energy into the panel at its lugs. On a
+site with solar or a battery between the utility meter and the panel, that is the
+house's draw through the panel, not what the meter sees.
+
+When another panel feeds this one, its own lugs or one of its circuits, the same
+readings are named "Feed power" and "Feed consumed/produced/net energy" ("Site
+feed" and "Site feed energy" over the cloud). The entity ids and history stay as
+they were. Linked to the cloud, the panel takes this from the feeds you answered
+when adding the cloud panels; otherwise, or to change it, use **Fed by another
+panel** in the integration's options.
+
+In the Energy dashboard:
+
+- use only the topmost panel's grid energy as the grid source, or better, the
+  utility meter's;
+- in "Individual devices", set a branch-fed panel's circuits' upstream device to
+  the circuit on the panel that feeds it.
+
+A circuit that feeds another panel carries a `feeds_panel` attribute on its power
+and energy sensors, holding that panel's device name.
+
 ## How it gets your live data
 
 SPAN's realtime telemetry arrives on an Ably channel named

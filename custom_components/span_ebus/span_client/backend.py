@@ -233,11 +233,58 @@ class AblyDirective:
 SITE_NODE = "site"
 
 
+# The site's flow to and from the grid. On a panel another panel feeds, that
+# flow is the feed's, so its entities are named for the feed; the property id,
+# and so the unique id, stays "grid".
+GRID_PROPERTY = "grid"
+FED_GRID_LABEL = "feed"
+
+
+def _shown_property(spec: PropertySpec, fed: bool) -> str:
+    if fed and spec.node_id == SITE_NODE and spec.property_id == GRID_PROPERTY:
+        return FED_GRID_LABEL
+    return spec.property_id
+
+
+def sensor_name(spec: PropertySpec, fed: bool = False) -> str:
+    """A cloud property's entity name: "Kitchen power", "Site grid"."""
+    node_label = spec.node_name or spec.node_id
+    return f"{node_label} {_shown_property(spec, fed)}".replace("_", " ")
+
+
+def energy_name(spec: PropertySpec, fed: bool = False) -> str:
+    """The name of a metered property's energy entity.
+
+    "power" is the node's own reading, so "Kitchen energy" rather than
+    "Kitchen power energy"; the site's directional flows keep their name.
+    """
+    node_label = spec.node_name or spec.node_id
+    prop = _shown_property(spec, fed)
+    qualifier = "" if spec.property_id == POWER_PROPERTY else f" {prop}"
+    return f"{node_label}{qualifier} energy".replace("_", " ")
+
+
+def sensor_uid(serial: str, spec: PropertySpec) -> str:
+    return f"{serial}_{spec.key}"
+
+
+def energy_uid(serial: str, spec: PropertySpec) -> str:
+    return f"{serial}_{spec.key}_energy"
+
+
 # --- pure mapping -------------------------------------------------------------
 
 
 def _circuit_node(instance_id: int) -> str:
     return f"circuit-{instance_id}"
+
+
+def circuit_instance(spec: PropertySpec) -> int | None:
+    """The cloud instance id of a circuit's node, or None for any other node."""
+    if spec.node_kind is not NodeKind.CIRCUIT:
+        return None
+    _prefix, _, instance = spec.node_id.partition("circuit-")
+    return int(instance) if instance.isdigit() else None
 
 
 def _fmt(value: float | None) -> str | None:
@@ -291,13 +338,47 @@ def _node_for(sample: CircuitSample, circuits: dict[int, CircuitInfo]) -> tuple[
     return _circuit_node(sample.instance_id), NodeKind.CIRCUIT
 
 
-def _node_names(frame: Frame, circuits: dict[int, CircuitInfo]) -> dict[str, str]:
+def _feed_names(feed_ids: list[int], feeders: Mapping[int, int]) -> dict[int, str]:
+    """Display name per feed instance, by its feeder kind.
+
+    A panel's only feed is its main feed whatever its tag, the same rule
+    `is_overhead_feed` follows. With several, the main breaker is "Main feed",
+    the feedthrough lugs "Feedthrough", and one of no known kind is named by
+    its instance so no two feeds share a name.
+    """
+    if len(feed_ids) == 1:
+        return {feed_ids[0]: "Main feed"}
+    names: dict[int, str] = {}
+    for instance in feed_ids:
+        kind = feeders.get(instance)
+        if kind == FEEDER_MAIN_BREAKER:
+            names[instance] = "Main feed"
+        elif kind == FEEDER_FEEDTHROUGH:
+            names[instance] = "Feedthrough"
+        else:
+            names[instance] = f"Feed {instance}"
+    return names
+
+
+def _node_names(
+    frame: Frame, circuits: dict[int, CircuitInfo], feeders: Mapping[int, int] | None = None
+) -> dict[str, str]:
     """Display name per node id, from the trait snapshot where we have one.
 
     Labels are the user's own and need not be unique — two 20 A circuits can
     both be "Outlets" — so a repeated label is qualified with the panel spaces
-    the circuit occupies, which are unique by construction.
+    the circuit occupies, which are unique by construction. Feeds are named by
+    their feeder kind (`_feed_names`).
     """
+    feed_ids = sorted(
+        {
+            sample.instance_id
+            for samples in frame.resources.values()
+            for sample in samples
+            if _node_for(sample, circuits)[1] is NodeKind.LUGS
+        }
+    )
+    feed_names = _feed_names(feed_ids, feeders or {})
     names: dict[str, str] = {}
     labels: dict[int, str] = {}
     seen: dict[str, int] = {}
@@ -317,7 +398,7 @@ def _node_names(frame: Frame, circuits: dict[int, CircuitInfo]) -> dict[str, str
             if sample.kind == "panel":
                 names[node_id] = "Panel"
             elif node_id.startswith("feed-"):
-                names[node_id] = "Main feed"
+                names[node_id] = feed_names[sample.instance_id]
             elif sample.instance_id in labels:
                 label = labels[sample.instance_id]
                 info = circuits[sample.instance_id]
@@ -349,7 +430,7 @@ def schema_from_frame(
     circuits = circuits or {}
     feeders = feeders or {}
     schema = PanelSchema(serial=serial)
-    names = _node_names(frame, circuits)
+    names = _node_names(frame, circuits, feeders)
 
     for samples in frame.resources.values():
         for sample in samples:

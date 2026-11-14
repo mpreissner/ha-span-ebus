@@ -45,6 +45,10 @@ DEFAULT_SNAPSHOT_INTERVAL = 1.0
 CONF_PROTECTED_CIRCUITS = "protected_circuits"
 CONF_RELAY_OVERRIDE = "relay_override"
 CONF_ISLANDING_CONTROL = "islanding_control"
+# Whether another panel feeds a local panel (the "Fed by another panel" options
+# step). Not a cloud option: it outlives removing the cloud. The same key as
+# span_client.feeds, which reads it.
+CONF_FED_BY_PANEL = "fed_by_panel"
 
 # What removing a local panel's cloud fallback takes out of its entry: the
 # account in the data, and the account's panel choices in the options (the

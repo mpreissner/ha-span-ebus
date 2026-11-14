@@ -95,6 +95,25 @@ FALLBACK_ONLY: frozenset[str] = frozenset(
 )
 
 
+# Kept cloud entities named for the grid, and their names on a panel another
+# panel feeds: the same names the cloud entry gives them (`backend.sensor_name`).
+_FED_NAMES: dict[str, tuple[str, str]] = {
+    "site/grid": ("Site grid", "Site feed"),
+    "site/grid_energy": ("Site grid energy", "Site feed energy"),
+}
+
+
+def kept_name(suffix: str, name: str | None, fed: bool) -> str | None:
+    """A kept cloud entity's name: the registry's, unless the panel's feed
+    changes it. Only the grid pair is renamed; a name the registry holds for
+    anything else is kept as it is.
+    """
+    names = _FED_NAMES.get(suffix)
+    if names is None or not fed:
+        return name
+    return names[1]
+
+
 def standins_for(registry_uids: Iterable[str], cloud_key: str) -> tuple[StandIn, ...]:
     """The stand-ins this entry has: those whose cloud uid is in the registry."""
     present = set(registry_uids)

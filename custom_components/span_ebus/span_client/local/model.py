@@ -1720,8 +1720,35 @@ def row_uid(row: Row, panel_key: str, device_id: str) -> str:
     return lugs_uid(panel_key, device_id, row.source)
 
 
-def translation_key(row: Row) -> str:
-    """HA translation keys allow only [a-z0-9_]: `bess:soc/soc` -> `bess_soc_soc`."""
+# A panel another panel feeds: what it takes in is that panel's feed, not the
+# grid's, so these rows are named for the feed. Only the name: the row key and
+# unique id stay as they are, so history carries on.
+FED_TRANSLATION_KEYS: dict[str, str] = {
+    "grid_power": "feed_power",
+    "main_consumed_energy": "feed_consumed_energy",
+    "main_produced_energy": "feed_produced_energy",
+    "main_net_energy": "feed_net_energy",
+}
+
+
+# A branch circuit's rows that name the panel the circuit feeds, when one does.
+FEEDS_PANEL_ROWS: frozenset[str] = frozenset(
+    {"power", "consumed_energy", "produced_energy", "net_energy"}
+)
+
+
+def shows_feeds_panel(row: Row) -> bool:
+    return row.scope is Scope.CIRCUIT and row.platform == "sensor" and row.key in FEEDS_PANEL_ROWS
+
+
+def translation_key(row: Row, fed: bool = False) -> str:
+    """HA translation keys allow only [a-z0-9_]: `bess:soc/soc` -> `bess_soc_soc`.
+
+    On a panel another panel feeds, the grid and main-meter rows take their
+    `feed_*` keys instead.
+    """
+    if fed and row.scope in (Scope.PANEL, Scope.UPSTREAM) and row.key in FED_TRANSLATION_KEYS:
+        return FED_TRANSLATION_KEYS[row.key]
     return row.key.replace(":", "_").replace("/", "_").replace("-", "_")
 
 
