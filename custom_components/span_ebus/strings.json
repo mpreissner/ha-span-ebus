@@ -164,6 +164,13 @@
           "link_local": "Link the local panel"
         }
       },
+      "local_panel": {
+        "title": "Local panel",
+        "menu_options": {
+          "cloud_add": "Add cloud fallback",
+          "controls": "Controls"
+        }
+      },
       "panels": {
         "title": "Choose your panels",
         "description": "Tick the panels on your SPAN account that belong to this Home Assistant.",
@@ -190,6 +197,7 @@
         "title": "Cloud fallback",
         "menu_options": {
           "transport": "Connection",
+          "controls": "Controls",
           "cloud_remove": "Remove cloud fallback"
         }
       },
@@ -231,6 +239,20 @@
       "link_confirm": {
         "title": "Link the local panel",
         "description": "{matched} of {total} entities move onto the local panel and keep their history. {standins} are kept, now fed by the panel. {fallback_only} are only updated while the local connection is down. {unmatched} are no longer updated.\n\nEnergy totals jump once when they switch to the panel's own meters. Home Assistant will offer to fix that in Repairs.\n\n{serial_note}{grid_energy_note}"
+      },
+      "controls": {
+        "title": "Controls",
+        "description": "Choose which controls Home Assistant may use on this panel. Saving reloads the panel.",
+        "data": {
+          "protected_circuits": "Protected circuits",
+          "relay_override": "Allow switching storage and solar circuits",
+          "islanding_control": "Grid-state control"
+        },
+        "data_description": {
+          "protected_circuits": "These circuits' switches stay unavailable, and any command to switch them is refused. Their priority can still be changed.",
+          "relay_override": "These circuits feed a battery or solar inverter, so their switches are unavailable by default. Opening one can cut a battery or solar supply. Tick a circuit only if you understand the effect.",
+          "islanding_control": "Adds a control that tells the panel the grid is up, or clears that. It is only available while the battery cannot report the grid state itself. Asserting the wrong state can affect how the panel sheds circuits."
+        }
       }
     },
     "error": {
@@ -263,7 +285,8 @@
       "already_configured": "This panel is already set up in Home Assistant.",
       "unknown": "Unexpected error.",
       "link_other_panel": "The panel at that address is another panel on this SPAN account, not the one this entry runs. Check the address.",
-      "link_nothing_matched": "None of this account's entities match the local panel, so nothing was changed. Check that this is the right panel."
+      "link_nothing_matched": "None of this account's entities match the local panel, so nothing was changed. Check that this is the right panel.",
+      "controls_unavailable": "Connect to the panel first: the controls are built from what it reports."
     },
     "progress": {
       "link_check": "Reading the panel and matching its circuits. This takes up to 20 seconds."
@@ -613,6 +636,23 @@
           "soc_threshold": "Shed at battery threshold",
           "never": "Never shed"
         }
+      },
+      "asserted_islanding": {
+        "name": "Grid state",
+        "state": {
+          "none": "Not asserted",
+          "on_grid": "On grid"
+        }
+      }
+    },
+    "number": {
+      "evse_config_user_max_charge_current": {
+        "name": "Charge current limit"
+      }
+    },
+    "lock": {
+      "evse_switch_lock_state": {
+        "name": "Lock"
       }
     }
   },
@@ -628,6 +668,21 @@
     },
     "command_not_sent": {
       "message": "The command could not be sent to the panel. Check its connection and try again."
+    },
+    "control_protected": {
+      "message": "This circuit is protected in the integration's options, so the command was not sent."
+    },
+    "control_storage_or_solar": {
+      "message": "This circuit feeds a battery or solar inverter, so the command was not sent. Allow it in the integration's options to switch it."
+    },
+    "control_not_opted_in": {
+      "message": "The grid-state control is turned off in the integration's options, so the command was not sent."
+    },
+    "control_gated": {
+      "message": "This control is not available right now, so the command was not sent."
+    },
+    "evse_limit_out_of_range": {
+      "message": "The charge current limit must be between {min} and {max} A."
     }
   }
 }

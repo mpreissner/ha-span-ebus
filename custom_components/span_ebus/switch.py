@@ -24,10 +24,8 @@ from .local_entity import (
     kept_cloud_entries,
 )
 from .span_client.backend import RELAY_PROPERTY
-from .span_client.local import model
-from .span_client.local.model import Row, Snapshot
+from .span_client.local.commands import Control
 from .span_client.models import PropertySpec
-from .transport import SpanTransportManager
 
 # SPAN's own vocabulary: a closed relay is an energized circuit.
 STATE_CLOSED = "CLOSED"
@@ -119,16 +117,9 @@ class SpanLocalRelaySwitch(SpanLocalEntity, SwitchEntity):
     """One breaker's relay, set over the panel's local API."""
 
     _attr_device_class = SwitchDeviceClass.SWITCH
-
-    def __init__(
-        self, entry: SpanConfigEntry, transport: SpanTransportManager, row: Row, device_id: str
-    ) -> None:
-        super().__init__(entry, transport, row, device_id)
-
-    def _blocked(self, snapshot: Snapshot) -> bool:
-        # A link to a battery or PV inverter can arrive after this switch was
-        # created (or on an upgrade): go unavailable, keep the registry entry.
-        return model.relay_blocked(snapshot, self._device_id)
+    # Unavailable while protected, or while it feeds a battery or PV inverter
+    # without an override: the base class asks the transport's safety rules.
+    _control = Control.RELAY
 
     @property
     def is_on(self) -> bool | None:

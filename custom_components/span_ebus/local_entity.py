@@ -27,7 +27,7 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -38,15 +38,25 @@ from .const import CONF_CLOUD_STEM, CONF_CLOUD_UNMATCHED, CONF_LOCAL_SERIAL, DOM
 from .span_client import standin
 from .span_client.fallback import RELAY
 from .span_client.local import model
+from .span_client.local.commands import (
+    EVENT,
+    CommandRecord,
+    Control,
+    Outcome,
+    Pending,
+    SafetyRules,
+    as_text,
+    event_data,
+    final_outcome,
+)
 from .span_client.local.health import Transport
 from .span_client.local.homie import DeviceState
 from .span_client.local.model import Presence, Row, Scope, Snapshot, ValueKind
+from .transport import ControlRefused, SpanTransportManager
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
-    from .transport import SpanTransportManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,7 +69,7 @@ ROUNDING: dict[str, int] = {
     UnitOfElectricPotential.VOLT: 1,
     UnitOfFrequency.HERTZ: 2,
 }
-# How long a switch or select shows what it was set to before the panel confirms.
+# How long a control shows what it was set to before the panel confirms.
 CONFIRM_WINDOW = 10.0
 
 
@@ -201,6 +211,7 @@ PRESENTATION: dict[str, Presentation] = {
     "priority": Presentation(category=EntityCategory.CONFIG, suffix="priority"),
     # islanding, on the panel: only with a MID or battery
     "grid_islandable": Presentation(device_class=BinarySensorDeviceClass.POWER, category=_D),
+    "asserted_islanding": Presentation(category=EntityCategory.CONFIG),
     "mid:grid/grid-forming-entity": _enum(*model.GRID_FORMING_OPTIONS),
     # battery (+ = discharging, SPAN's raw sign)
     "bess:meter/active-power": _POWER,
@@ -224,7 +235,7 @@ PRESENTATION: dict[str, Presentation] = {
         unit=_W, device_class=SensorDeviceClass.POWER, category=_D, enabled=False
     ),
     "pv:derived/panel-link": _DIAG_CONNECTIVITY,
-    # EV charger (read only; the current limit and lock arrive with their platforms)
+    # EV charger
     "evse:status/status": Presentation(
         device_class=SensorDeviceClass.ENUM, options=model.EVSE_STATUS_OPTIONS
     ),
@@ -237,6 +248,10 @@ PRESENTATION: dict[str, Presentation] = {
     ),
     "evse:config/max-charge-current": _RATING,
     "evse:derived/panel-link": _DIAG_CONNECTIVITY,
+    "evse:config/user-max-charge-current": Presentation(
+        unit=_A, category=EntityCategory.CONFIG, digits=0
+    ),
+    "evse:switch/lock-state": Presentation(),
     # MID
     "mid:grid/grid-state": _enum("up", "down", "degraded", "unknown"),
     "mid:grid/islanding-state": _enum("on_grid", "off_grid", "unknown"),
@@ -427,6 +442,7 @@ def async_setup_local(
     cloud entity shows their value instead.
     """
     known: set[str] = set()
+    options = model.ControlOptions.from_options(entry.options)
 
     @callback
     def add(snapshot: Snapshot) -> None:
@@ -436,7 +452,7 @@ def async_setup_local(
                 continue
             for device_id in model.row_devices(snapshot, row):
                 uid = model.row_uid(row, transport.panel_key, device_id)
-                if uid in known or not model.row_exists(snapshot, row, device_id):
+                if uid in known or not model.row_exists(snapshot, row, device_id, options):
                     continue
                 known.add(uid)
                 new.append(factory(entry, transport, row, device_id))
@@ -454,11 +470,14 @@ class SpanLocalEntity(Entity):
 
     _attr_has_entity_name = True
     _attr_should_poll = False
+    _control: Control | None = None  # set by every control platform
 
     def __init__(
         self, entry: ConfigEntry, transport: SpanTransportManager, row: Row, device_id: str
     ) -> None:
         self._transport = transport
+        # Fixed for the entry's life: saving the options reloads it.
+        self._options = model.ControlOptions.from_options(entry.options)
         self._row = row
         self._device_id = device_id
         self._look = PRESENTATION[row.key]
@@ -466,8 +485,10 @@ class SpanLocalEntity(Entity):
         self._attrs: dict[str, Any] = {}
         self._presence = Presence.UNAVAILABLE
         self._value: Any = None
-        self._pending: tuple[Any, float] | None = None
+        self._pending: Pending | None = None
         self._cancel_confirm: CALLBACK_TYPE | None = None
+        # What the panel reports, before a pending command's value is shown.
+        self._reported: tuple[Presence, Any] = (Presence.UNAVAILABLE, None)
         snapshot = transport.snapshot
         facts = model.row_facts(snapshot, row, device_id)
         self._attr_unique_id = model.row_uid(row, transport.panel_key, device_id)
@@ -488,7 +509,7 @@ class SpanLocalEntity(Entity):
         await super().async_added_to_hass()
         self.async_on_remove(self._transport.async_add_model_listener(self._on_snapshot))
         self.async_on_remove(self._transport.async_add_listener(self._on_transport))
-        self.async_on_remove(self._cancel_pending)
+        self.async_on_remove(self._on_remove_pending)
         # The snapshot may have moved on since __init__ computed it.
         self._recompute(self._transport.snapshot)
 
@@ -560,39 +581,59 @@ class SpanLocalEntity(Entity):
         if presence is not Presence.VALUE:
             value = None
         if row.kind is ValueKind.CONTROL:
+            self._reported = (presence, value)
             value = self._confirm(presence, value)
         self._presence, self._value, self._attrs = presence, value, attrs
-        shown = (presence, value, attrs, getattr(self, "_attr_name", None))
+        # Whether a command is pending counts too: a lock shows "locking".
+        shown = (presence, value, attrs, getattr(self, "_attr_name", None), self._pending)
         changed = shown != self._shown
         self._shown = shown
         return changed
 
     def _blocked(self, snapshot: Snapshot) -> bool:
-        """True when this entity must stay unavailable and refuse commands."""
-        return False
+        """True when this entity must stay unavailable. For a control, the same
+        safety rules the transport refuses commands with (asked without a value).
+        """
+        if self._row.kind is not ValueKind.CONTROL:
+            return False
+        rules = SafetyRules(self._options, snapshot)
+        return rules.check(self._device_id, self._row.source) is not None
 
     def _present(self, value: Any) -> Any:
         if self._look.options is not None and value not in self._look.options:
             return None
         return round_value(value, self._look.unit, self._look.digits)
 
-    # --- switch and select: optimistic until the panel confirms ------------
+    # --- controls: optimistic until the panel confirms ---------------------
 
     def _confirm(self, presence: Presence, value: Any) -> Any:
-        if self._pending is None:
+        pending = self._pending
+        if pending is None:
             return value
-        if presence is Presence.UNAVAILABLE:
-            self._cancel_pending()
-            return value
-        wanted, deadline = self._pending
-        if value == wanted:
-            self._cancel_pending()
-            return value
-        if time.monotonic() >= deadline:
-            _LOGGER.debug("%s not confirmed within %.0f s", self._row.source, CONFIRM_WINDOW)
-            self._cancel_pending()
-            return value
-        return wanted
+        outcome = final_outcome(pending, presence, value, time.monotonic())
+        if outcome is None:
+            return pending.value
+        self._finish(outcome)
+        return value
+
+    def _finish(self, outcome: Outcome) -> None:
+        """End the pending command with its outcome and record it."""
+        pending = self._pending
+        self._cancel_pending()
+        if pending is None:
+            return
+        if outcome is Outcome.NOT_CONFIRMED:
+            _LOGGER.warning("SPAN %s command: %s", self._control, outcome)
+        self._record(
+            CommandRecord(
+                control=self._command_control(),
+                requested=as_text(pending.value) or "",
+                previous=pending.previous,
+                outcome=outcome,
+                delivery=pending.delivery,
+            ),
+            pending.context,
+        )
 
     @callback
     def _cancel_pending(self) -> None:
@@ -601,26 +642,71 @@ class SpanLocalEntity(Entity):
         if cancel is not None:
             cancel()
 
+    @callback
+    def _on_remove_pending(self) -> None:
+        if self._pending is not None:
+            self._finish(Outcome.UNAVAILABLE)
+
+    def _command_control(self) -> Control:
+        if self._control is None:  # a control platform that forgot to say
+            raise NotImplementedError
+        return self._control
+
+    def _record(self, record: CommandRecord, context: Any) -> None:
+        """Fire the command's one event, with the context of the call that sent it."""
+        if self.hass is None:
+            return
+        self.hass.bus.async_fire(EVENT, event_data(self.entity_id or "", record), context=context)
+
+    def _check(self, value: Any) -> None:
+        """Validate a value before it is sent. Raises ServiceValidationError
+        (or ControlRefused) to stop it.
+        """
+
     async def _async_command(self, value: Any) -> None:
         """Send a value; show it until the panel confirms or the window passes.
-        An error leaves the state as it was.
+        An error leaves the state as it was. Every command ends in one event.
         """
-        if self._blocked(self._transport.snapshot):
-            raise HomeAssistantError(
-                "This circuit feeds a battery or solar inverter; its relay is not switched"
+        context = self._context
+        control = self._command_control()
+        requested = as_text(value) or ""
+        previous = as_text(self._value)
+
+        def record(outcome: Outcome, refusal: Any = None) -> None:
+            self._record(
+                CommandRecord(control, requested, previous, outcome, refusal=refusal), context
             )
-        await self._transport.async_send_command(self._device_id, self._row.source, value)
-        self._cancel_pending()
-        self._pending = (value, time.monotonic() + CONFIRM_WINDOW)
+
+        try:
+            self._check(value)
+            delivery = await self._transport.async_send_command(
+                self._device_id, self._row.source, value
+            )
+        except ControlRefused as err:
+            record(Outcome.REFUSED, err.refusal)
+            raise
+        except ServiceValidationError:
+            record(Outcome.INVALID)
+            raise
+        except HomeAssistantError:
+            record(Outcome.NOT_SENT)
+            raise
+        if self._pending is not None:
+            self._finish(Outcome.SUPERSEDED)
+        pending = Pending(value, time.monotonic() + CONFIRM_WINDOW, previous, delivery, context)
+        self._pending = pending
 
         @callback
         def expire(_now: object) -> None:
             # The timer is the window: it can fire a hair before the monotonic
-            # deadline, so drop the pending value here rather than re-checking.
+            # deadline, so judge what the panel reports as at the deadline.
             self._cancel_confirm = None
-            if self._pending is not None:
-                _LOGGER.debug("%s not confirmed within %.0f s", self._row.source, CONFIRM_WINDOW)
-                self._pending = None
+            if self._pending is pending:
+                presence, reported = self._reported
+                self._finish(
+                    final_outcome(pending, presence, reported, pending.deadline)
+                    or Outcome.NOT_CONFIRMED
+                )
             self._refresh(self._transport.snapshot)
 
         self._cancel_confirm = async_call_later(self.hass, CONFIRM_WINDOW, expire)

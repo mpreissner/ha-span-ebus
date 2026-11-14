@@ -53,6 +53,21 @@ GRID_FLOW_SIGN = -1
 PV_TO_CLOUD_SIGN = -1
 BATTERY_TO_CLOUD_SIGN = -1
 
+# Property keys that carry a command.
+RELAY_KEY = "switch/relay"
+PRIORITY_KEY = "shed/priority"
+ISLANDING_KEY = "shed/asserted-islanding-state"
+EVSE_LIMIT_KEY = "config/user-max-charge-current"
+EVSE_CEILING_KEY = "config/max-charge-current"
+EVSE_LOCK_KEY = "switch/lock-state"
+# Islanding values the integration may assert. OFF_GRID is never offered:
+# claiming the grid is down when it is not is the dangerous direction.
+ISLANDING_CLEAR = "NONE"
+ISLANDING_ON_GRID = "ON_GRID"
+ISLANDING_CHOICES: tuple[str, ...] = (ISLANDING_CLEAR, ISLANDING_ON_GRID)
+# The J1772 floor, for a charger that declares no minimum.
+EVSE_MIN_AMPS = 6
+
 DERIVED = "derived"  # capability for values we compute; never a Homie capability
 STATE_KEY = "$state"  # Homie-reserved, so it cannot collide with a property key
 NET_ENERGY = f"{DERIVED}/net-energy"
@@ -186,6 +201,13 @@ class PanelFacts:
     has_mid: bool = False
     has_bess: bool = False
     grid_forming: str | None = None  # the first MID's grid/grid-forming-entity, as published
+    # Whether shed/asserted-islanding-state is described as settable.
+    islanding_settable: bool = False
+    # The grid state the panel senses, ignoring any assertion: ON_GRID with no MID,
+    # the first ready MID's grid/islanding-state, else None (unknown).
+    sensed_islanding: str | None = None
+    # True when any battery reports a healthy link (see _bess_connected).
+    bess_healthy: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +310,8 @@ class SubdeviceFacts:
     hardware: str | None
     link: Link | None = None
     circuit_label: str | None = None
+    # Homie `$format` per described property that declares one (e.g. "6:48").
+    formats: Mapping[str, str] = field(default_factory=dict)
 
     def get(self, key: str) -> Any:
         return self.values.get(key)
@@ -502,6 +526,8 @@ def build_snapshot(
             grid_forming=(
                 _text(next(iter(mids.values())).get("grid/grid-forming-entity")) if mids else None
             ),
+            sensed_islanding=_sensed_islanding(mids),
+            bess_healthy=any(_bess_connected(f) is True for f in by_class[BESS_CLASS].values()),
         )
     return Snapshot(
         root_id=root_id,
@@ -639,6 +665,9 @@ def _panel(tree: DeviceTree, description: DeviceDescription) -> PanelFacts:
         shed_forecast=forecast,
         shed_policy=parse_shed_policy(get("shed/policy")),
         asserted_islanding=_text(get("shed/asserted-islanding-state")),
+        islanding_settable=bool(
+            (prop := description.properties.get(ISLANDING_KEY)) is not None and prop.settable
+        ),
     )
 
 
@@ -802,6 +831,7 @@ def _subdevice(tree: DeviceTree, description: DeviceDescription) -> SubdeviceFac
         described=described,
         values=values,
         settable=frozenset(key for key in described if description.properties[key].settable),
+        formats={key: fmt for key in described if (fmt := description.properties[key].format)},
         vendor=_text(values.get("info/vendor-name")),
         model=_text(values.get("info/model")) or _text(values.get("info/product")),
         firmware=_text(values.get("info/firmware-version")),
@@ -1040,7 +1070,7 @@ class Row:
     """
 
     key: str  # translation key for panel rows, a stable name for circuit rows
-    platform: str  # "sensor", "binary_sensor", "switch" or "select"
+    platform: str  # "sensor", "binary_sensor", "switch", "select", "number" or "lock"
     scope: Scope
     source: str  # the property key the unique id ends in
     kind: ValueKind
@@ -1050,6 +1080,8 @@ class Row:
     attrs: Callable[[Any], dict[str, Any]] | None = None
     ignores_state: bool = False  # the panel status shows the state itself
     extra: Mapping[str, Any] = field(default_factory=dict)
+    # A creation condition that reads the entry's control options as well.
+    allowed: Callable[[Any, ControlOptions], bool] | None = None
 
 
 def _kwh(wh: float | None) -> float | None:
@@ -1118,13 +1150,182 @@ def feeds_storage_or_solar(c: CircuitFacts) -> bool:
     return c.feeds.via_kind is None or c.feeds.via_kind in _NO_RELAY_TARGETS
 
 
-def relay_blocked(snapshot: Snapshot, device_id: str) -> bool:
+def relay_blocked(
+    snapshot: Snapshot, device_id: str, override: frozenset[str] = frozenset()
+) -> bool:
     """Whether a circuit's relay switch, if it exists, must go unavailable and
     refuse commands: re-checked on every snapshot, since a link can arrive
-    after the switch was created.
+    after the switch was created. A circuit in `override` is never blocked.
     """
+    if device_id in override:
+        return False
     circuit = snapshot.circuits.get(device_id)
     return circuit is not None and feeds_storage_or_solar(circuit)
+
+
+# --- control options -----------------------------------------------------------------
+
+PROTECTED_CIRCUITS = "protected_circuits"
+RELAY_OVERRIDE = "relay_override"
+ISLANDING_CONTROL = "islanding_control"
+
+
+def _id_set(value: Any) -> frozenset[str]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(item for item in value if isinstance(item, str) and item)
+
+
+@dataclass(frozen=True, slots=True)
+class ControlOptions:
+    """The entry's control-safety options. Ids naming circuits that are gone
+    are harmless: nothing matches them.
+    """
+
+    protected: frozenset[str] = frozenset()
+    relay_override: frozenset[str] = frozenset()
+    islanding: bool = False
+
+    @classmethod
+    def from_options(cls, options: Mapping[str, Any] | None) -> ControlOptions:
+        """Read them from `entry.options`, ignoring anything malformed."""
+        options = options or {}
+        return cls(
+            protected=_id_set(options.get(PROTECTED_CIRCUITS)),
+            relay_override=_id_set(options.get(RELAY_OVERRIDE)),
+            islanding=options.get(ISLANDING_CONTROL) is True,
+        )
+
+
+DEFAULT_CONTROL_OPTIONS = ControlOptions()
+
+
+def _relay_allowed(c: CircuitFacts, options: ControlOptions) -> bool:
+    return c.device_id in options.relay_override or not feeds_storage_or_solar(c)
+
+
+# --- islanding -----------------------------------------------------------------------
+
+
+def _sensed_islanding(mids: Mapping[str, SubdeviceFacts]) -> str | None:
+    """The grid state the panel senses, ignoring any assertion.
+
+    Follows upstream span-panel-api's resolve_islanding_state minus its first
+    step (the asserted state): no MID reads ON_GRID; the first MID reads its
+    published grid/islanding-state while ready; any other MID reads unknown.
+    """
+    if not mids:
+        return ISLANDING_ON_GRID
+    mid = next(iter(mids.values()))
+    if mid.state is not DeviceState.READY:
+        return None
+    text = _text(mid.get("grid/islanding-state"))
+    return None if text is None else text.upper()
+
+
+def islanding_gated(panel: PanelFacts | None, requested: str | None = None) -> bool:
+    """Whether asserting `requested` (or, with None, offering the control at
+    all) must be refused.
+
+    Upstream's GFE override is offered only while the battery cannot report
+    (communication state not OK) and the panel does not sense the grid. The
+    same holds here for asserting ON_GRID. Clearing an assertion (NONE) is
+    never gated, and while one is active the control stays offered so it can
+    be cleared.
+    """
+    if panel is None:
+        return True
+    if requested == ISLANDING_CLEAR:
+        return False
+    if requested is None and panel.asserted_islanding in (ISLANDING_ON_GRID, "OFF_GRID"):
+        return False
+    return panel.bess_healthy or panel.sensed_islanding == ISLANDING_ON_GRID
+
+
+def _islanding_shown(p: PanelFacts) -> str | None:
+    """The assertion as the panel spells it, upper-cased. The select shows
+    OFF_GRID (not an option) as no option, but the entity stays available.
+    """
+    text = p.asserted_islanding
+    return None if text is None else text.upper()
+
+
+# --- EV charger ----------------------------------------------------------------------
+
+
+def _format_bounds(fmt: str | None) -> tuple[float | None, float | None]:
+    """A Homie numeric `$format` ("min:max", either side optional)."""
+    if not fmt or ":" not in fmt:
+        return None, None
+    low, _, high = fmt.partition(":")
+    return _format_number(low), _format_number(high)
+
+
+def _format_number(text: str) -> float | None:
+    try:
+        number = float(text.strip())
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def evse_limit_bounds(f: SubdeviceFacts) -> tuple[int, int] | None:
+    """The charge-current limit's (min, max) in whole amps, or None while the
+    charger's own ceiling is unpublished (the control must then be unavailable).
+
+    min is the declared minimum, else the J1772 floor; max is the lower of the
+    declared maximum and the ceiling. A min above max collapses onto max.
+    """
+    ceiling = _float(f.get(EVSE_CEILING_KEY))
+    if ceiling is None:
+        return None
+    low, high = _format_bounds(f.formats.get(EVSE_LIMIT_KEY))
+    top = math.floor(ceiling if high is None else min(high, ceiling))
+    bottom = EVSE_MIN_AMPS if low is None else math.ceil(low)
+    return min(bottom, top), top
+
+
+EVSE_LIMIT_GATED = "gated"  # the ceiling is unknown: the control is unavailable
+EVSE_LIMIT_OUT_OF_RANGE = "out_of_range"
+
+
+def evse_limit_problem(f: SubdeviceFacts | None, value: Any) -> str | None:
+    """Why a charge-current limit may not be sent now, else None. Judged
+    against the bounds as the panel publishes them at call time.
+    """
+    bounds = None if f is None else evse_limit_bounds(f)
+    if bounds is None:
+        return EVSE_LIMIT_GATED
+    amps = _float(value)
+    if amps is None or not bounds[0] <= amps <= bounds[1]:
+        return EVSE_LIMIT_OUT_OF_RANGE
+    return None
+
+
+def evse_limit_payload(value: float) -> int:
+    """Whole amps, rounded down (a lower limit is the safe side). The schema
+    declares an integer, so a fractional limit is never published.
+    """
+    return math.floor(value)
+
+
+def _evse_limit(f: SubdeviceFacts) -> float | None:
+    """The user limit while published, else the ceiling (the effective limit)."""
+    user = _float(f.get(EVSE_LIMIT_KEY))
+    return user if user is not None else _float(f.get(EVSE_CEILING_KEY))
+
+
+def _evse_limit_attrs(f: SubdeviceFacts) -> dict[str, Any]:
+    return {"effective": _float(f.get(EVSE_LIMIT_KEY)) is not None}
+
+
+def _evse_lock(f: SubdeviceFacts) -> str | None:
+    text = _text(f.get(EVSE_LOCK_KEY))
+    return None if text is None else text.upper()
+
+
+def _settable(key: str) -> Callable[[SubdeviceFacts], bool]:
+    return lambda f: key in f.settable
 
 
 def _pcs_flag(name: str) -> Callable[[PanelFacts], bool | None]:
@@ -1281,8 +1482,9 @@ def _circuit_rows() -> tuple[Row, ...]:
         Row("breaker_rating", "sensor", c, "breaker/rating", _S, lambda f: f.rating,
             ("breaker/rating",)),
         Row("breaker", "switch", c, "switch/relay", _C, lambda f: f.relay,
-            ("switch/relay",), lambda f: f.has_switch and not feeds_storage_or_solar(f),
-            attrs=lambda f: _present({"relay_requester": f.relay_requester})),
+            ("switch/relay",), lambda f: f.has_switch,
+            attrs=lambda f: _present({"relay_requester": f.relay_requester}),
+            allowed=_relay_allowed),
         Row("priority", "select", c, "load-shed/priority", _C, lambda f: f.priority,
             ("load-shed/priority",), lambda f: f.has_priority_select,
             attrs=lambda f: _present(
@@ -1415,6 +1617,9 @@ def _islanding_rows() -> tuple[Row, ...]:
             attrs=_islanding_attrs),
         Row("mid:grid/grid-forming-entity", "sensor", p, "derived/grid-forming-entity", _M,
             _grid_forming, when=lambda f: f.has_mid),
+        Row("asserted_islanding", "select", p, ISLANDING_KEY, _C, _islanding_shown,
+            (ISLANDING_KEY,), when=lambda f: f.islanding_settable and f.has_bess,
+            allowed=lambda f, o: o.islanding),
     )  # fmt: skip
 
 
@@ -1452,6 +1657,10 @@ def _subdevice_rows() -> tuple[Row, ...]:
             attrs=_evse_ceiling_attrs),
         Row("evse:derived/panel-link", "binary_sensor", ev, "derived/panel-link", _M, _link_ok,
             when=_link_published, ignores_state=True),
+        Row(f"evse:{EVSE_LIMIT_KEY}", "number", ev, EVSE_LIMIT_KEY, _C, _evse_limit,
+            (EVSE_LIMIT_KEY,), when=_settable(EVSE_LIMIT_KEY), attrs=_evse_limit_attrs),
+        Row(f"evse:{EVSE_LOCK_KEY}", "lock", ev, EVSE_LOCK_KEY, _C, _evse_lock,
+            (EVSE_LOCK_KEY,), when=_settable(EVSE_LOCK_KEY)),
         Row(f"mid:{grid}", "sensor", mid, grid, _M, _enum_of(grid), (grid,)),
         Row(f"mid:{islanding}", "sensor", mid, islanding, _M, _enum_of(islanding),
             (islanding,)),
@@ -1587,10 +1796,19 @@ def row_described(facts: Any, row: Row) -> bool:
     return facts is not None and all(key in facts.described for key in row.needs)
 
 
-def row_exists(snapshot: Snapshot, row: Row, device_id: str) -> bool:
+def row_exists(
+    snapshot: Snapshot,
+    row: Row,
+    device_id: str,
+    options: ControlOptions = DEFAULT_CONTROL_OPTIONS,
+) -> bool:
     """Whether the entity for this row and device should be created."""
     facts = row_facts(snapshot, row, device_id)
-    return row_described(facts, row) and (row.when is None or row.when(facts))
+    return (
+        row_described(facts, row)
+        and (row.when is None or row.when(facts))
+        and (row.allowed is None or row.allowed(facts, options))
+    )
 
 
 # --- derived rows: computed from the whole snapshot ----------------------------------
