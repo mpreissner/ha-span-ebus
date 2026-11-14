@@ -459,10 +459,11 @@ def test_hours_too_small_to_prove_are_not_written():
     assert gap["status"] == bf.APPLIED
 
 
-def test_a_restart_gap_longer_than_the_history_is_dropped():
+def test_a_restart_gap_longer_than_the_history_is_clamped():
     assert bf.restart_gap(T0, T0 + 2 * H) == T0
     assert bf.restart_gap(T0, T0 + bf.MAX_AGE) == T0
-    assert bf.restart_gap(T0, T0 + bf.MAX_AGE + timedelta(seconds=1)) is None
+    back = T0 + bf.MAX_AGE + 3 * H
+    assert bf.restart_gap(T0, back) == back - bf.MAX_AGE
     assert bf.restart_gap(T0, T0) is None
     assert bf.restart_gap(T0 + H, T0) is None
 

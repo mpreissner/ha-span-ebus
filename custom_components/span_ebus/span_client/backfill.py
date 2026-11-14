@@ -256,13 +256,13 @@ def add_gap(
 def restart_gap(down_since: datetime, back_at: datetime) -> datetime | None:
     """Where the gap a total missed while Home Assistant was down starts, or None.
 
-    None when it's longer than `MAX_AGE` (the cloud's history can't fill it
-    whole) or doesn't run forward (the clock moved).
+    A downtime longer than `MAX_AGE` is clamped to its newest `MAX_AGE`, all
+    the cloud's history covers. None when it doesn't run forward (the clock
+    moved).
     """
-    length = back_at - down_since
-    if length <= timedelta(0) or length > MAX_AGE:
+    if back_at <= down_since:
         return None
-    return down_since
+    return max(down_since, back_at - MAX_AGE)
 
 
 def _settle(gap: dict[str, Any], status: str, now: datetime, reason: str | None = None) -> None:
