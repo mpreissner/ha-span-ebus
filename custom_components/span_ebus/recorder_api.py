@@ -36,6 +36,11 @@ def _instance(hass: HomeAssistant) -> Any:
     return get_instance(hass)
 
 
+async def async_block_till_done(hass: HomeAssistant) -> None:
+    """Wait until the recorder has worked through everything queued so far."""
+    await _instance(hass).async_block_till_done()
+
+
 def _start(value: Any) -> datetime:
     """A row's start: a timestamp on current HA, a datetime on older."""
     if isinstance(value, datetime):

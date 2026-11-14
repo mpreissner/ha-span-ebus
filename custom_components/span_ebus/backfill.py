@@ -251,8 +251,7 @@ class GapBackfill:
             now = dt_util.utcnow()
             bf.tidy(self._record, now)
             if not self._reverified:
-                await self._reverify(now)
-                self._reverified = True
+                self._reverified = await self._reverify(now)
             plan = bf.plan(
                 self._record, now=now, cloud_shown=self._transport.shown is Transport.CLOUD
             )
@@ -266,7 +265,7 @@ class GapBackfill:
                     await self._fetch_gaps(plan.fetch, now)
             await self._write_ready(now)
             await self._store.async_save(self._record)
-            self._schedule(deferred)
+            self._schedule(deferred or not self._reverified)
 
     def _schedule(self, deferred: bool) -> None:
         if self._cancel_timer is not None:
@@ -421,11 +420,22 @@ class GapBackfill:
                 bf.settle_queued(gap, verdict, now=dt_util.utcnow(), at_setup=False)
         _LOGGER.debug("backfill: wrote %d gap(s), %s", len(batch), bf.counts(self._record))
 
-    async def _reverify(self, now: datetime) -> None:
-        """Settle gaps a previous run queued, from what the database shows now."""
+    async def _reverify(self, now: datetime) -> bool:
+        """Settle gaps a previous run queued, from what the database shows now.
+
+        Returns whether that's done; False while the recorder isn't loaded
+        (later; ready gaps on those statistics wait too). On a reload the
+        previous instance's adjustments may still be in the recorder's queue,
+        so it's drained first: classifying before they land would hand a
+        partial prefix back to ready and count it twice.
+        """
         queued = bf.with_status(self._record, bf.QUEUED)
-        if not queued or not recorder_api.loaded(self.hass):
-            return
+        if not queued:
+            return True
+        if not recorder_api.loaded(self.hass):
+            return False
+        await recorder_api.async_block_till_done(self.hass)
+        now = dt_util.utcnow()
         for gap in queued:
             eid = self._entity_id(gap)
             if eid is None:
@@ -435,6 +445,7 @@ class GapBackfill:
                 gap, bf.classify(gap, await self._rows(gap, eid)), now=now, at_setup=True
             )
         _LOGGER.debug("backfill: re-verified %d gap(s), %s", len(queued), bf.counts(self._record))
+        return True
 
     def _save_later(self) -> None:
         self._store.async_delay_save(lambda: self._record, SAVE_DELAY_S)
