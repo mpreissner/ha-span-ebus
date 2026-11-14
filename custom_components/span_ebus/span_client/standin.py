@@ -104,14 +104,15 @@ _FED_NAMES: dict[str, tuple[str, str]] = {
 
 
 def kept_name(suffix: str, name: str | None, fed: bool) -> str | None:
-    """A kept cloud entity's name: the registry's, unless the panel's feed
-    changes it. Only the grid pair is renamed; a name the registry holds for
-    anything else is kept as it is.
+    """A kept cloud entity's name. The grid pair is named for the feed or the
+    grid, whatever the registry holds: once fed, HA has stored the feed name as
+    the original name, so the registry's cannot bring the grid name back.
+    Anything else keeps the registry's name.
     """
     names = _FED_NAMES.get(suffix)
-    if names is None or not fed:
+    if names is None:
         return name
-    return names[1]
+    return names[1] if fed else names[0]
 
 
 def standins_for(registry_uids: Iterable[str], cloud_key: str) -> tuple[StandIn, ...]:

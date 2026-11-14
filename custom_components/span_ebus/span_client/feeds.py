@@ -57,6 +57,32 @@ def local_fed(options: Mapping[str, Any]) -> bool:
     return cloud_fed(options)
 
 
+def panel_label(name_by_user: str | None, model: str | None) -> str | None:
+    """How a panel is named in another's attributes: the user's own name for
+    its device, else "SPAN <model>", else nothing.
+
+    Never the device's default name: a cloud device's carries the serial and a
+    local one's the host.
+    """
+    if name_by_user:
+        return name_by_user
+    if model:
+        return f"SPAN {model}"
+    return None
+
+
+def keep_fed_answer(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Options with the fed answer saved, for before the cloud answers go.
+
+    Until the user saves their own, a linked panel's answer comes from the
+    cloud's; removing the cloud drops those, so the answer it gave is kept.
+    """
+    out = dict(options)
+    if not isinstance(out.get(FED_BY_PANEL), bool):
+        out[FED_BY_PANEL] = local_fed(options)
+    return out
+
+
 def branch_circuits(
     feeds: Mapping[str, Feed], upstream: str, panels: Iterable[str]
 ) -> dict[str, str]:

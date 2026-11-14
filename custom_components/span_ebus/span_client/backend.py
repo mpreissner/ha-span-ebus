@@ -275,15 +275,16 @@ def energy_uid(serial: str, spec: PropertySpec) -> str:
 # --- pure mapping -------------------------------------------------------------
 
 
-def _circuit_node(instance_id: int) -> str:
+def _circuit_node(instance_id: int | str) -> str:
     return f"circuit-{instance_id}"
 
 
 def circuit_instance(spec: PropertySpec) -> int | None:
     """The cloud instance id of a circuit's node, or None for any other node."""
-    if spec.node_kind is not NodeKind.CIRCUIT:
+    prefix = _circuit_node("")
+    if spec.node_kind is not NodeKind.CIRCUIT or not spec.node_id.startswith(prefix):
         return None
-    _prefix, _, instance = spec.node_id.partition("circuit-")
+    instance = spec.node_id.removeprefix(prefix)
     return int(instance) if instance.isdigit() else None
 
 

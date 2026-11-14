@@ -184,9 +184,9 @@ class _WriteOnChange(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
     The stream wakes every listener on each frame, twice a second, whether or
     not this entity's reading moved. Availability is part of what is compared,
     so a liveness flip (the coordinator calls its listeners when the stream goes
-    stale) and an unload are still written. These sensors carry no state
-    attributes, so the pair is all there is to compare. Any attribute added
-    later must join the compared pair, or a change to it alone is dropped.
+    stale) and an unload are still written. State attributes are not
+    compared: a change to one alone (a circuit's `feeds_panel` after its
+    downstream device is renamed) shows up only at the next value change.
     """
 
     def __init__(self, coordinator: SpanCloudCoordinator) -> None:

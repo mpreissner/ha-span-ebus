@@ -1606,9 +1606,11 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
                 description_placeholders={"warning": warning},
             )
         # Direction A keeps its link: the stand-ins' uids carry its cloud key.
+        # The fed answer may still be the cloud's, which goes with the cloud
+        # answers, so it is saved first.
         data, options, minor_version = cloud_removed_entry(
             entry.data,
-            entry.options,
+            feeds.keep_fed_answer(entry.options),
             data_keys=CLOUD_DATA_KEYS,
             option_keys=CLOUD_OPTION_KEYS,
             cloud_stem_key=CONF_CLOUD_STEM,

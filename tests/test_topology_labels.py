@@ -112,6 +112,31 @@ def test_removing_the_cloud_keeps_the_option():
     assert feeds.local_fed(kept)
 
 
+def test_removing_the_cloud_keeps_a_fed_answer_never_saved():
+    cloud_keys = _const_names()["CLOUD_OPTION_KEYS"]
+    options = _linked(DOWN, panels=PANELS, feeds={DOWN: {"type": feeds.LUGS, "upstream": UP}})
+    assert feeds.FED_BY_PANEL not in options
+    _data, kept, _minor = cloud_removed_entry(
+        {},
+        feeds.keep_fed_answer(options),
+        data_keys=(),
+        option_keys=cloud_keys,
+        cloud_stem_key="cloud_stem",
+    )
+    assert kept[feeds.FED_BY_PANEL] is True
+    assert feeds.local_fed(kept)
+    assert standin.kept_name("site/grid", "Site feed", feeds.local_fed(kept)) == "Site feed"
+    grid_power = next(row for row in model.ROWS if row.key == "grid_power")
+    assert model.translation_key(grid_power, feeds.local_fed(kept)) == "feed_power"
+
+
+def test_keeping_the_fed_answer_never_overrides_a_saved_one():
+    options = _linked(DOWN, panels=PANELS, feeds={DOWN: {"type": feeds.LUGS, "upstream": UP}})
+    saved = {**options, feeds.FED_BY_PANEL: False}
+    assert feeds.keep_fed_answer(saved) == saved
+    assert feeds.keep_fed_answer({}) == {feeds.FED_BY_PANEL: False}
+
+
 # --- local names -----------------------------------------------------------------------
 
 
@@ -225,8 +250,21 @@ def test_kept_grid_entities_follow_the_feed():
 
 def test_other_kept_names_are_the_registry_names():
     assert standin.kept_name("circuit-54/power", "Branch A power", True) == "Branch A power"
-    assert standin.kept_name("site/grid", "Registry name", False) == "Registry name"
+    assert standin.kept_name("circuit-54/power", "Branch A power", False) == "Branch A power"
     assert standin.kept_name("panel/power", None, True) is None
+
+
+def test_kept_grid_names_ignore_the_registry():
+    # Whatever the registry holds, the pair follows the feed.
+    assert standin.kept_name("site/grid", "Registry name", False) == "Site grid"
+    assert standin.kept_name("site/grid", None, True) == "Site feed"
+
+
+def test_an_unfed_panel_gets_its_grid_names_back():
+    # Once fed, HA stores the feed name as the original name; unticking the
+    # option must still bring the grid name back.
+    assert standin.kept_name("site/grid", "Site feed", False) == "Site grid"
+    assert standin.kept_name("site/grid_energy", "Site feed energy", False) == "Site grid energy"
 
 
 # --- feeds_panel -----------------------------------------------------------------------
@@ -249,6 +287,39 @@ def test_feeds_panel_is_the_device_name_only():
     assert feeds.feeds_panel(circuits, 7, names) == "Garage panel"
     assert feeds.feeds_panel(circuits, "7", names) == "Garage panel"
     assert feeds.feeds_panel(circuits, 8, names) is None
+
+
+SERIAL = "nt-0000-synthetic"
+HOST = "192.0.2.10"
+
+
+@pytest.mark.parametrize(
+    "default_name",
+    [
+        f"SPAN MAIN 32 {SERIAL}",  # a cloud device's default name
+        f"SPAN Panel ({HOST})",  # a local or linked device's: the entry title
+    ],
+)
+def test_feeds_panel_never_shows_a_default_name(default_name):
+    circuits = feeds.branch_circuits({DOWN: _branch(UP, "7")}, UP, PANELS)
+    # No user name: the model alone, never the default name.
+    label = feeds.panel_label(None, "MAIN 32")
+    shown = feeds.feeds_panel(circuits, 7, {DOWN: label})
+    assert shown == "SPAN MAIN 32"
+    assert shown != default_name
+    assert SERIAL not in shown
+    assert HOST not in shown
+
+
+def test_feeds_panel_without_a_user_name_or_model_is_absent():
+    circuits = feeds.branch_circuits({DOWN: _branch(UP, "7")}, UP, PANELS)
+    assert feeds.panel_label(None, None) is None
+    assert feeds.panel_label("", "") is None
+    assert feeds.feeds_panel(circuits, 7, {DOWN: feeds.panel_label(None, None)}) is None
+
+
+def test_feeds_panel_prefers_the_user_name():
+    assert feeds.panel_label("Garage panel", "MAIN 32") == "Garage panel"
 
 
 def test_feeds_panel_is_absent_without_an_answer_or_a_name():
