@@ -19,9 +19,12 @@ from homeassistant.helpers.typing import ConfigType
 
 from . import backfill, energy_step, legacy_repair
 from .const import (
+    CLOUD_DATA_KEYS,
+    CLOUD_OPTION_KEYS,
     CONF_ACCESS_TOKEN,
     CONF_CA_PEM,
     CONF_CLIENT_NAME,
+    CONF_CLOUD_STEM,
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_LOCAL_SERIAL,
@@ -38,7 +41,7 @@ from .coordinator import SpanCloudCoordinator, energy_store
 from .energy_step import EnergyStepTracker
 from .runtime import SpanRuntime
 from .services import async_setup_services
-from .span_client import cloud_auth
+from .span_client import cloud_auth, feeds
 from .span_client.backend import (
     PanelPlan,
     SiteInfo,
@@ -50,7 +53,7 @@ from .span_client.backend import (
     stream_identity,
 )
 from .span_client.backfill import should_run as backfill_wanted
-from .span_client.link import migration_ok
+from .span_client.link import cloud_removed_entry, legacy_local_only, migration_ok
 from .span_client.local import model, onboard
 from .span_client.local.health import Mode
 from .transport import SpanTransportManager, fallback_issue_id, local_tree_store
@@ -185,6 +188,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         # Added over the local API. Earlier versions left this issue to say
         # local telemetry was still to come.
         ir.async_delete_issue(hass, DOMAIN, _local_pending_issue(entry))
+        if legacy_local_only(entry.data, entry.options):
+            # Local only means no SPAN account. Earlier versions could keep one
+            # behind it, unused; it goes as the options flow's remove takes it,
+            # before the transport or backfill read the entry.
+            data, options, minor_version = cloud_removed_entry(
+                entry.data,
+                feeds.keep_topology(entry.options),
+                data_keys=CLOUD_DATA_KEYS,
+                option_keys=CLOUD_OPTION_KEYS,
+                cloud_stem_key=CONF_CLOUD_STEM,
+            )
+            options[CONF_TRANSPORT_MODE] = Mode.LOCAL_ONLY.value
+            hass.config_entries.async_update_entry(
+                entry, data=data, options=options, minor_version=minor_version
+            )
+            _LOGGER.info("Removed the unused SPAN account from a local-only panel entry")
         if CONF_TOKENS not in entry.data:
             # No account any more: a token file left from one must not linger.
             await hass.async_add_executor_job(cloud_auth.discard_tokens, _token_path(hass, entry))

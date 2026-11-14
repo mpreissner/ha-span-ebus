@@ -118,23 +118,29 @@ def test_removing_the_cloud_keeps_a_fed_answer_never_saved():
     assert feeds.FED_BY_PANEL not in options
     _data, kept, _minor = cloud_removed_entry(
         {},
-        feeds.keep_fed_answer(options),
+        feeds.keep_topology(options),
         data_keys=(),
         option_keys=cloud_keys,
         cloud_stem_key="cloud_stem",
     )
     assert kept[feeds.FED_BY_PANEL] is True
+    assert kept[feeds.TOPOLOGY] == {"supply": feeds.LUGS}
     assert feeds.local_fed(kept)
     assert standin.kept_name("site/grid", "Site feed", feeds.local_fed(kept)) == "Site feed"
     grid_power = next(row for row in model.ROWS if row.key == "grid_power")
     assert model.translation_key(grid_power, feeds.local_fed(kept)) == "feed_power"
 
 
-def test_keeping_the_fed_answer_never_overrides_a_saved_one():
+def test_keeping_the_answer_never_overrides_a_saved_one():
     options = _linked(DOWN, panels=PANELS, feeds={DOWN: {"type": feeds.LUGS, "upstream": UP}})
     saved = {**options, feeds.FED_BY_PANEL: False}
-    assert feeds.keep_fed_answer(saved) == saved
-    assert feeds.keep_fed_answer({}) == {feeds.FED_BY_PANEL: False}
+    kept = feeds.keep_topology(saved)
+    assert kept[feeds.TOPOLOGY] == {"supply": feeds.OWN_SUPPLY}
+    assert kept[feeds.FED_BY_PANEL] is False
+    assert feeds.keep_topology({}) == {
+        feeds.TOPOLOGY: {"supply": feeds.OWN_SUPPLY},
+        feeds.FED_BY_PANEL: False,
+    }
 
 
 # --- local names -----------------------------------------------------------------------
@@ -355,8 +361,7 @@ def test_every_fed_key_has_a_name():
         assert sensors[fed_key]["name"].startswith("Feed ")
 
 
-def test_the_option_is_offered_on_both_menus():
+def test_topology_is_offered_on_the_panel_menu():
     steps = _strings()["options"]["step"]
-    assert "fed_by_panel" in steps["local_panel"]["menu_options"]
-    assert "fed_by_panel" in steps["linked"]["menu_options"]
-    assert steps["fed_by_panel"]["data"]["fed_by_panel"]
+    assert "topology" in steps["panel"]["menu_options"]
+    assert steps["topology"]["data"]["supply"]

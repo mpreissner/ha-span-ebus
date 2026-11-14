@@ -343,6 +343,47 @@ def cloud_removed_entry(
     return new_data, new_options, LINKED_MINOR_VERSION
 
 
+# --- the Connection choice ---------------------------------------------------------
+#
+# A local entry is either local first, with the SPAN account as its fallback,
+# or local only, with no account. The string keys match the integration's const.
+
+_TOKENS = "tokens"
+_LOCAL_SERIAL = "local_serial"
+_TRANSPORT_MODE = "transport_mode"
+LOCAL_FIRST = "local_first"
+LOCAL_ONLY = "local_only"
+
+
+def connection_default(has_tokens: bool, mode: str | None) -> str:
+    """The Connection step's default: the entry's effective state.
+
+    With the account, a missing or unknown mode runs local first (as setup
+    reads it), so only an explicit local only reads as local only.
+    """
+    return LOCAL_FIRST if has_tokens and mode != LOCAL_ONLY else LOCAL_ONLY
+
+
+def connection_action(has_tokens: bool, mode: str | None, chosen: str) -> str:
+    """What saving the Connection step does: "noop", "add" or "remove".
+
+    Without the account, local first signs in to it and local only changes
+    nothing. With it, local only removes it and local first changes nothing.
+    """
+    if has_tokens:
+        return "remove" if chosen == LOCAL_ONLY else "noop"
+    return "add" if chosen == LOCAL_FIRST else "noop"
+
+
+def legacy_local_only(data: Mapping[str, Any], options: Mapping[str, Any]) -> bool:
+    """Whether a local entry set to local only still stores a SPAN account.
+
+    Earlier versions could keep the account behind local only; this one
+    removes it at setup.
+    """
+    return _TOKENS in data and _LOCAL_SERIAL in data and options.get(_TRANSPORT_MODE) == LOCAL_ONLY
+
+
 def migration_ok(version: int, minor_version: int) -> bool:
     """Whether this code can run an entry stored at this version.
 
