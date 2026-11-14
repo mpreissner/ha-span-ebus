@@ -1894,8 +1894,10 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             self.hass.config_entries.async_update_entry(
                 entry, data=data, options=options, minor_version=LINKED_MINOR_VERSION
             )
-        except Exception as err:  # noqa: BLE001 — undone and reported as an abort
+        except BaseException as err:  # undone; a cancellation goes on up after the undo
             await self._undo_link(registry, devices, applied, merged, record_store)
+            if not isinstance(err, Exception):
+                raise
             _LOGGER.error(
                 "linking the local panel failed after %d of %d re-points: %s",
                 len(applied),
