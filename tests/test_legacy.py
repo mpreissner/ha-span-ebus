@@ -269,6 +269,18 @@ def test_a_cloud_shaped_uid_or_a_standin_in_live_is_not_listed():
     assert got.unmatched == ("switch.unmatched",)
 
 
+def test_a_sensor_and_a_switch_sharing_a_suffix_are_both_listed():
+    views = [
+        view("sensor.relay", f"{K}_circuit-9/relay"),
+        view("switch.relay", f"{K}_circuit-9/relay"),
+        view("sensor.balance", f"{K}_site/balance"),
+        view("switch.balance", f"{K}_site/balance"),
+    ]
+    got = legacy_entities(views, local_serial=S, cloud_stem=K, unmatched=["circuit-9/relay"])
+    assert got.unmatched == ("sensor.relay", "switch.relay")
+    assert got.fallback_only == ("sensor.balance", "switch.balance")
+
+
 # --- what the confirm step shows ----------------------------------------------------
 
 

@@ -130,7 +130,9 @@ def legacy_entities(
     local transport sensor and stand-ins are never listed.
     """
     live = {transport_uid(local_serial), *live}
-    on_stem: dict[str, str] = {}
+    # Per domain, as `kept_cloud_entries` reads them: a sensor and a switch
+    # may share a suffix.
+    on_stem: dict[str, dict[str, str]] = {}
     duplicate: list[str] = []
     for entry in entries:
         if entry.unique_id in live:
@@ -141,16 +143,18 @@ def legacy_entities(
                 # one under the stem came back from an older release.
                 duplicate.append(entry.entity_id)
             else:
-                on_stem[suffix] = entry.entity_id
+                domain = entry.entity_id.partition(".")[0]
+                on_stem.setdefault(domain, {})[suffix] = entry.entity_id
             continue
         if cloud_suffix(entry.unique_id) is not None:
             duplicate.append(entry.entity_id)
 
-    kinds = classify_kept(on_stem, unmatched)
+    unmatched = tuple(unmatched)
     groups: dict[str, list[str]] = {UNMATCHED: [], FALLBACK: []}
-    for suffix, kind in kinds.items():
-        if kind != STANDIN:
-            groups[kind].append(on_stem[suffix])
+    for rows in on_stem.values():
+        for suffix, kind in classify_kept(rows, unmatched).items():
+            if kind != STANDIN:
+                groups[kind].append(rows[suffix])
     return LegacyEntities(
         duplicate=tuple(sorted(duplicate)),
         unmatched=tuple(sorted(groups[UNMATCHED])),
