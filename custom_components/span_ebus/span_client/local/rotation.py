@@ -26,6 +26,7 @@ from .rest import (
     OutcomeUnknown,
     RateLimited,
     RotatedPassphrase,
+    SpanLocalError,
     UnexpectedResponse,
 )
 
@@ -283,6 +284,9 @@ async def _put(api: RotationApi) -> RotatedPassphrase:
         raise RotationError(Problem.OUTCOME_UNKNOWN) from None
     except UnexpectedResponse:
         raise RotationError(Problem.FAILED) from None
+    except SpanLocalError:
+        # The only bare one is raised before sending, without a pinned CA.
+        raise RotationError(Problem.NO_CA) from None
 
 
 async def _probe(

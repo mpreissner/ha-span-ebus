@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ssl
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -29,7 +30,7 @@ from .const import (
     DOMAIN,
 )
 from .span_client.local import rotation
-from .span_client.local.rest import SpanLocalApi
+from .span_client.local.rest import SpanLocalApi, SpanLocalError
 from .transport import local_mqtt_for
 
 if TYPE_CHECKING:
@@ -97,21 +98,30 @@ async def _async_rotate_credentials(hass: HomeAssistant, call: ServiceCall) -> S
         raise Unauthorized(context=call.context, permission=POLICY_CONTROL)
 
     locks: dict[str, asyncio.Lock] = hass.data[DOMAIN][ROTATION_LOCKS]
-    lock = rotation.lock_for(locks, _pick(hass, call).entry_id)
+    locked_id = _pick(hass, call).entry_id
+    lock = rotation.lock_for(locks, locked_id)
     async with lock:
-        # Again: the entry may have changed while this call waited.
+        # Again: the entry may have changed while this call waited. If it is
+        # now another entry, this lock does not cover it.
         entry = _pick(hass, call)
+        if entry.entry_id != locked_id:
+            raise _error(rotation.Problem.NOT_LOADED)
         runtime = getattr(entry, "runtime_data", None)
         transport = runtime.transport if runtime is not None else None
         if transport is None:
             raise _error(rotation.Problem.NOT_LOADED)
         data = entry.data
-        api = SpanLocalApi(
-            async_get_clientsession(hass),
-            data[CONF_HOST],
-            ca_pem=data.get(CONF_CA_PEM),
-            access_token=data.get(CONF_ACCESS_TOKEN),
-        )
+        try:
+            api = SpanLocalApi(
+                async_get_clientsession(hass),
+                data[CONF_HOST],
+                ca_pem=data.get(CONF_CA_PEM),
+                access_token=data.get(CONF_ACCESS_TOKEN),
+            )
+        except (SpanLocalError, ssl.SSLError, ValueError):
+            # A stored CA that will not load: nothing was sent, and reauth
+            # pins a fresh one.
+            raise _error(rotation.Problem.NO_CA) from None
 
         async def store(password: str) -> None:
             hass.config_entries.async_update_entry(
@@ -119,6 +129,10 @@ async def _async_rotate_credentials(hass: HomeAssistant, call: ServiceCall) -> S
             )
 
         async def probe(password: str) -> None:
+            # The entry's own client id, not a made-up one. Under MQTT 3.1.1
+            # the broker takes over the old session only after a successful
+            # CONNECT, so a failed probe leaves the running link alone, and a
+            # new id risks the broker's ACL refusing it whatever the password.
             broker = local_mqtt_for(entry.data, password, on_message=_ignore)
             try:
                 await broker.connect_once()
@@ -129,6 +143,10 @@ async def _async_rotate_credentials(hass: HomeAssistant, call: ServiceCall) -> S
         async def reload() -> bool:
             return await hass.config_entries.async_reload(entry.entry_id)
 
+        # The reload runs inside rotating(): until it has replaced the old
+        # transport, a broker refusing the old password must not open a
+        # reauth. The flag is then cleared on the old transport, which the
+        # reload has already stopped, so clearing it there is harmless.
         try:
             with rotation.rotating(transport):
                 result = await rotation.rotate(

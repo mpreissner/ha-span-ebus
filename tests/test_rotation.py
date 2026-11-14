@@ -283,6 +283,7 @@ def test_reload_failure_is_not_reconnected(effects):
         (rest.CannotConnect("sent, then lost"), Problem.OUTCOME_UNKNOWN),
         (rest.UnexpectedResponse("HTTP 503"), Problem.FAILED),
         (rest.NotFound("HTTP 404"), Problem.FAILED),
+        (rest.SpanLocalError("no pinned CA; call fetch_ca first"), Problem.NO_CA),
     ],
 )
 def test_put_errors_store_nothing(error, problem):
@@ -501,6 +502,12 @@ def test_put_returns_both_secrets():
         (text("not json"), rest.OutcomeUnknown),  # 2xx, unreadable
         (body({"hopPassphrase": SENTINEL}), rest.OutcomeUnknown),  # 2xx, incomplete
         (body(["a list"]), rest.OutcomeUnknown),
+        # A null or empty field is missing, never the string "None".
+        (body({**GOOD, "ebusBrokerPassword": None}), rest.OutcomeUnknown),
+        (body({**GOOD, "ebusBrokerPassword": ""}), rest.OutcomeUnknown),
+        (body({**GOOD, "hopPassphrase": None}), rest.OutcomeUnknown),
+        (body({**GOOD, "hopPassphrase": ""}), rest.OutcomeUnknown),
+        (body({**GOOD, "hopPassphrase": 1234}), rest.OutcomeUnknown),
         (text(""), rest.OutcomeUnknown),  # 2xx, empty
         (text("", status=500), rest.OutcomeUnknown),
         (text("", status=502), rest.OutcomeUnknown),
@@ -532,6 +539,66 @@ def test_put_timeout_after_sending_is_outcome_unknown():
 
     error = put_error(handler, timeout=0.3)
     assert type(error) is rest.OutcomeUnknown
+
+
+def _stalled_handshake(scenario: Callable[[int], Awaitable[Any]]) -> Any:
+    """Run `scenario(port)` against a server that accepts and never answers TLS."""
+
+    async def main() -> Any:
+        held: list[asyncio.StreamWriter] = []
+
+        async def accept(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            held.append(writer)
+
+        server = await asyncio.start_server(accept, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            return await scenario(port)
+        finally:
+            for writer in held:
+                writer.close()
+            server.close()
+            await server.wait_closed()
+
+    return asyncio.run(main())
+
+
+def test_put_connect_timeout_is_not_sent():
+    async def scenario(port: int) -> rest.SpanLocalError:
+        async with aiohttp.ClientSession() as session:
+            api = rest.SpanLocalApi(
+                session, "127.0.0.1", port=port, ca_pem=CA, access_token=TOKEN, timeout=0.6
+            )
+            with pytest.raises(rest.SpanLocalError) as caught:
+                await api.rotate_passphrase()
+            return caught.value
+
+    error = _stalled_handshake(scenario)
+    assert type(error) is rest.NotSent
+
+
+def test_flow_maps_a_connect_timeout_to_cannot_connect():
+    async def scenario(port: int) -> RotationError:
+        async with aiohttp.ClientSession() as session:
+            api = rest.SpanLocalApi(
+                session, "127.0.0.1", port=port, ca_pem=CA, access_token=TOKEN, timeout=0.6
+            )
+            with pytest.raises(RotationError) as caught:
+                await rotation.rotate(api, **Effects().kwargs())
+            return caught.value
+
+    assert _stalled_handshake(scenario).problem is Problem.CANNOT_CONNECT
+
+
+def test_put_without_a_pinned_ca_is_no_ca():
+    async def main() -> RotationError:
+        async with aiohttp.ClientSession() as session:
+            api = rest.SpanLocalApi(session, "127.0.0.1", access_token=TOKEN)
+            with pytest.raises(RotationError) as caught:
+                await rotation.rotate(api, **Effects().kwargs())
+            return caught.value
+
+    assert asyncio.run(main()).problem is Problem.NO_CA
 
 
 def test_put_untrusted_certificate_is_not_sent():
@@ -607,6 +674,7 @@ def test_flow_over_https_maps_a_bad_body_and_a_502():
     assert serve(text("{broken"), scenario) is Problem.OUTCOME_UNKNOWN
     assert serve(text("", status=502), scenario) is Problem.OUTCOME_UNKNOWN
     assert serve(text("", status=503), scenario) is Problem.FAILED
+    assert serve(body({**GOOD, "ebusBrokerPassword": None}), scenario) is (Problem.OUTCOME_UNKNOWN)
 
 
 # --- redaction -------------------------------------------------------------------------

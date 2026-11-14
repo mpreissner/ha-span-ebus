@@ -25,6 +25,9 @@ from . import tls
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 15
+# Seconds for the passphrase PUT to connect and finish its TLS handshake. Its
+# own limit so a connect timeout is told apart from one after sending.
+ROTATE_CONNECT_TIMEOUT = 5
 API = "/api/v2"
 
 
@@ -298,13 +301,20 @@ class SpanLocalApi:
             raise SpanLocalError("no pinned CA; call fetch_ca first")
         if not self._token:
             raise AuthFailed("not registered")
+        # With only a total, a connect timeout is a plain TimeoutError and
+        # reads as OutcomeUnknown. sock_connect makes it ConnectionTimeoutError,
+        # so a request that never left is reported as NotSent.
+        total = self._timeout.total or DEFAULT_TIMEOUT
+        timeout = aiohttp.ClientTimeout(
+            total=total, sock_connect=min(ROTATE_CONNECT_TIMEOUT, total / 2)
+        )
         try:
             async with self._session.request(
                 method,
                 self._url(path),
                 headers={"Authorization": f"Bearer {self._token}"},
                 ssl=context,
-                timeout=self._timeout,
+                timeout=timeout,
             ) as resp:
                 if resp.status >= 500 and resp.status != 503:
                     log.debug("%s %s -> %s", method, path, resp.status)
@@ -321,13 +331,16 @@ class SpanLocalApi:
             raise NotSent(f"{method} {path}: {type(exc).__name__}") from None
         except (TimeoutError, aiohttp.ClientError) as exc:
             raise OutcomeUnknown(f"{method} {path}: {type(exc).__name__}") from None
-        try:
-            return RotatedPassphrase(
-                broker_password=str(body["ebusBrokerPassword"]),
-                hop_passphrase=str(body["hopPassphrase"]),
-            )
-        except (KeyError, TypeError):
-            raise OutcomeUnknown(f"{method} {path}: response missing fields") from None
+        # A null or empty field is missing: str() would turn null into "None"
+        # and store that as the broker password.
+        fields = body if isinstance(body, dict) else {}
+        broker_password = fields.get("ebusBrokerPassword")
+        hop_passphrase = fields.get("hopPassphrase")
+        if not (isinstance(broker_password, str) and broker_password):
+            raise OutcomeUnknown(f"{method} {path}: response missing fields")
+        if not (isinstance(hop_passphrase, str) and hop_passphrase):
+            raise OutcomeUnknown(f"{method} {path}: response missing fields")
+        return RotatedPassphrase(broker_password=broker_password, hop_passphrase=hop_passphrase)
 
     async def get_fqdn(self) -> str | None:
         body = await self._request("GET", "/dns/fqdn")
