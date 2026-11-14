@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -68,7 +69,12 @@ async def async_remove(hass: HomeAssistant, entry_id: str) -> None:
     await store(hass, entry_id).async_remove()
 
 
+class _Stopped(Exception):
+    """The runner stopped before the fetch touched the token file."""
+
+
 def _fetch(
+    halt: threading.Event,
     token_path: Path,
     tokens: dict | None,
     write_tokens: TokenWriter,
@@ -82,12 +88,18 @@ def _fetch(
 
     The token file is written from the entry only when it is missing, as the
     fallback would write it; a refresh is saved to that file and nowhere else.
+    Once `halt` is set (the entry is unloading, and its token file may be
+    removed next) the file is never written or refreshed: a fetch that
+    outlives the unload's wait can't bring it back.
     """
-    if not token_path.exists():
-        if tokens is None:
-            raise cloud_auth.CloudCredentialsRejected("no cloud credentials")
-        write_tokens(token_path, tokens)
-    access_token = cloud_auth.access_token_from_store(token_path)
+    with cloud_auth.token_lock(token_path):
+        if halt.is_set():
+            raise _Stopped
+        if not token_path.exists():
+            if tokens is None:
+                raise cloud_auth.CloudCredentialsRejected("no cloud credentials")
+            write_tokens(token_path, tokens)
+        access_token = cloud_auth.access_token_from_store(token_path)
     request = cloud_history.build_request(
         {target.resource: [target.instance]},
         start_ms=start_ms,
@@ -131,6 +143,7 @@ class GapBackfill:
         self._cancel_startup: CALLBACK_TYPE | None = None
         self._task: asyncio.Task[None] | None = None
         self._fetching: asyncio.Future[Any] | None = None
+        self._halt = threading.Event()  # tells a fetch thread to leave the token file alone
         self._again = False
         self._started = False  # the startup kick has come
         self._reverified = False
@@ -170,6 +183,7 @@ class GapBackfill:
         if self._stopped:
             return
         self._stopped = True
+        self._halt.set()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -296,6 +310,7 @@ class GapBackfill:
         self._record["last_request"] = bf.iso(now)
         self._fetching = self.hass.async_add_executor_job(
             _fetch,
+            self._halt,
             self._token_path,
             self.entry.data.get(CONF_TOKENS),
             self._write_tokens,
