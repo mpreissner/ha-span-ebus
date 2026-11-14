@@ -60,6 +60,7 @@ from .local_entity import (
     panel_device_info,
     round_value,
 )
+from .span_client import backfill as backfill_gaps
 from .span_client import standin
 from .span_client.backend import (
     POWER_PROPERTY,
@@ -726,7 +727,9 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
                 at = now - timedelta(seconds=max(0.0, time.monotonic() - timestamp))
                 drew = self._last_w is not None and self._last_w > 0 and power > 0
                 if self._down_since is not None:
-                    self._record_gap(self._down_since, at, drew)
+                    start = backfill_gaps.restart_gap(self._down_since, at)
+                    if start is not None:
+                        self._record_gap(start, at, drew)
                     self._down_since = None
                 if gap is not None:
                     self._last_gap = gap
