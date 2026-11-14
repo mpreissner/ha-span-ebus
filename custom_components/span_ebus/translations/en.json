@@ -686,6 +686,58 @@
     },
     "evse_limit_out_of_range": {
       "message": "The charge current limit must be between {min} and {max} A."
+    },
+    "rotate_no_local_panel": {
+      "message": "No loaded panel added over its local API matches this call. Pick a local panel's config entry or device."
+    },
+    "rotate_multiple_panels": {
+      "message": "More than one panel was added over its local API. Pick the panel's config entry or device."
+    },
+    "rotate_target_mismatch": {
+      "message": "The device does not belong to the config entry given. Give one of them, or a matching pair."
+    },
+    "rotate_not_local": {
+      "message": "This entry was not added over the panel's local API, so it has no local credentials to rotate."
+    },
+    "rotate_not_loaded": {
+      "message": "This entry is not loaded. Rotate its credentials once it is running."
+    },
+    "rotate_no_token": {
+      "message": "This entry has no local access token. Run reauthentication first; nothing was changed."
+    },
+    "rotate_no_ca": {
+      "message": "This entry has no pinned panel certificate. Run reauthentication first; nothing was changed."
+    },
+    "rotate_auth_failed": {
+      "message": "The panel refused this entry's access token. Run reauthentication; nothing was changed."
+    },
+    "rotate_rate_limited": {
+      "message": "The panel is limiting requests. Try again in {retry_after} seconds; nothing was changed."
+    },
+    "rotate_cannot_connect": {
+      "message": "The panel could not be reached, so the request was not sent. Nothing was changed."
+    },
+    "rotate_failed": {
+      "message": "The panel refused to rotate its credentials. Nothing was changed."
+    },
+    "rotate_outcome_unknown": {
+      "message": "The panel's answer was lost, so its passphrase may have changed. If it did, the new one is in the SPAN app: enter it in the reauthentication that follows."
+    }
+  },
+  "services": {
+    "rotate_credentials": {
+      "name": "Rotate local credentials",
+      "description": "Asks a panel added over its local API for a new passphrase and broker password, stores the password and reconnects. Admin users only. The new passphrase is returned in the response and nowhere else: a script that keeps the response in a variable keeps it in its trace, and debug logging of the websocket API logs it.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The panel's config entry. Optional when only one panel was added over its local API."
+        },
+        "device_id": {
+          "name": "Device",
+          "description": "Any device of the panel: the panel, a circuit or a subdevice. Optional when only one panel was added over its local API."
+        }
+      }
     }
   }
 }

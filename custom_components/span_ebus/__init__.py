@@ -11,9 +11,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
 
 from . import backfill, energy_step, legacy_repair
 from .const import (
@@ -35,6 +37,7 @@ from .const import (
 from .coordinator import SpanCloudCoordinator, energy_store
 from .energy_step import EnergyStepTracker
 from .runtime import SpanRuntime
+from .services import async_setup_services
 from .span_client import cloud_auth
 from .span_client.backend import (
     PanelPlan,
@@ -147,6 +150,17 @@ def _note_panels(hass: HomeAssistant, entry: SpanConfigEntry, plan: PanelPlan) -
         )
     else:
         ir.async_delete_issue(hass, DOMAIN, _new_panels_issue(entry))
+
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the services once, so a call naming an entry that is not loaded
+    gets a clear error rather than "unknown action".
+    """
+    async_setup_services(hass)
+    return True
 
 
 def _transport_mode(entry: SpanConfigEntry) -> Mode:

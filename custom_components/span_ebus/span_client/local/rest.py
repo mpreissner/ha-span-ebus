@@ -25,6 +25,9 @@ from . import tls
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 15
+# Seconds for the passphrase PUT to connect and finish its TLS handshake. Its
+# own limit so a connect timeout is told apart from one after sending.
+ROTATE_CONNECT_TIMEOUT = 5
 API = "/api/v2"
 
 
@@ -34,6 +37,13 @@ class SpanLocalError(Exception):
 
 class CannotConnect(SpanLocalError):
     """The panel did not answer: wrong host, offline, or a TLS failure."""
+
+
+class NotSent(CannotConnect):
+    """The request never left: refused, TLS verification failed, or the
+    connection (or a pooled one) timed out before it was made. Raised only by
+    `rotate_passphrase`, where it tells "nothing changed" from "maybe changed".
+    """
 
 
 class RateLimited(SpanLocalError):
@@ -275,21 +285,62 @@ class SpanLocalApi:
     async def rotate_passphrase(self) -> RotatedPassphrase:
         """Regenerate the passphrase and broker password.
 
-        A timeout or 504 raises OutcomeUnknown: the rotation may have happened,
-        so the caller must not retry blindly. The old broker password stays
-        valid for about 30 s.
+        Its own request path, so a lost answer is never mistaken for a refusal:
+        - NotSent: the request never left, so nothing changed;
+        - OutcomeUnknown: a timeout or broken connection after it was sent, a
+          5xx other than 503, or a 2xx whose body cannot be read. The rotation
+          may have happened, so the caller must not retry blindly;
+        - AuthFailed, RateLimited and UnexpectedResponse (503 and the other
+          statuses), as for any request: nothing changed.
+
+        The old broker password stays valid for about 30 s.
         """
+        method, path = "PUT", "/auth/passphrase"
+        context = self._ssl
+        if context is None:
+            raise SpanLocalError("no pinned CA; call fetch_ca first")
+        if not self._token:
+            raise AuthFailed("not registered")
+        # With only a total, a connect timeout is a plain TimeoutError and
+        # reads as OutcomeUnknown. sock_connect makes it ConnectionTimeoutError,
+        # so a request that never left is reported as NotSent.
+        total = self._timeout.total or DEFAULT_TIMEOUT
+        timeout = aiohttp.ClientTimeout(
+            total=total, sock_connect=min(ROTATE_CONNECT_TIMEOUT, total / 2)
+        )
         try:
-            body = await self._request("PUT", "/auth/passphrase")
-        except (TimeoutError, CannotConnect):
-            raise OutcomeUnknown("no answer to passphrase rotation") from None
-        try:
-            return RotatedPassphrase(
-                broker_password=str(body["ebusBrokerPassword"]),
-                hop_passphrase=str(body["hopPassphrase"]),
-            )
-        except (KeyError, TypeError):
-            raise UnexpectedResponse("rotation response missing fields") from None
+            async with self._session.request(
+                method,
+                self._url(path),
+                headers={"Authorization": f"Bearer {self._token}"},
+                ssl=context,
+                timeout=timeout,
+            ) as resp:
+                if resp.status >= 500 and resp.status != 503:
+                    log.debug("%s %s -> %s", method, path, resp.status)
+                    raise OutcomeUnknown(f"{method} {path}: HTTP {resp.status}")
+                if resp.status >= 400:
+                    await _raise_for(resp, method, path)
+                try:
+                    body = await resp.json(content_type=None)
+                except ValueError:
+                    raise OutcomeUnknown(f"{method} {path}: body is not JSON") from None
+        except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as exc:
+            # Before the request was written. The class only: messages can
+            # embed the host.
+            raise NotSent(f"{method} {path}: {type(exc).__name__}") from None
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            raise OutcomeUnknown(f"{method} {path}: {type(exc).__name__}") from None
+        # A null or empty field is missing: str() would turn null into "None"
+        # and store that as the broker password.
+        fields = body if isinstance(body, dict) else {}
+        broker_password = fields.get("ebusBrokerPassword")
+        hop_passphrase = fields.get("hopPassphrase")
+        if not (isinstance(broker_password, str) and broker_password):
+            raise OutcomeUnknown(f"{method} {path}: response missing fields")
+        if not (isinstance(hop_passphrase, str) and hop_passphrase):
+            raise OutcomeUnknown(f"{method} {path}: response missing fields")
+        return RotatedPassphrase(broker_password=broker_password, hop_passphrase=hop_passphrase)
 
     async def get_fqdn(self) -> str | None:
         body = await self._request("GET", "/dns/fqdn")
@@ -346,8 +397,6 @@ class SpanLocalApi:
                 except ValueError:
                     raise UnexpectedResponse(f"{method} {path}: body is not JSON") from None
         except TimeoutError:
-            if method == "PUT" and path == "/auth/passphrase":
-                raise
             raise CannotConnect(f"{method} {path}: timed out") from None
         except aiohttp.ClientError as exc:
             # Includes TLS verification failures. The message names the error

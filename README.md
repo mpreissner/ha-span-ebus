@@ -141,6 +141,33 @@ within a few seconds. Relay state is read from the panel roughly once a minute a
 right after any change, so toggling a breaker in the SPAN app shows up here too.
 Details: [docs/specs/circuit-control.md](docs/specs/circuit-control.md).
 
+## Rotating a local panel's credentials
+
+The `span_ebus.rotate_credentials` action asks a panel added over its local API
+for a new passphrase and broker password. It stores the new password, waits
+(about a minute at most) for the broker to accept it, then reloads the entry.
+Only admin users can run it, and automations can't. Run it from
+**Developer tools > Actions** with "Return response" on:
+
+```yaml
+action: span_ebus.rotate_credentials
+data:
+  config_entry_id: <your entry>   # or device_id; optional with one local panel
+```
+
+The response holds the new `hop_passphrase`, and whether the entry
+`reconnected` and the password was `stored`. Keep the passphrase: it is shown
+nowhere else. If `reconnected` is false, rotate again, or run the entry's
+reauthentication with that passphrase.
+
+The passphrase is not logged or stored by the integration, but two things
+outside it can keep it:
+
+- a script that saves the response in a variable keeps it in its trace;
+- debug logging of `homeassistant.components.websocket_api` logs the response.
+
+This action has not been tested against a real panel yet.
+
 ## How it gets your live data
 
 SPAN's realtime telemetry arrives on an Ably channel named
