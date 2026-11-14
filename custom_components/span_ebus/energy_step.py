@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import (
     async_track_state_change_event,
@@ -31,7 +32,7 @@ from homeassistant.helpers.translation import async_get_translations
 from homeassistant.util import dt as dt_util
 
 from . import recorder_api
-from .const import DOMAIN
+from .const import CONF_CLOUD_STEM, CONF_LOCAL_SERIAL, DOMAIN
 from .span_client import energy_step as es
 
 if TYPE_CHECKING:
@@ -48,6 +49,8 @@ VERIFY_EVERY_S = 1.0
 # Plain reasons are kept as selector options: the issues schema has no room for them.
 REASON_SELECTOR = "energy_step_reason"
 NOTHING = "nothing"
+# Used when the panel device cannot be found; never the entry title (an email).
+PANEL_NAME = "SPAN Panel"
 
 
 def store(hass: HomeAssistant, entry_id: str) -> Store:
@@ -240,7 +243,7 @@ class EnergyStepTracker:
             is_persistent=False,
             severity=ir.IssueSeverity.WARNING,
             translation_key=ISSUE_KEY,
-            translation_placeholders={"title": self.entry.title},
+            translation_placeholders={"title": self._panel_name()},
             data={"entry_id": self.entry.entry_id},
         )
 
@@ -356,11 +359,23 @@ class EnergyStepTracker:
             return ""
         return dt_util.as_local(min(starts)).strftime("%Y-%m-%d %H:%M")
 
+    def _panel_name(self) -> str:
+        """The panel device's name; the entry title can be the account email."""
+        devices = dr.async_get(self.hass)
+        for key in (CONF_LOCAL_SERIAL, CONF_CLOUD_STEM):
+            ident = self.entry.data.get(key)
+            if not ident:
+                continue
+            device = devices.async_get_device(identifiers={(DOMAIN, ident)})
+            if device is not None and (name := device.name_by_user or device.name):
+                return name
+        return PANEL_NAME
+
     async def confirm_placeholders(self) -> dict[str, str]:
         _count, skipped = await self._skipped()
         lines = self._lines((es.READY,), lambda e: f"{float(e['step']):.3f} kWh")
         return {
-            "title": self.entry.title,
+            "title": self._panel_name(),
             "entities": "\n".join(lines) or (await self._reasons()).get(NOTHING, NOTHING),
             "skipped": skipped,
             "hour": self._hour(),
@@ -369,7 +384,7 @@ class EnergyStepTracker:
     async def result_placeholders(self) -> dict[str, str]:
         count, skipped = await self._skipped()
         return {
-            "title": self.entry.title,
+            "title": self._panel_name(),
             "applied": str(len(es.with_status(self._record or {}, es.APPLIED))),
             "skipped_count": str(count),
             "skipped": skipped,
