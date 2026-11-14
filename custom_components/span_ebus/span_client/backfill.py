@@ -75,6 +75,8 @@ KEEP_SETTLED = timedelta(days=7)
 # Above this padded window one hourly request replaces the quarter-hourly one.
 QUARTER_HOURLY_MAX = timedelta(hours=24)
 SUM_TOLERANCE_KWH = 1e-6
+# An hour this small can't be told from rounding in the sums, so it isn't written.
+MIN_HOUR_KWH = 2 * SUM_TOLERANCE_KWH
 HOUR = timedelta(hours=1)
 
 # The integrated rows the cloud meters, by row key, and the SiteMeasurement
@@ -392,7 +394,11 @@ def allocate(
     gap_end: datetime,
     components: Sequence[str],
 ) -> list[tuple[datetime, float]]:
-    """The gap's energy as (UTC hour start, kWh), oldest first, zero hours dropped.
+    """The gap's energy as (UTC hour start, kWh), oldest first.
+
+    Hours of `MIN_HOUR_KWH` or less are dropped: once written, they couldn't be
+    told apart in the sums, so proving which adjustments landed would be
+    ambiguous.
 
     Each bucket's kWh is prorated by the share of the bucket inside
     `[gap_start, gap_end)` and then by the share of that part in each UTC hour,
@@ -415,7 +421,7 @@ def allocate(
             if share > 0:
                 per_hour[hour] = per_hour.get(hour, 0.0) + kwh * share
             hour += HOUR
-    return [(h, per_hour[h]) for h in sorted(per_hour) if per_hour[h] > 0]
+    return [(h, per_hour[h]) for h in sorted(per_hour) if per_hour[h] > MIN_HOUR_KWH]
 
 
 def no_data(
@@ -483,19 +489,21 @@ def fetched(gap: dict[str, Any], buckets: Sequence[Bucket], *, now: datetime) ->
 
 
 def read_window(gap: Mapping[str, Any]) -> tuple[datetime, datetime] | None:
-    """The hourly rows to read: up to a day before the first hour, to the last."""
+    """The hourly rows to read: a day either side of the gap's hours."""
     hours = hours_of(gap)
     if not hours:
         return None
-    return hours[0][0] - timedelta(days=1), hours[-1][0] + HOUR
+    return hours[0][0] - timedelta(days=1), hours[-1][0] + HOUR + timedelta(days=1)
 
 
 def snapshot(
     gap: Mapping[str, Any], rows: Iterable[tuple[datetime, float]]
 ) -> dict[str, float] | None:
-    """The sums to keep as `sum_before`: every row from the first hour, plus the one before.
+    """The sums to keep as `sum_before`: the gap's rows, the one before and the one after.
 
-    The row before can only change if someone else touched the statistic.
+    The row before can only change if someone else touched the statistic. The
+    row after rises by every adjustment that lands, so it pins down how many
+    did even when the row of the last hour is missing.
     None when no row covers the gap's hours yet (the recorder hasn't compiled
     them), so nothing can be proven and nothing is queued.
     """
@@ -508,7 +516,8 @@ def snapshot(
     if not inside:
         return None
     before = [(t, s) for t, s in rows if t < first]
-    picked = ([before[-1]] if before else []) + inside
+    after = [(t, s) for t, s in rows if t > last]
+    picked = before[-1:] + inside + after[:1]
     return {iso(t): float(s) for t, s in picked}
 
 
@@ -558,8 +567,8 @@ def classify(gap: Mapping[str, Any], rows: Iterable[tuple[datetime, float]]) -> 
     """Which prefix of the adjustments the rows show, if any.
 
     Every row in `sum_before` must still exist and have risen by exactly what
-    the first `j` adjustments add to it, for one `j`. Hours are never zero, so
-    at most one `j` fits.
+    the first `j` adjustments add to it, for one `j`. Hours are never below
+    `MIN_HOUR_KWH`, so at most one `j` fits.
     """
     hours = hours_of(gap)
     before = gap.get("sum_before") or {}

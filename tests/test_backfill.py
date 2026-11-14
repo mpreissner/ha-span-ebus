@@ -427,9 +427,36 @@ def risen(j):
 
 def test_snapshot_keeps_the_row_before_and_every_gap_hour():
     gap = ready_gap(HOURS)
-    assert bf.read_window(gap) == (T0 - timedelta(days=1), T0 + 3 * H)
+    assert bf.read_window(gap) == (T0 - timedelta(days=1), T0 + 3 * H + timedelta(days=1))
     snap = bf.snapshot(gap, ROWS)
     assert list(snap) == [bf.iso(t) for t, _ in ROWS[1:]]
+
+
+def test_snapshot_keeps_the_first_row_after_the_gap():
+    rows = [*ROWS, (T0 + 3 * H, 12.0), (T0 + 4 * H, 12.5)]
+    snap = bf.snapshot(ready_gap(HOURS), rows)
+    assert list(snap) == [bf.iso(t) for t, _ in rows[1:-1]]
+
+
+@pytest.mark.parametrize("j", [0, 1, 2, 3])
+def test_row_after_pins_the_prefix_when_the_last_hour_row_is_missing(j):
+    # No row for the last hour: only the row after tells two adjustments from three.
+    rows = [r for r in ROWS if r[0] != T0 + 2 * H] + [(T0 + 3 * H, 12.0)]
+    gap = ready_gap(HOURS)
+    bf.queue(gap, bf.snapshot(gap, rows))
+    assert bf.iso(T0 + 3 * H) in gap["sum_before"]
+    now = [(t, s + bf.expected_rise(HOURS, t, j)) for t, s in rows]
+    assert bf.classify(gap, now) == bf.Verdict(j, 3)
+
+
+def test_hours_too_small_to_prove_are_not_written():
+    buckets = [bucket(T0, 60, home_import=1e-7), bucket(T0 + H, 60, home_import=0.5)]
+    assert bf.allocate(buckets, T0, T0 + 2 * H, HOME) == [(T0 + H, pytest.approx(0.5))]
+    rec = record_with((T0, T0 + H))
+    gap = bf.gaps(rec)[0]
+    # Nothing provable to write: settled as it stands.
+    assert not bf.fetched(gap, buckets[:1], now=T0 + 3 * H)
+    assert gap["status"] == bf.APPLIED
 
 
 def test_one_gap_per_statistic_per_batch():
