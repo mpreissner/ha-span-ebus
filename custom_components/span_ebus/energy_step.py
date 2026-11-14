@@ -140,7 +140,9 @@ class EnergyStepTracker:
         value = es.to_kwh(state.state, state.attributes.get("unit_of_measurement"))
         if value is None:
             return  # unavailable or unknown in between; the compiler skips them too
-        es.first_local(entity, value, dt_util.as_utc(state.last_updated))
+        # The restored cloud total keeps the entity waiting (see `es.first_local`).
+        if not es.first_local(entity, value, dt_util.as_utc(state.last_updated)):
+            return
         if not es.with_status(record, es.WAITING_FIRST):
             self._unsubscribe_state()
         self.hass.async_create_task(self._save(), "span_ebus energy step save")

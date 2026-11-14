@@ -9,7 +9,8 @@ The record is plain JSON (a Store):
 
     {"t_repoint": iso, "issue_raised": bool, "reported": bool,
      "entities": {entity_id: {"cloud_last", "first_local", "first_at", "start",
-                              "step", "sum_before", "status", "reason"}}}
+                              "step", "sum_before", "status", "reason",
+                              "last_seen"?}}}
 
 Times are UTC ISO strings. Entity ids are the statistic ids and are never logged.
 """
@@ -157,19 +158,30 @@ def skip(entity: dict[str, Any], reason: str) -> None:
     entity["reason"] = reason
 
 
-def first_local(entity: dict[str, Any], value_kwh: float, at: datetime) -> None:
-    """Record the first local reading and work out the step and its bucket."""
+def first_local(entity: dict[str, Any], value_kwh: float, at: datetime) -> bool:
+    """Record the first local reading and work out the step and its bucket.
+
+    The re-pointed entity keeps the cloud entity's id, so its restored state
+    (the cloud's last total) is the first state it writes. A reading within
+    `MIN_STEP_KWH` of `cloud_last` is taken as that echo: the entity keeps
+    waiting for the panel's own register, and the reading is noted in
+    `last_seen` for the time-out. Returns whether the entity changed.
+    """
     if entity.get("status") != WAITING_FIRST:
-        return
-    step = expected_step(float(entity["cloud_last"]), value_kwh)
+        return False
+    cloud_last = float(entity["cloud_last"])
+    if abs(value_kwh - cloud_last) < MIN_STEP_KWH:
+        if entity.get("last_seen") == value_kwh:
+            return False
+        entity["last_seen"] = value_kwh
+        return True
+    step = expected_step(cloud_last, value_kwh)
     entity["first_local"] = value_kwh
     entity["first_at"] = _iso(at)
     entity["step"] = step
-    if abs(step) < MIN_STEP_KWH:
-        entity["status"] = NONE
-        return
     entity["start"] = _iso(floor_bucket(at))
     entity["status"] = WAITING_STATS
+    return True
 
 
 def stats_window(entity: Mapping[str, Any]) -> tuple[datetime, datetime] | None:
@@ -219,11 +231,26 @@ def timed_out(record: Mapping[str, Any], now: datetime) -> bool:
 
 
 def time_out(record: Mapping[str, Any]) -> int:
-    """Skip everything still waiting; returns how many."""
+    """Settle everything still waiting; returns how many.
+
+    An entity that only ever showed the cloud's last total (`last_seen` about
+    `cloud_last`) has no step to fix and settles `none`; the rest are skipped.
+    """
     waiting = with_status(record, *WAITING)
     for eid in waiting:
-        skip(entities(record)[eid], NO_STATISTICS_RECORDED)
+        entity = entities(record)[eid]
+        if entity.get("status") == WAITING_FIRST and _echoed(entity):
+            entity["status"] = NONE
+        else:
+            skip(entity, NO_STATISTICS_RECORDED)
     return len(waiting)
+
+
+def _echoed(entity: Mapping[str, Any]) -> bool:
+    seen, last = entity.get("last_seen"), entity.get("cloud_last")
+    if not isinstance(seen, int | float) or not isinstance(last, int | float):
+        return False
+    return abs(float(seen) - float(last)) < MIN_STEP_KWH
 
 
 # What a re-read of sum_B says about an entity that was ready or queued.

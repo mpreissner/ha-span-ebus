@@ -113,11 +113,27 @@ def test_first_local_only_once():
     assert entity(rec)["first_local"] == 1250.0
 
 
-def test_a_tiny_step_is_none():
+def test_the_restored_cloud_total_is_not_the_first_local_reading():
     rec = record()
-    es.first_local(entity(rec), 1000.0005, T0)
-    assert entity(rec)["status"] == es.NONE
+    assert es.first_local(entity(rec), 1000.0005, T0) is True
+    assert entity(rec)["status"] == es.WAITING_FIRST
     assert entity(rec)["start"] is None
+    assert es.first_local(entity(rec), 1000.0005, T0) is False
+    at = T0 + timedelta(minutes=2)
+    assert es.first_local(entity(rec), 1250.0, at) is True
+    e = entity(rec)
+    assert e["status"] == es.WAITING_STATS
+    assert e["first_local"] == 1250.0
+    assert e["step"] == pytest.approx(250.0)
+    assert es.parse_time(e["first_at"]) == at
+
+
+def test_only_the_echo_at_the_time_out_settles_none():
+    rec = es.new_record(T0, {"sensor.a": 10.0, "sensor.b": 10.0})
+    es.first_local(entity(rec, "sensor.a"), 10.0, T0)
+    assert es.time_out(rec) == 2
+    assert entity(rec, "sensor.a")["status"] == es.NONE
+    assert entity(rec, "sensor.b")["reason"] == es.NO_STATISTICS_RECORDED
 
 
 # --- gate ----------------------------------------------------------------------------
