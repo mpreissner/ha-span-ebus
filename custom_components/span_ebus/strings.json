@@ -207,7 +207,7 @@
       },
       "cloud_remove": {
         "title": "Remove cloud fallback",
-        "description": "Home Assistant forgets your SPAN account for this panel and runs it over the local connection only. Entities and their history stay."
+        "description": "Home Assistant forgets your SPAN account for this panel and runs it over the local connection only. Entities and their history stay.{warning}"
       },
       "cloud_pick_panel": {
         "title": "Which panel is this?",
@@ -295,6 +295,21 @@
           "not_running": "The integration isn't running. Try again once it has started."
         }
       }
+    },
+    "legacy_entities": {
+      "title": "{title} has old cloud entities",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Remove old cloud entities",
+            "description": "{count} entities from the earlier cloud setup of {title} are not updated from the panel:\n{groups}\n\n{entities}\n\nTheir history stays available in Statistics. Select Submit to remove them."
+          }
+        },
+        "abort": {
+          "not_running": "The integration isn't running. Try again once it has started.",
+          "nothing_left": "There are no old cloud entities left to remove."
+        }
+      }
     }
   },
   "selector": {
@@ -329,7 +344,17 @@
     "link_note": {
       "options": {
         "serial_mismatch": "The SPAN account lists this panel under a different serial. {matched} of {total} circuits sit on the same breaker spaces, so it looks like the same panel; check that it is before you submit.",
-        "grid_energy": "Site grid energy is one of the sensors only updated while the local connection is down, because this site has several panels. If your Energy dashboard uses it, switch to the panel's imported energy sensor."
+        "grid_energy": "Site grid energy is one of the sensors only updated while the local connection is down, because this site has several panels. If your Energy dashboard uses it, switch to the panel's imported energy sensor.",
+        "cloud_remove_fallback_only": "{count} sensors that only your SPAN account provides stop updating. You can remove them afterwards."
+      }
+    },
+    "legacy_group": {
+      "options": {
+        "duplicate": "{count} left from an earlier version, no longer updated",
+        "unmatched": "{count} for circuits the link could not pair, never updated",
+        "fallback_only": "{count} only updated while the local connection is down",
+        "fallback_only_local": "{count} that only your SPAN account provides; with local only they never update",
+        "more": "…and {count} more"
       }
     }
   },

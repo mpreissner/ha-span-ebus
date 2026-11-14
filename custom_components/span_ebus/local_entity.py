@@ -397,6 +397,8 @@ class SpanUnmatchedEntity(Entity):
     _attr_has_entity_name = True
     _attr_should_poll = False
     _attr_available = False
+    # Fed by no local row: the legacy repair may list it (legacy_repair.live).
+    kept_without_local_row = True
 
     def __init__(
         self, entry: ConfigEntry, transport: SpanTransportManager, kept: KeptEntry

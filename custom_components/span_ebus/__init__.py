@@ -15,7 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from . import energy_step
+from . import energy_step, legacy_repair
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_CA_PEM,
@@ -189,6 +189,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         entry.async_on_unload(runtime.energy_step.async_stop)
         await runtime.energy_step.async_start()
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        # Old cloud entities nothing local feeds: offer to remove them.
+        legacy_repair.async_check(hass, entry)
         return True
 
     # Prove the credentials before starting anything, and learn the topology in
@@ -305,6 +307,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> Non
     ir.async_delete_issue(hass, DOMAIN, _new_panels_issue(entry))
     ir.async_delete_issue(hass, DOMAIN, _local_pending_issue(entry))
     ir.async_delete_issue(hass, DOMAIN, fallback_issue_id(entry.entry_id))
+    legacy_repair.async_remove_issue(hass, entry.entry_id)
     if CONF_ACCESS_TOKEN in entry.data:
         # Best effort: the panel keeps a client registration until it is removed.
         await onboard.discard_client(

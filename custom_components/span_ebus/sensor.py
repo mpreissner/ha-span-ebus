@@ -855,6 +855,8 @@ class _SpanKeptSensor(SensorEntity):
 
     _attr_has_entity_name = True
     _attr_should_poll = False
+    # Fed by no local row: the legacy repair may list it (legacy_repair.live).
+    kept_without_local_row = True
 
     def __init__(
         self, entry: SpanConfigEntry, transport: SpanTransportManager, kept: KeptEntry

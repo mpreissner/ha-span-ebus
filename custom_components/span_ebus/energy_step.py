@@ -53,6 +53,19 @@ NOTHING = "nothing"
 PANEL_NAME = "SPAN Panel"
 
 
+def panel_name(hass: HomeAssistant, entry: ConfigEntry) -> str:
+    """The panel device's name; the entry title can be the account email."""
+    devices = dr.async_get(hass)
+    for key in (CONF_LOCAL_SERIAL, CONF_CLOUD_STEM):
+        ident = entry.data.get(key)
+        if not ident:
+            continue
+        device = devices.async_get_device(identifiers={(DOMAIN, ident)})
+        if device is not None and (name := device.name_by_user or device.name):
+            return name
+    return PANEL_NAME
+
+
 def store(hass: HomeAssistant, entry_id: str) -> Store:
     return Store(hass, STORE_VERSION, f"{DOMAIN}.{entry_id}.energy_step")
 
@@ -360,16 +373,7 @@ class EnergyStepTracker:
         return dt_util.as_local(min(starts)).strftime("%Y-%m-%d %H:%M")
 
     def _panel_name(self) -> str:
-        """The panel device's name; the entry title can be the account email."""
-        devices = dr.async_get(self.hass)
-        for key in (CONF_LOCAL_SERIAL, CONF_CLOUD_STEM):
-            ident = self.entry.data.get(key)
-            if not ident:
-                continue
-            device = devices.async_get_device(identifiers={(DOMAIN, ident)})
-            if device is not None and (name := device.name_by_user or device.name):
-                return name
-        return PANEL_NAME
+        return panel_name(self.hass, self.entry)
 
     async def confirm_placeholders(self) -> dict[str, str]:
         _count, skipped = await self._skipped()
