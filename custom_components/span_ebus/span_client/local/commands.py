@@ -240,6 +240,16 @@ def controls_form(snapshot: Snapshot, options: Mapping[str, Any] | None) -> Cont
     )
 
 
+def controls_hint_keys(override_empty: bool, show_islanding: bool) -> list[str]:
+    """The notes the Controls form shows for the fields it leaves out."""
+    keys = []
+    if override_empty:
+        keys.append("controls_no_override")
+    if not show_islanding:
+        keys.append("controls_no_islanding")
+    return keys
+
+
 def controls_options(
     form: ControlsForm, options: Mapping[str, Any], user_input: Mapping[str, Any]
 ) -> dict[str, Any]:

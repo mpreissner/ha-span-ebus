@@ -168,25 +168,57 @@ outside it can keep it:
 
 This action has not been tested against a real panel yet.
 
+## Connection (local panels)
+
+**Settings → Devices & services → SPAN Panel (eBus) → Configure → Connection**
+chooses how Home Assistant reaches a panel added over its local API:
+
+- **Local, with cloud fallback:** your SPAN account is used only when the local
+  connection becomes unavailable, and to backfill missing site, solar and battery
+  energy for gaps of five minutes or more, such as after a Home Assistant
+  restart. Backfill covers the last 7 days on single-panel sites; circuit energy
+  is not backfilled. Choosing it asks you to sign in to your SPAN account.
+- **Local only:** your SPAN account is removed from Home Assistant for this
+  panel, and the ability to backfill missing energy data is lost. Entities and
+  their history stay.
+
+This release removes the stored SPAN account from panels set to Local only; to
+use fallback again, sign in under Connection.
+
 ## Several panels
 
 A panel's "grid" readings are power and energy into the panel at its lugs. On a
 site with solar or a battery between the utility meter and the panel, that is the
 house's draw through the panel, not what the meter sees.
 
-When another panel feeds this one, its own lugs or one of its circuits, the same
+### Topology
+
+**Configure → Topology** says what feeds a panel added over its local API. Each
+panel answers for itself: saving it on one panel changes no other panel. Saving
+reloads the panel. For a feed-through or breaker feed you can also pick the
+upstream panel and, for a breaker, which breaker; panels from your SPAN account
+and panels found on your network are listed even if Home Assistant doesn't run
+them.
+
+When anything other than the utility meter feeds the panel directly, its grid
 readings are named "Feed power" and "Feed consumed/produced/net energy" ("Site
 feed" and "Site feed energy" over the cloud). The entity ids and history stay as
-they were. Linked to the cloud, the panel takes this from the feeds you answered
-when adding the cloud panels; otherwise, or to change it, use **Fed by another
-panel** in the integration's options.
+they were. A panel linked to the cloud takes this from the feeds you answered
+when adding the cloud panels until you answer Topology.
 
-In the Energy dashboard:
+| What feeds this panel | Its readings | Energy dashboard |
+|---|---|---|
+| Utility meter feeds this panel directly | Grid | The panel's grid energy can be the grid source. |
+| Utility meter, with solar or a battery between the meter and this panel | Feed | Not grid: it is the house load after solar and battery. Use the utility meter or the solar or battery system's grid meter as the grid source, and that system's sensors for solar and battery. |
+| Another panel's feed-through lugs | Feed | Not grid. Use only the panel the utility meter feeds as the grid source. |
+| A breaker on another panel | Feed | Not grid. The upstream breaker already counts this panel; don't add both as devices. |
 
-- use only the topmost panel's grid energy as the grid source, or better, the
-  utility meter's;
-- in "Individual devices", set a branch-fed panel's circuits' upstream device to
-  the circuit on the panel that feeds it.
+**Solar or a battery upstream of the panel:** choose the second row. The panel
+then reports what reaches it after the solar and battery system, so its feed
+energy is your house load, not your utility import or export.
+
+In "Individual devices", set a branch-fed panel's circuits' upstream device to
+the circuit on the panel that feeds it.
 
 A circuit that feeds another panel carries a `feeds_panel` attribute on its power
 and energy sensors. It holds the name you gave that panel's device, or "SPAN"

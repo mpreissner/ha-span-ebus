@@ -19,9 +19,12 @@ from homeassistant.helpers.typing import ConfigType
 
 from . import backfill, energy_step, legacy_repair
 from .const import (
+    CLOUD_DATA_KEYS,
+    CLOUD_OPTION_KEYS,
     CONF_ACCESS_TOKEN,
     CONF_CA_PEM,
     CONF_CLIENT_NAME,
+    CONF_CLOUD_STEM,
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_LOCAL_SERIAL,
@@ -38,7 +41,7 @@ from .coordinator import SpanCloudCoordinator, energy_store
 from .energy_step import EnergyStepTracker
 from .runtime import SpanRuntime
 from .services import async_setup_services
-from .span_client import cloud_auth
+from .span_client import cloud_auth, feeds
 from .span_client.backend import (
     PanelPlan,
     SiteInfo,
@@ -185,9 +188,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool
         # Added over the local API. Earlier versions left this issue to say
         # local telemetry was still to come.
         ir.async_delete_issue(hass, DOMAIN, _local_pending_issue(entry))
-        if CONF_TOKENS not in entry.data:
-            # No account any more: a token file left from one must not linger.
-            await hass.async_add_executor_job(cloud_auth.discard_tokens, _token_path(hass, entry))
+        # Local only means no SPAN account. Earlier versions could keep one
+        # behind it, unused; it goes before the transport or backfill read the
+        # entry, and a token file left from one goes with it.
+        if await feeds.remove_legacy_account(
+            entry,
+            update=hass.config_entries.async_update_entry,
+            discard_tokens=lambda: hass.async_add_executor_job(
+                cloud_auth.discard_tokens, _token_path(hass, entry)
+            ),
+            data_keys=CLOUD_DATA_KEYS,
+            option_keys=CLOUD_OPTION_KEYS,
+            cloud_stem_key=CONF_CLOUD_STEM,
+        ):
+            _LOGGER.info("Removed the unused SPAN account from a local-only panel entry")
 
         async def build_cloud() -> list[SpanCloudCoordinator]:
             return await _cloud_coordinators(hass, entry)

@@ -150,11 +150,40 @@
   },
   "options": {
     "step": {
+      "panel": {
+        "title": "Panel options",
+        "menu_options": {
+          "transport": "Connection",
+          "topology": "Topology",
+          "controls": "Controls"
+        }
+      },
       "transport": {
         "title": "Connection",
-        "description": "Choose whether this panel may fall back to your SPAN account over the cloud when its local connection is lost.",
+        "description": "Choose how Home Assistant reaches this panel.",
         "data": {
           "transport_mode": "Connection"
+        }
+      },
+      "topology": {
+        "title": "Topology",
+        "description": "Choose what feeds this panel. This answer is for this panel only: each SPAN panel answers for itself, and saving here doesn't change any other panel.\n\n- **Utility meter feeds this panel directly:** its sensors are named Grid, and its grid energy can be the Energy dashboard's grid source.\n- **Solar or a battery between the meter and this panel:** its sensors are named Feed. Don't use them as the grid source; use the utility meter or your solar or battery system's grid meter.\n- **Another panel's feed-through lugs** or **a breaker on another panel:** its sensors are named Feed. Don't use them as the grid source; the upstream panel already counts this one.\n\nSaving reloads the panel.{others}",
+        "data": {
+          "supply": "What feeds this panel"
+        }
+      },
+      "topology_panel": {
+        "title": "Which panel feeds this one?",
+        "description": "The panel that feeds this one. Panels from your SPAN account and panels found on your network are listed too, even if Home Assistant doesn't run them.",
+        "data": {
+          "upstream": "Which panel"
+        }
+      },
+      "topology_circuit": {
+        "title": "Which circuit feeds this panel?",
+        "description": "Choose the circuit on {upstream} that feeds {panel}.",
+        "data": {
+          "circuit": "Which breaker"
         }
       },
       "init": {
@@ -162,21 +191,6 @@
         "menu_options": {
           "panels": "Choose panels",
           "link_local": "Link the local panel"
-        }
-      },
-      "local_panel": {
-        "title": "Local panel",
-        "menu_options": {
-          "cloud_add": "Add cloud fallback",
-          "controls": "Controls",
-          "fed_by_panel": "Fed by another panel"
-        }
-      },
-      "fed_by_panel": {
-        "title": "Fed by another panel",
-        "description": "Tick this if another SPAN panel feeds this one, through its feed-through lugs or a branch circuit. Its grid power and main meter energy are then named for the feed (\"Feed power\", \"Feed consumed energy\"), so they aren't mistaken for the grid. Saving reloads the panel.",
-        "data": {
-          "fed_by_panel": "Another panel feeds this one"
         }
       },
       "panels": {
@@ -201,18 +215,9 @@
           "circuit": "Circuit"
         }
       },
-      "linked": {
-        "title": "Cloud fallback",
-        "menu_options": {
-          "transport": "Connection",
-          "controls": "Controls",
-          "fed_by_panel": "Fed by another panel",
-          "cloud_remove": "Remove cloud fallback"
-        }
-      },
       "cloud_add": {
-        "title": "Add cloud fallback",
-        "description": "Optional. If the local connection fails, Home Assistant reads the panel through your SPAN account until it recovers. Controls stay local only. While the local connection works, Home Assistant only contacts your account to fill gaps in solar, battery and site energy after an outage.",
+        "title": "Sign in to your SPAN account",
+        "description": "Optional. If the local connection becomes unavailable, Home Assistant reads the panel through your SPAN account until it recovers. Controls stay local only. While the local connection works, Home Assistant only contacts your account to backfill missing solar, battery and site energy for gaps of five minutes or more, such as after a Home Assistant restart.",
         "data": {
           "email": "Email",
           "password": "Password"
@@ -223,8 +228,8 @@
         "description": "Found this panel on your SPAN account. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to add the fallback. No new entities are created."
       },
       "cloud_remove": {
-        "title": "Remove cloud fallback",
-        "description": "Home Assistant forgets your SPAN account for this panel and runs it over the local connection only. Entities and their history stay.{warning}"
+        "title": "Use local only",
+        "description": "Home Assistant removes your SPAN account for this panel and runs it over the local connection only. The ability to backfill missing site, solar and battery energy, such as after a Home Assistant restart, is lost. Entities and their history stay.{warning}"
       },
       "cloud_pick_panel": {
         "title": "Which panel is this?",
@@ -251,7 +256,7 @@
       },
       "controls": {
         "title": "Controls",
-        "description": "Choose which controls Home Assistant may use on this panel. Saving reloads the panel.",
+        "description": "Choose which controls Home Assistant may use on this panel. Saving reloads the panel.{hidden}",
         "data": {
           "protected_circuits": "Protected circuits",
           "relay_override": "Allow switching storage and solar circuits",
@@ -281,7 +286,6 @@
     },
     "abort": {
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
-      "cloud_remove_unsupported": "This entry has no cloud fallback to remove.",
       "panel_not_on_account": "This panel isn't on that SPAN account.",
       "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first.",
       "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Try again and pick another, or use this panel locally only.",
@@ -352,8 +356,16 @@
     },
     "transport_mode": {
       "options": {
-        "local_first": "Local, falling back to the cloud",
-        "local_only": "Local only"
+        "local_first": "Local, with cloud fallback: your SPAN account is used only when the local connection becomes unavailable, and to backfill missing site, solar and battery energy for gaps of five minutes or more, such as after a Home Assistant restart. Backfill covers the last 7 days on single-panel sites; circuit energy is not backfilled.",
+        "local_only": "Local only: your SPAN account is removed from Home Assistant for this panel, and the ability to backfill missing energy data is lost."
+      }
+    },
+    "supply": {
+      "options": {
+        "own_supply": "Utility meter feeds this panel directly",
+        "behind_der": "Utility meter, with solar or a battery between the meter and this panel",
+        "lugs": "Another panel's feed-through lugs",
+        "branch": "A breaker on another panel"
       }
     },
     "cloud_pick_panel": {
@@ -377,7 +389,9 @@
       "options": {
         "serial_mismatch": "The SPAN account lists this panel under a different serial. {matched} of {total} circuits sit on the same breaker spaces, so it looks like the same panel; check that it is before you submit.",
         "grid_energy": "Site grid energy is one of the sensors only updated while the local connection is down, because this site has several panels. If your Energy dashboard uses it, switch to the panel's imported energy sensor.",
-        "cloud_remove_fallback_only": "{count} sensors that only your SPAN account provides stop updating. You can remove them afterwards."
+        "cloud_remove_fallback_only": "{count} sensors that only your SPAN account provides stop updating. You can remove them afterwards.",
+        "controls_no_override": "No circuit on this panel feeds a battery or solar inverter, so there are none to allow switching.",
+        "controls_no_islanding": "Grid-state control appears only on panels with a battery whose grid state the panel lets Home Assistant set."
       }
     },
     "legacy_group": {

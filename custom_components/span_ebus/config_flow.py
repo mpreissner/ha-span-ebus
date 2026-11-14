@@ -23,7 +23,9 @@ import voluptuous as vol
 from homeassistant.components import zeroconf as ha_zeroconf
 from homeassistant.config_entries import (
     SOURCE_IGNORE,
+    SOURCE_ZEROCONF,
     ConfigEntry,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
@@ -62,7 +64,6 @@ from .const import (
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_EMAIL,
-    CONF_FED_BY_PANEL,
     CONF_FEEDS,
     CONF_ISLANDING_CONTROL,
     CONF_LOCAL_SERIAL,
@@ -73,6 +74,7 @@ from .const import (
     CONF_RELAY_OVERRIDE,
     CONF_SERIAL,
     CONF_TOKENS,
+    CONF_TOPOLOGY,
     CONF_TRANSPORT_MODE,
     CONF_USER_ID,
     DOMAIN,
@@ -97,6 +99,7 @@ from .span_client.backend import (
     same_serial,
     serial_taken,
     sibling_answers,
+    site_choices,
 )
 from .span_client.identity import (
     RegistryEntryView,
@@ -115,10 +118,13 @@ from .span_client.link import (
     circuits_verified,
     classify_feeds,
     cloud_removed_entry,
+    connection_action,
+    connection_default,
     feeds_from_kinds,
     keeps_link_without_cloud,
     link_to_options,
     match_circuits,
+    save_options,
     serial_check,
 )
 from .span_client.local import commands, discovery, onboard, tls
@@ -131,6 +137,9 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 CONF_CIRCUIT = "circuit"
+# The Topology step's fields.
+CONF_SUPPLY = "supply"
+CONF_UPSTREAM = "upstream"
 CONF_PASSPHRASE = "passphrase"
 
 # How long the add-panel picker listens for panels before giving up on mDNS.
@@ -201,11 +210,6 @@ STEP_PASSPHRASE_SCHEMA = vol.Schema(
 def _is_cloud_account(data: Mapping[str, Any]) -> bool:
     """A whole account added over the cloud, rather than one panel added locally."""
     return CONF_TOKENS in data and CONF_LOCAL_SERIAL not in data
-
-
-def _is_linked(data: Mapping[str, Any]) -> bool:
-    """A panel added locally with the cloud as its fallback."""
-    return CONF_TOKENS in data and CONF_LOCAL_SERIAL in data
 
 
 def _account_key(user_id: str | None, email: str) -> str:
@@ -1282,6 +1286,14 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         self._add: dict[str, Any] = {}
         # "Link the local panel": the cloud panel, its coordinator and the plan.
         self._link: dict[str, Any] = {}
+        # Topology: the answer so far, the other panels known (serial -> label),
+        # every serial seen, the account's panels by folded serial, and the
+        # upstream's breakers (spaces value -> label).
+        self._topology: dict[str, Any] = {}
+        self._upstreams: dict[str, str] = {}
+        self._serials: list[str] = []
+        self._account: dict[str, tuple[SiteInfo, PanelInfo]] = {}
+        self._breakers: dict[str, str] = {}
 
     def _token_path(self) -> Path:
         return Path(self.hass.config.path(TOKEN_DIR)) / f"{self.config_entry.entry_id}.json"
@@ -1293,41 +1305,15 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         return self.config_entry.data
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if _is_linked(self.config_entry.data):
-            return await self.async_step_linked()
         if CONF_LOCAL_SERIAL in self.config_entry.data:
-            return await self.async_step_local_panel()
+            return await self.async_step_panel()
         return self.async_show_menu(step_id="init", menu_options=["panels", "link_local"])
 
-    async def async_step_local_panel(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """A local panel without a cloud fallback: add one, or its controls."""
+    async def async_step_panel(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """A local panel's options, with or without the SPAN account as its fallback."""
         return self.async_show_menu(
-            step_id="local_panel", menu_options=["cloud_add", "controls", "fed_by_panel"]
+            step_id="panel", menu_options=["transport", "topology", "controls"]
         )
-
-    async def async_step_fed_by_panel(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Whether another panel feeds this one, which names its grid sensors
-        for the feed. Prefilled from the cloud answer until saved; saving
-        reloads the entry.
-        """
-        entry = self.config_entry
-        if user_input is not None:
-            options = {**entry.options, CONF_FED_BY_PANEL: user_input[CONF_FED_BY_PANEL] is True}
-            self.hass.config_entries.async_update_entry(entry, options=options)
-            self.hass.config_entries.async_schedule_reload(entry.entry_id)
-            return self.async_create_entry(data=options)
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_FED_BY_PANEL, default=feeds.local_fed(entry.options)
-                ): BooleanSelector()
-            }
-        )
-        return self.async_show_form(step_id="fed_by_panel", data_schema=schema)
 
     async def async_step_controls(
         self, user_input: dict[str, Any] | None = None
@@ -1346,7 +1332,15 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             self.hass.config_entries.async_update_entry(entry, options=options)
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
             return self.async_create_entry(data=options)
-        return self.async_show_form(step_id="controls", data_schema=_controls_schema(form))
+        hidden = "".join(
+            "\n\n" + await self._note(key)
+            for key in commands.controls_hint_keys(not form.override, form.show_islanding)
+        )
+        return self.async_show_form(
+            step_id="controls",
+            data_schema=_controls_schema(form),
+            description_placeholders={"hidden": hidden},
+        )
 
     async def async_step_panels(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -1380,21 +1374,33 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
     async def async_step_transport(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Whether a linked panel may fall back to the cloud."""
+        """Local with the SPAN account as fallback, or local only without it.
+
+        Choosing the other state signs in or removes the account; choosing the
+        current one changes nothing, so nothing reloads.
+        """
         entry = self.config_entry
-        current = entry.options.get(CONF_TRANSPORT_MODE, Mode.LOCAL_FIRST)
+        has_tokens = CONF_TOKENS in entry.data
+        mode = entry.options.get(CONF_TRANSPORT_MODE)
         if user_input is not None:
-            options = {**entry.options, CONF_TRANSPORT_MODE: user_input[CONF_TRANSPORT_MODE]}
-            # Reloading drops the broker link; only a real change is worth that.
-            if user_input[CONF_TRANSPORT_MODE] != str(current):
-                self.hass.config_entries.async_update_entry(entry, options=options)
-                self.hass.config_entries.async_schedule_reload(entry.entry_id)
-            return self.async_create_entry(data=options)
+            action = connection_action(has_tokens, mode, user_input[CONF_TRANSPORT_MODE])
+            if action == "add":
+                return await self.async_step_cloud_add()
+            if action == "remove":
+                return await self.async_step_cloud_remove()
+            if action == "enable":
+                options = {**entry.options, CONF_TRANSPORT_MODE: Mode.LOCAL_FIRST.value}
+                return self.async_create_entry(
+                    data=save_options(self.hass.config_entries, entry, options)
+                )
+            return self.async_create_entry(data=dict(entry.options))
         schema = vol.Schema(
             {
-                vol.Required(CONF_TRANSPORT_MODE, default=str(current)): SelectSelector(
+                vol.Required(
+                    CONF_TRANSPORT_MODE, default=connection_default(has_tokens, mode)
+                ): SelectSelector(
                     SelectSelectorConfig(
-                        options=[mode.value for mode in Mode],
+                        options=[item.value for item in Mode],
                         mode=SelectSelectorMode.LIST,
                         translation_key=CONF_TRANSPORT_MODE,
                     )
@@ -1403,11 +1409,281 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         )
         return self.async_show_form(step_id="transport", data_schema=schema)
 
-    async def async_step_linked(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_show_menu(
-            step_id="linked",
-            menu_options=["transport", "controls", "fed_by_panel", "cloud_remove"],
+    # --- Topology: what feeds this panel -------------------------------------
+    #
+    # Each panel answers for itself: the other panels' answers are read for the
+    # loop check and the summary only, never written. Serials are option values
+    # only, never labels, placeholders or log lines.
+
+    def _this_serial(self) -> str:
+        return str(self.config_entry.data[CONF_LOCAL_SERIAL])
+
+    def _other_entries(self) -> list[ConfigEntry]:
+        """Every other entry of this integration, loaded or not, ignored too."""
+        return [
+            entry
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+            if entry.entry_id != self.config_entry.entry_id
+        ]
+
+    async def _gather_upstreams(self) -> None:
+        """Every other panel known for the site, labelled: the other entries,
+        then the SPAN account's panels, then panels found on the network.
+        """
+        candidates: list[tuple[str | None, str | None]] = []
+        for entry in self._other_entries():
+            if entry.source == SOURCE_IGNORE:
+                candidates.append((entry.unique_id, None))
+            elif CONF_LOCAL_SERIAL in entry.data:
+                candidates.append((entry.data[CONF_LOCAL_SERIAL], None))
+            else:
+                candidates.append((entry.data.get(CONF_SERIAL), None))
+                runtime = getattr(entry, "runtime_data", None)
+                for coordinator in getattr(runtime, "coordinators", None) or ():
+                    if stem_problem(coordinator.serial) is None:
+                        candidates.append((coordinator.serial, coordinator.model))
+        self._account = {}
+        if CONF_TOKENS in self.config_entry.data:
+            try:
+                sites = await self.hass.async_add_executor_job(
+                    _sites_from_token_store, self._token_path()
+                )
+            except Exception:  # noqa: BLE001 — the form opens without the account's panels
+                _LOGGER.debug("Could not read the SPAN account's panels for the Topology step")
+            else:
+                self._sites = sites
+                found = find_panel(sites, self._this_serial())
+                for site in [found[0]] if found else sites:
+                    for panel in site_choices(site):
+                        if not panel.serial:
+                            continue
+                        candidates.append((panel.serial, panel.model if panel.model_code else None))
+                        self._account.setdefault(feeds.serial_key(panel.serial), (site, panel))
+        for flow in self.hass.config_entries.flow.async_progress_by_handler(DOMAIN):
+            context = flow.get("context") or {}
+            if context.get("source") == SOURCE_ZEROCONF:
+                candidates.append((context.get("unique_id"), None))
+        names: dict[str, str | None] = {}
+        with_models: list[tuple[str | None, str | None]] = []
+        for serial, model in candidates:
+            device = self._panel_device(serial) if serial else None
+            if device is not None:
+                names.setdefault(serial, device.name_by_user)
+                model = model or device.model
+            with_models.append((serial, model))
+        self._upstreams = feeds.upstream_choices(self._this_serial(), with_models, names)
+        self._serials = [self._this_serial(), *self._upstreams]
+
+    def _panel_device(self, serial: str) -> dr.DeviceEntry | None:
+        """The device a panel is shown as, so the user's name for it is found.
+
+        Tried under the serial in each spelling (the panel reports lowercase,
+        SPAN's cloud uppercase), then, for a local entry linked to the cloud,
+        under the cloud device's stem it was merged into.
+        """
+        registry = dr.async_get(self.hass)
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        identifiers = feeds.panel_identifiers(
+            serial,
+            (
+                (entry.data.get(CONF_LOCAL_SERIAL), entry.data.get(CONF_CLOUD_STEM))
+                for entry in entries
+            ),
         )
+        for identifier in identifiers:
+            device = registry.async_get_device(identifiers={(DOMAIN, identifier)})
+            if device is not None:
+                return device
+        return None
+
+    def _this_label(self) -> str:
+        """This panel's name for the circuit step: its device's, never its serial or host."""
+        device = self._panel_device(self._this_serial())
+        if device is None:
+            return "This panel"
+        return feeds.panel_label(device.name_by_user, device.model) or "This panel"
+
+    def _others(self) -> tuple[dict[str, Any], list[tuple[str, feeds.Feed]]]:
+        """The other local panels' saved answers, and the cloud accounts' answers."""
+        others: dict[str, Any] = {}
+        cloud_answers: list[tuple[str, feeds.Feed]] = []
+        for entry in self._other_entries():
+            if entry.source == SOURCE_IGNORE:
+                continue
+            if CONF_LOCAL_SERIAL in entry.data:
+                others[str(entry.data[CONF_LOCAL_SERIAL])] = entry.options.get(CONF_TOPOLOGY)
+            elif CONF_TOKENS in entry.data:
+                answers = entry.options.get(CONF_FEEDS) or {}
+                cloud_answers.extend(
+                    (key, feed)
+                    for key, feed in answers.items()
+                    if isinstance(key, str) and isinstance(feed, Mapping)
+                )
+        return others, cloud_answers
+
+    def _loops(self, topology: Mapping[str, Any]) -> bool:
+        others, cloud_answers = self._others()
+        return feeds.topology_loops(
+            self._this_serial(), topology, others, cloud_answers, self._serials
+        )
+
+    def _others_summary(self) -> str:
+        others, cloud_answers = self._others()
+        known = {serial.casefold() for serial in self._serials}
+        answers: list[tuple[str, Mapping[str, Any]]] = [
+            (serial, saved) for serial, saved in others.items() if saved
+        ]
+        for key, feed in cloud_answers:
+            if key.casefold() not in known:
+                continue
+            answer: dict[str, Any] = {"supply": feed.get("type")}
+            upstream = feed.get("upstream")
+            if isinstance(upstream, str) and upstream.casefold() in known:
+                answer["upstream"] = upstream
+            answers.append((key, answer))
+        return feeds.others_summary(self._this_serial(), answers, self._upstreams)
+
+    async def async_step_topology(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """What feeds this panel. Saving reloads the entry."""
+        if user_input is not None:
+            self._topology = {"supply": user_input[CONF_SUPPLY]}
+            if self._topology["supply"] in (feeds.LUGS, feeds.BRANCH):
+                return await self.async_step_topology_panel()
+            return self._save_topology()
+        await self._gather_upstreams()
+        supply = feeds.topology_of(self.config_entry.options)["supply"]
+        field = (
+            vol.Required(CONF_SUPPLY, default=supply)
+            if supply in feeds.SUPPLIES
+            else vol.Required(CONF_SUPPLY)
+        )
+        schema = vol.Schema(
+            {
+                field: SelectSelector(
+                    SelectSelectorConfig(
+                        options=list(feeds.SUPPLIES),
+                        mode=SelectSelectorMode.LIST,
+                        translation_key=CONF_SUPPLY,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="topology",
+            data_schema=schema,
+            description_placeholders={"others": self._others_summary()},
+        )
+
+    async def async_step_topology_panel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Which panel feeds this one, if it is known."""
+        errors: dict[str, str] = {}
+        stored = feeds.topology_of(self.config_entry.options).get("upstream")
+        choices, default = feeds.upstream_options(self._upstreams, stored)
+        if user_input is not None:
+            value = user_input[CONF_UPSTREAM]
+            topology = {"supply": self._topology["supply"]}
+            if value != feeds.NOT_LISTED and value in choices:
+                topology["upstream"] = value
+            if self._loops(topology):
+                errors["base"] = "feed_cycle"
+            else:
+                self._topology = topology
+                if topology["supply"] == feeds.BRANCH and "upstream" in topology:
+                    self._breakers = await self._breakers_of(value)
+                    if self._breakers:
+                        return await self.async_step_topology_circuit()
+                return self._save_topology()
+        return self.async_show_form(
+            step_id="topology_panel",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_UPSTREAM, default=default): _select(choices)}
+            ),
+            errors=errors,
+        )
+
+    async def async_step_topology_circuit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Which breaker on the upstream panel feeds this one."""
+        if user_input is not None:
+            spaces = feeds.spaces_from_value(user_input[CONF_CIRCUIT])
+            if spaces:
+                self._topology = {**self._topology, "spaces": spaces}
+            return self._save_topology()
+        upstream = self._topology["upstream"]
+        stored = feeds.topology_of(self.config_entry.options)
+        field = vol.Required(CONF_CIRCUIT)
+        if str(stored.get("upstream", "")).casefold() == upstream.casefold():
+            value = feeds.spaces_value(stored.get("spaces", ()))
+            if value in self._breakers:
+                field = vol.Required(CONF_CIRCUIT, default=value)
+        choices, _default = feeds.upstream_options(self._upstreams, upstream)
+        return self.async_show_form(
+            step_id="topology_circuit",
+            data_schema=vol.Schema({field: _select(self._breakers)}),
+            description_placeholders={"panel": self._this_label(), "upstream": choices[upstream]},
+        )
+
+    async def _breakers_of(self, serial: str) -> dict[str, str]:
+        """The upstream panel's breakers: from its loaded local entry, else a
+        loaded cloud coordinator, else this entry's SPAN account; else none.
+        """
+        folded = feeds.serial_key(serial)
+        for entry in self._other_entries():
+            if entry.state is not ConfigEntryState.LOADED:
+                continue
+            runtime = getattr(entry, "runtime_data", None)
+            if runtime is None:
+                continue
+            transport = getattr(runtime, "transport", None)
+            local = feeds.serial_key(str(entry.data.get(CONF_LOCAL_SERIAL, "")))
+            if local == folded and transport is not None:
+                choices = feeds.breaker_choices(
+                    (commands.circuit_choice_label(circuit), circuit.spaces or ())
+                    for circuit in transport.snapshot.circuits.values()
+                )
+                if choices:
+                    return choices
+            for coordinator in getattr(runtime, "coordinators", None) or ():
+                if feeds.serial_key(coordinator.serial) != folded:
+                    continue
+                choices = feeds.breaker_choices(
+                    (feeds.cloud_circuit_label(info), info.spaces)
+                    for info in coordinator.traits()[0].values()
+                )
+                if choices:
+                    return choices
+        found = self._account.get(folded)
+        if found is None:
+            return {}
+        try:
+            circuits = await self.hass.async_add_executor_job(self._account_circuits, *found)
+        except Exception:  # noqa: BLE001 — the panel is stored without its breaker
+            _LOGGER.debug("Could not read the upstream panel's circuits for the Topology step")
+            return {}
+        return feeds.breaker_choices(
+            (feeds.cloud_circuit_label(info), info.spaces) for info in circuits.values()
+        )
+
+    def _account_circuits(self, site: SiteInfo, panel: PanelInfo) -> dict[int, Any]:
+        """Blocking: one of the account's panels' circuits."""
+        data = self.config_entry.data
+        return panel_circuits(
+            self._access_token(),
+            site,
+            panel,
+            user_id=data.get(CONF_USER_ID),
+            device_uuid=data[CONF_DEVICE_UUID],
+            primary_panel=data.get(CONF_PRIMARY_PANEL, primary_panel_for(self._sites)),
+        )
+
+    def _save_topology(self) -> ConfigFlowResult:
+        options = feeds.save_topology(self.hass.config_entries, self.config_entry, self._topology)
+        return self.async_create_entry(data=options)
 
     # --- a local panel's cloud fallback -------------------------------------
 
@@ -1589,8 +1865,8 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
     ) -> ConfigFlowResult:
         """Drop the account: the panel runs over its local API alone."""
         entry = self.config_entry
-        if not _is_linked(entry.data):
-            return self.async_abort(reason="cloud_remove_unsupported")
+        if CONF_TOKENS not in entry.data:
+            return await self.async_step_panel()
         if user_input is None:
             warning = ""
             if keeps_link_without_cloud(entry.data, cloud_stem_key=CONF_CLOUD_STEM):
@@ -1606,11 +1882,11 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
                 description_placeholders={"warning": warning},
             )
         # Direction A keeps its link: the stand-ins' uids carry its cloud key.
-        # The fed answer may still be the cloud's, which goes with the cloud
-        # answers, so it is saved first.
+        # The Topology answer may still be the cloud's, which goes with the
+        # cloud answers, so it is saved first.
         data, options, minor_version = cloud_removed_entry(
             entry.data,
-            feeds.keep_fed_answer(entry.options),
+            feeds.keep_topology(entry.options),
             data_keys=CLOUD_DATA_KEYS,
             option_keys=CLOUD_OPTION_KEYS,
             cloud_stem_key=CONF_CLOUD_STEM,

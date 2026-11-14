@@ -559,7 +559,7 @@ def test_the_new_strings_exist():
         model.RELAY_OVERRIDE,
         model.ISLANDING_CONTROL,
     }
-    assert "controls" in steps["local_panel"]["menu_options"]
+    assert "controls" in steps["panel"]["menu_options"]
     assert "controls_unavailable" in strings["options"]["abort"]
     entity = strings["entity"]
     assert set(entity["select"]["asserted_islanding"]["state"]) == {"none", "on_grid"}
