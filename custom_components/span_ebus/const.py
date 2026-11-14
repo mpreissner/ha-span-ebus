@@ -40,6 +40,11 @@ CONF_TRANSPORT_MODE = "transport_mode"
 # Seconds between local entity updates (0-15). No UI yet: read with its default.
 CONF_SNAPSHOT_INTERVAL = "snapshot_interval"
 DEFAULT_SNAPSHOT_INTERVAL = 1.0
+# A local panel's control options (the "Controls" options step). The same
+# keys as span_client.local.model, which reads them.
+CONF_PROTECTED_CIRCUITS = "protected_circuits"
+CONF_RELAY_OVERRIDE = "relay_override"
+CONF_ISLANDING_CONTROL = "islanding_control"
 
 # What removing a local panel's cloud fallback takes out of its entry: the
 # account in the data, and the account's panel choices in the options (the

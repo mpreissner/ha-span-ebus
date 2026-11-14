@@ -34,6 +34,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -62,10 +63,13 @@ from .const import (
     CONF_DEVICE_UUID,
     CONF_EMAIL,
     CONF_FEEDS,
+    CONF_ISLANDING_CONTROL,
     CONF_LOCAL_SERIAL,
     CONF_MQTTS_PORT,
     CONF_PANELS,
     CONF_PRIMARY_PANEL,
+    CONF_PROTECTED_CIRCUITS,
+    CONF_RELAY_OVERRIDE,
     CONF_SERIAL,
     CONF_TOKENS,
     CONF_TRANSPORT_MODE,
@@ -116,7 +120,7 @@ from .span_client.link import (
     match_circuits,
     serial_check,
 )
-from .span_client.local import discovery, onboard, tls
+from .span_client.local import commands, discovery, onboard, tls
 from .span_client.local.health import Mode
 from .span_client.local.rest import NotFound, SpanLocalError, UnexpectedResponse
 
@@ -265,6 +269,33 @@ def _panels_schema(labels: dict[str, str], ticked: list[str]) -> vol.Schema:
         SelectSelectorConfig(options=options, multiple=True, mode=SelectSelectorMode.LIST)
     )
     return vol.Schema({vol.Required(CONF_PANELS, default=ticked): selector})
+
+
+def _multi_select(choices: dict[str, str]) -> SelectSelector:
+    options = [SelectOptionDict(value=value, label=label) for value, label in choices.items()]
+    return SelectSelector(
+        SelectSelectorConfig(options=options, multiple=True, mode=SelectSelectorMode.LIST)
+    )
+
+
+def _controls_schema(form: commands.ControlsForm) -> vol.Schema:
+    """Only the fields the panel makes meaningful: an override only while a
+    circuit feeds storage or solar, islanding only with a battery that takes it.
+    """
+    fields: dict[Any, Any] = {
+        vol.Optional(CONF_PROTECTED_CIRCUITS, default=form.protected_default): _multi_select(
+            form.protected
+        )
+    }
+    if form.override:
+        fields[vol.Optional(CONF_RELAY_OVERRIDE, default=form.override_default)] = _multi_select(
+            form.override
+        )
+    if form.show_islanding:
+        fields[vol.Optional(CONF_ISLANDING_CONTROL, default=form.islanding_default)] = (
+            BooleanSelector()
+        )
+    return vol.Schema(fields)
 
 
 def _select(choices: dict[str, str]) -> SelectSelector:
@@ -1264,8 +1295,33 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         if _is_linked(self.config_entry.data):
             return await self.async_step_linked()
         if CONF_LOCAL_SERIAL in self.config_entry.data:
-            return await self.async_step_cloud_add()
+            return await self.async_step_local_panel()
         return self.async_show_menu(step_id="init", menu_options=["panels", "link_local"])
+
+    async def async_step_local_panel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """A local panel without a cloud fallback: add one, or its controls."""
+        return self.async_show_menu(step_id="local_panel", menu_options=["cloud_add", "controls"])
+
+    async def async_step_controls(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Which relays stay put, which storage or solar relays may switch, and
+        whether the islanding control exists. Saving reloads the entry.
+        """
+        entry = self.config_entry
+        runtime = getattr(entry, "runtime_data", None)
+        transport = runtime.transport if runtime is not None else None
+        if transport is None or transport.snapshot.panel is None:
+            return self.async_abort(reason="controls_unavailable")
+        form = commands.controls_form(transport.snapshot, entry.options)
+        if user_input is not None:
+            options = commands.controls_options(form, entry.options, user_input)
+            self.hass.config_entries.async_update_entry(entry, options=options)
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+            return self.async_create_entry(data=options)
+        return self.async_show_form(step_id="controls", data_schema=_controls_schema(form))
 
     async def async_step_panels(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -1323,7 +1379,9 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         return self.async_show_form(step_id="transport", data_schema=schema)
 
     async def async_step_linked(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_show_menu(step_id="linked", menu_options=["transport", "cloud_remove"])
+        return self.async_show_menu(
+            step_id="linked", menu_options=["transport", "controls", "cloud_remove"]
+        )
 
     # --- a local panel's cloud fallback -------------------------------------
 

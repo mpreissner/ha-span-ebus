@@ -128,6 +128,9 @@ SYNTHETIC_ONLY_ROWS = frozenset(
         "bess:status/communication-state", "pv:info/nominal-power", "evse:status/status",
         "evse:derived/charging", "evse:derived/ev-connected", "evse:meter/advertised-current",
         "evse:config/max-charge-current", "mid:grid/grid-state", "mid:grid/islanding-state",
+        # PR 6 controls: the capture's panel has no asserted-islanding property
+        # and no EV charger.
+        "asserted_islanding", "evse:config/user-max-charge-current", "evse:switch/lock-state",
     }
 )  # fmt: skip
 

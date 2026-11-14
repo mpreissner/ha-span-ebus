@@ -57,8 +57,9 @@ not your utility import.
 Circuit entity ids are keyed on SPAN's internal circuit identifier rather than its
 label or panel space, so renaming a circuit in the SPAN app keeps its history.
 
-There is nothing to configure beyond the sign-in: no YAML, no options, no
-environment variables.
+There is nothing to configure beyond the sign-in: no YAML and no environment
+variables. A panel added over its local API has optional control options (see
+below).
 
 ## Circuit control
 
@@ -77,6 +78,60 @@ after the switch already exists (or the switch came from an earlier version),
 the switch goes unavailable and refuses commands; it is not deleted, so your
 customisations survive. The relay state is still shown as an attribute of the
 circuit's power sensor.
+
+### Control options (local panels)
+
+**Settings → Devices & services → SPAN Panel (eBus) → Configure → Controls**
+sets what Home Assistant may change on a panel added over its local API:
+
+- **Protected circuits:** their switches stay unavailable and every command to
+  them is refused. Their shed priority can still be changed.
+- **Allow switching storage and solar circuits:** shown only while a circuit
+  feeds a battery or solar inverter. A ticked circuit gets a working switch.
+  Protecting a circuit wins over this.
+- **Grid-state control:** shown only on a panel with a battery that accepts it.
+  It adds a select that tells the panel the grid is up (`On grid`) or clears
+  that (`Not asserted`). Like SPAN's own integration, it is unavailable while the
+  battery reports healthy or the panel already sees the grid; an assertion in
+  force can always be cleared.
+
+Saving reloads the panel. Every command fires a `span_ebus_command` event with
+its outcome (confirmed, not confirmed, superseded, unavailable, refused, not
+sent or invalid), and the logbook shows it with who sent it.
+
+To ask before the grid-state control changes anything, drive it from buttons
+that confirm first, rather than the select's own dropdown:
+
+```yaml
+type: horizontal-stack
+cards:
+  - type: button
+    name: Assert on grid
+    icon: mdi:transmission-tower
+    tap_action:
+      action: perform-action
+      perform_action: select.select_option
+      target:
+        entity_id: select.span_panel_grid_state
+      data:
+        option: on_grid
+      confirmation:
+        text: Tell the panel the grid is up?
+  - type: button
+    name: Clear
+    icon: mdi:close-circle-outline
+    tap_action:
+      action: perform-action
+      perform_action: select.select_option
+      target:
+        entity_id: select.span_panel_grid_state
+      data:
+        option: none
+      confirmation:
+        text: Clear what the panel is told about the grid?
+```
+
+Use your own entity id: it depends on the panel's name.
 
 Turning a circuit **on** *releases* our own disconnect rather than forcing the
 relay closed, so the panel's reasons for holding a circuit open (backup reserve,
@@ -105,6 +160,10 @@ custom_components/span_ebus/
   coordinator.py     stream lifecycle, entity discovery, state
   sensor.py          circuit / panel / site-flow sensors
   switch.py          circuit relay switches
+  select.py          shed priority, grid-state control (local)
+  number.py          EV charger current limit (local)
+  lock.py            EV charger lock (local)
+  logbook.py         logbook lines for control commands
   span_client/       the panel data layer, and the only copy of it
     backend.py       CloudBackend: stream lifecycle, traits, commands
     cloud_*.py       Cognito auth, gRPC, protobuf, Ably SSE, telemetry

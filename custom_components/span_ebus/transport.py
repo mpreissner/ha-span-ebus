@@ -21,7 +21,6 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import timedelta
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import CONF_HOST
@@ -55,6 +54,7 @@ from .span_client.link import (
     match_circuits,
 )
 from .span_client.local import homie, model
+from .span_client.local.commands import Delivery, Refusal, SafetyRules
 from .span_client.local.debounce import Coalescer, clamp_interval
 from .span_client.local.health import (
     Decision,
@@ -94,9 +94,14 @@ def local_tree_store(hass: HomeAssistant, entry_id: str) -> Store:
     return Store(hass, model.STORE_VERSION, f"{DOMAIN}.{entry_id}.local_tree")
 
 
-class PublishResult(StrEnum):
-    ACKED = "acked"  # the broker acknowledged it
-    UNACKED = "unacked"  # sent, unacknowledged: it may or may not reach the panel
+class ControlRefused(HomeAssistantError):
+    """A safety rule or the entry's options stopped a command before anything
+    was published. The message is translated and names no device.
+    """
+
+    def __init__(self, refusal: Refusal) -> None:
+        super().__init__(translation_domain=DOMAIN, translation_key=f"control_{refusal}")
+        self.refusal = refusal
 
 
 class SpanTransportManager:
@@ -672,10 +677,20 @@ class SpanTransportManager:
 
     # --- commands -----------------------------------------------------------
 
-    async def async_send_command(self, device_id: str, key: str, value: Any) -> PublishResult:
-        """Set a property on the panel. Raises with a translated message the user sees;
-        no device id or topic goes into one.
+    def safety(self) -> SafetyRules:
+        """The control-safety rules as they stand: the entry's options and the
+        latest snapshot.
         """
+        return SafetyRules.from_options(self._entry.options, self.snapshot)
+
+    async def async_send_command(self, device_id: str, key: str, value: Any) -> Delivery:
+        """Set a property on the panel. Raises with a translated message the user sees;
+        no device id or topic goes into one. The safety rules run first, whatever
+        the caller: a refused command is never published.
+        """
+        refusal = self.safety().check(device_id, key, value)
+        if refusal is not None:
+            raise ControlRefused(refusal)
         if self.shown is not Transport.LOCAL:
             raise HomeAssistantError(translation_domain=DOMAIN, translation_key="local_unavailable")
         description = self.tree.descriptions.get(device_id)
@@ -697,5 +712,5 @@ class SpanTransportManager:
         except OutcomeUnknown:
             # Nothing is retried: a stale command is worse than a lost one.
             _LOGGER.warning("the SPAN panel did not acknowledge a %s command", key)
-            return PublishResult.UNACKED
-        return PublishResult.ACKED
+            return Delivery.UNACKED
+        return Delivery.ACKED
