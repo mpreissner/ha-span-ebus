@@ -10,10 +10,18 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .cloud_traits import CircuitInfo
+from .link import link_from_options
 
 OWN_SUPPLY = "own_supply"
 LUGS = "lugs"
 BRANCH = "branch"
+
+# The entry options these rules read: the panels ticked and their answers (the
+# same keys as the integration's const), and a local panel's own say on whether
+# another panel feeds it. That one is not a cloud option, so it outlives the cloud.
+PANELS = "panels"
+FEEDS = "feeds"
+FED_BY_PANEL = "fed_by_panel"
 
 Feed = dict[str, Any]
 
@@ -24,6 +32,88 @@ def feed_of(feeds: Mapping[str, Feed], key: str, panels: Iterable[str]) -> Feed:
     if feed is None or feed.get("upstream") == key or feed.get("upstream") not in set(panels):
         return {"type": OWN_SUPPLY}
     return dict(feed)
+
+
+def is_fed(feeds: Mapping[str, Feed], key: str, panels: Iterable[str]) -> bool:
+    """Whether another panel feeds this one, through its lugs or a branch circuit."""
+    return feed_of(feeds, key, panels)["type"] in (LUGS, BRANCH)
+
+
+def cloud_fed(options: Mapping[str, Any]) -> bool:
+    """What the cloud answers say about a linked local panel; False if unlinked."""
+    link = link_from_options(options)
+    if link is None:
+        return False
+    return is_fed(options.get(FEEDS) or {}, link.cloud_key, options.get(PANELS) or ())
+
+
+def local_fed(options: Mapping[str, Any]) -> bool:
+    """Whether a local panel is fed by another: its own option once saved, else
+    the cloud answer for the panel it is linked to, else not.
+    """
+    saved = options.get(FED_BY_PANEL)
+    if isinstance(saved, bool):
+        return saved
+    return cloud_fed(options)
+
+
+def panel_label(name_by_user: str | None, model: str | None) -> str | None:
+    """How a panel is named in another's attributes: the user's own name for
+    its device, else "SPAN <model>", else nothing.
+
+    Never the device's default name: a cloud device's carries the serial and a
+    local one's the host.
+    """
+    if name_by_user:
+        return name_by_user
+    if model:
+        return f"SPAN {model}"
+    return None
+
+
+def keep_fed_answer(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Options with the fed answer saved, for before the cloud answers go.
+
+    Until the user saves their own, a linked panel's answer comes from the
+    cloud's; removing the cloud drops those, so the answer it gave is kept.
+    """
+    out = dict(options)
+    if not isinstance(out.get(FED_BY_PANEL), bool):
+        out[FED_BY_PANEL] = local_fed(options)
+    return out
+
+
+def branch_circuits(
+    feeds: Mapping[str, Feed], upstream: str, panels: Iterable[str]
+) -> dict[str, str]:
+    """Circuit (cloud instance id, as text) -> the panel it feeds, on `upstream`.
+
+    Only answers that still hold and name a circuit count.
+    """
+    keys = list(panels)
+    out: dict[str, str] = {}
+    for key in keys:
+        feed = feed_of(feeds, key, keys)
+        circuit = feed.get("circuit")
+        if feed["type"] == BRANCH and feed["upstream"] == upstream and circuit is not None:
+            out[str(circuit)] = key
+    return out
+
+
+def feeds_panel(
+    circuits: Mapping[str, str], circuit: str | int | None, names: Mapping[str, str | None]
+) -> str | None:
+    """The name of the panel a circuit feeds, or None.
+
+    `circuits` is `branch_circuits`; `names` maps a panel key to its device's
+    name. Without a name there is no answer: never a key or serial in its place.
+    """
+    if circuit is None:
+        return None
+    key = circuits.get(str(circuit))
+    if key is None:
+        return None
+    return names.get(key) or None
 
 
 def clean_feeds(feeds: Mapping[str, Feed], panels: Iterable[str]) -> dict[str, Feed]:

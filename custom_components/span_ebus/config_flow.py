@@ -62,6 +62,7 @@ from .const import (
     CONF_DECLINED,
     CONF_DEVICE_UUID,
     CONF_EMAIL,
+    CONF_FED_BY_PANEL,
     CONF_FEEDS,
     CONF_ISLANDING_CONTROL,
     CONF_LOCAL_SERIAL,
@@ -1302,7 +1303,31 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """A local panel without a cloud fallback: add one, or its controls."""
-        return self.async_show_menu(step_id="local_panel", menu_options=["cloud_add", "controls"])
+        return self.async_show_menu(
+            step_id="local_panel", menu_options=["cloud_add", "controls", "fed_by_panel"]
+        )
+
+    async def async_step_fed_by_panel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Whether another panel feeds this one, which names its grid sensors
+        for the feed. Prefilled from the cloud answer until saved; saving
+        reloads the entry.
+        """
+        entry = self.config_entry
+        if user_input is not None:
+            options = {**entry.options, CONF_FED_BY_PANEL: user_input[CONF_FED_BY_PANEL] is True}
+            self.hass.config_entries.async_update_entry(entry, options=options)
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+            return self.async_create_entry(data=options)
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_FED_BY_PANEL, default=feeds.local_fed(entry.options)
+                ): BooleanSelector()
+            }
+        )
+        return self.async_show_form(step_id="fed_by_panel", data_schema=schema)
 
     async def async_step_controls(
         self, user_input: dict[str, Any] | None = None
@@ -1380,7 +1405,8 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
 
     async def async_step_linked(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
-            step_id="linked", menu_options=["transport", "controls", "cloud_remove"]
+            step_id="linked",
+            menu_options=["transport", "controls", "fed_by_panel", "cloud_remove"],
         )
 
     # --- a local panel's cloud fallback -------------------------------------
@@ -1580,9 +1606,11 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
                 description_placeholders={"warning": warning},
             )
         # Direction A keeps its link: the stand-ins' uids carry its cloud key.
+        # The fed answer may still be the cloud's, which goes with the cloud
+        # answers, so it is saved first.
         data, options, minor_version = cloud_removed_entry(
             entry.data,
-            entry.options,
+            feeds.keep_fed_answer(entry.options),
             data_keys=CLOUD_DATA_KEYS,
             option_keys=CLOUD_OPTION_KEYS,
             cloud_stem_key=CONF_CLOUD_STEM,

@@ -36,8 +36,9 @@ from homeassistant.helpers.event import async_call_later
 
 from .const import CONF_CLOUD_STEM, CONF_CLOUD_UNMATCHED, CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER
 from .shown import round_value
-from .span_client import standin
+from .span_client import feeds, standin
 from .span_client.fallback import RELAY
+from .span_client.link import link_from_options
 from .span_client.local import model
 from .span_client.local.commands import (
     EVENT,
@@ -53,6 +54,7 @@ from .span_client.local.commands import (
 from .span_client.local.health import Transport
 from .span_client.local.homie import DeviceState
 from .span_client.local.model import Presence, Row, Scope, Snapshot, ValueKind
+from .topology import feeds_panel_attrs
 from .transport import ControlRefused, SpanTransportManager
 
 if TYPE_CHECKING:
@@ -483,7 +485,16 @@ class SpanLocalEntity(Entity):
             enabled(facts) if callable(enabled) else enabled
         )
         if row.scope is not Scope.CIRCUIT:
-            self._attr_translation_key = model.translation_key(row)
+            # Saving the fed option reloads the entry, so this is fixed too.
+            self._attr_translation_key = model.translation_key(row, feeds.local_fed(entry.options))
+        # The cloud circuit this one is linked to, if the row may name the
+        # panel it feeds (see `extra_state_attributes`).
+        self._feed_circuit: tuple[str, int] | None = None
+        link = link_from_options(entry.options)
+        if link is not None and model.shows_feeds_panel(row):
+            instance = link.circuits.get(device_id)
+            if instance is not None:
+                self._feed_circuit = (link.cloud_key, instance)
         self._recompute(snapshot)
 
     async def async_added_to_hass(self) -> None:
@@ -500,7 +511,11 @@ class SpanLocalEntity(Entity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        return self._attrs or None
+        attrs = self._attrs
+        if self._feed_circuit is not None and self.hass is not None:
+            # Read each time, so a renamed downstream device shows its new name.
+            attrs = {**attrs, **feeds_panel_attrs(self.hass, *self._feed_circuit)}
+        return attrs or None
 
     # --- computing what to show --------------------------------------------
 

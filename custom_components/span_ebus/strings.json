@@ -168,7 +168,15 @@
         "title": "Local panel",
         "menu_options": {
           "cloud_add": "Add cloud fallback",
-          "controls": "Controls"
+          "controls": "Controls",
+          "fed_by_panel": "Fed by another panel"
+        }
+      },
+      "fed_by_panel": {
+        "title": "Fed by another panel",
+        "description": "Tick this if another SPAN panel feeds this one, through its feed-through lugs or a branch circuit. Its grid power and main meter energy are then named for the feed (\"Feed power\", \"Feed consumed energy\"), so they aren't mistaken for the grid. Saving reloads the panel.",
+        "data": {
+          "fed_by_panel": "Another panel feeds this one"
         }
       },
       "panels": {
@@ -198,6 +206,7 @@
         "menu_options": {
           "transport": "Connection",
           "controls": "Controls",
+          "fed_by_panel": "Fed by another panel",
           "cloud_remove": "Remove cloud fallback"
         }
       },
@@ -461,6 +470,18 @@
       },
       "grid_power": {
         "name": "Grid power"
+      },
+      "feed_power": {
+        "name": "Feed power"
+      },
+      "feed_consumed_energy": {
+        "name": "Feed consumed energy"
+      },
+      "feed_produced_energy": {
+        "name": "Feed produced energy"
+      },
+      "feed_net_energy": {
+        "name": "Feed net energy"
       },
       "site_power": {
         "name": "Site power"

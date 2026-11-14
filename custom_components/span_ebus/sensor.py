@@ -61,18 +61,24 @@ from .local_entity import (
 )
 from .shown import ChangeGate, cloud_reading, round_value
 from .span_client import backfill as backfill_gaps
-from .span_client import standin
+from .span_client import feeds, standin
 from .span_client.backend import (
     POWER_PROPERTY,
     SITE_NODE,
+    circuit_instance,
+    energy_name,
+    energy_uid,
     is_overhead_feed,
     panel_overhead,
+    sensor_name,
+    sensor_uid,
 )
 from .span_client.cloud_history import SITE_FLOW_ENERGY
 from .span_client.local import model
 from .span_client.local.health import Transport
 from .span_client.local.model import DerivedRow, Presence, Row, Scope, Snapshot, ValueKind
 from .span_client.models import NodeKind, PropertySpec
+from .topology import cloud_panel_fed, feeds_panel_attrs
 from .transport import SpanTransportManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -178,9 +184,9 @@ class _WriteOnChange(CoordinatorEntity[SpanCloudCoordinator], SensorEntity):
     The stream wakes every listener on each frame, twice a second, whether or
     not this entity's reading moved. Availability is part of what is compared,
     so a liveness flip (the coordinator calls its listeners when the stream goes
-    stale) and an unload are still written. These sensors carry no state
-    attributes, so the pair is all there is to compare. Any attribute added
-    later must join the compared pair, or a change to it alone is dropped.
+    stale) and an unload are still written. State attributes are not
+    compared: a change to one alone (a circuit's `feeds_panel` after its
+    downstream device is renamed) shows up only at the next value change.
     """
 
     def __init__(self, coordinator: SpanCloudCoordinator) -> None:
@@ -207,9 +213,11 @@ class SpanSensor(_WriteOnChange):
         self._key = spec.key
         serial = coordinator.serial
 
-        node_label = spec.node_name or spec.node_id
-        self._attr_name = f"{node_label} {spec.property_id}".replace("_", " ")
-        self._attr_unique_id = f"{serial}_{spec.key}"
+        # The feed answers are options; saving them reloads the entry.
+        fed = cloud_panel_fed(coordinator.entry, coordinator.cloud_key)
+        self._attr_name = sensor_name(spec, fed)
+        self._attr_unique_id = sensor_uid(serial, spec)
+        self._circuit = circuit_instance(spec) if spec.property_id == POWER_PROPERTY else None
 
         device_class, native_unit, state_class = _UNIT_MAP.get(
             spec.unit or "", (None, spec.unit, None)
@@ -234,6 +242,12 @@ class SpanSensor(_WriteOnChange):
             and self.coordinator.stream_is_live
             and self._key in (self.coordinator.data or {})
         )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self._circuit is None or self.hass is None:
+            return None
+        return feeds_panel_attrs(self.hass, self.coordinator.cloud_key, self._circuit) or None
 
 
 class SpanEnergySensor(RestoreSensor):
@@ -263,12 +277,10 @@ class SpanEnergySensor(RestoreSensor):
         self._key = spec.key
         serial = coordinator.serial
 
-        node_label = spec.node_name or spec.node_id
-        # "power" is the node's own reading, so "Kitchen energy" rather than
-        # "Kitchen power energy"; the site's directional flows keep their name.
-        qualifier = "" if spec.property_id == POWER_PROPERTY else f" {spec.property_id}"
-        self._attr_name = f"{node_label}{qualifier} energy".replace("_", " ")
-        self._attr_unique_id = f"{serial}_{spec.key}_energy"
+        fed = cloud_panel_fed(coordinator.entry, coordinator.cloud_key)
+        self._attr_name = energy_name(spec, fed)
+        self._attr_unique_id = energy_uid(serial, spec)
+        self._circuit = circuit_instance(spec)
         self._attr_device_info = coordinator.device_info()
 
     async def async_added_to_hass(self) -> None:
@@ -300,6 +312,12 @@ class SpanEnergySensor(RestoreSensor):
     @property
     def available(self) -> bool:
         return self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self._circuit is None or self.hass is None:
+            return None
+        return feeds_panel_attrs(self.hass, self._coordinator.cloud_key, self._circuit) or None
 
 
 class SpanPanelOverheadSensor(_WriteOnChange):
@@ -873,7 +891,7 @@ class SpanStandInSensor(SpanLocalSensor):
         self._transform = stand.transform
         super().__init__(entry, transport, row, device_id)
         self._attr_unique_id = kept.unique_id
-        self._attr_name = kept.name
+        self._attr_name = standin.kept_name(kept.suffix, kept.name, feeds.local_fed(entry.options))
         self._attr_translation_key = None
         self._attr_entity_category = None
         self._attr_device_info = panel_device_info(entry, transport.snapshot)
@@ -899,7 +917,7 @@ class SpanStandInEnergySensor(SpanDerivedEnergySensor):
     ) -> None:
         super().__init__(entry, transport, row)
         self._attr_unique_id = kept.unique_id
-        self._attr_name = kept.name
+        self._attr_name = standin.kept_name(kept.suffix, kept.name, feeds.local_fed(entry.options))
         self._attr_translation_key = None
 
 
@@ -918,7 +936,7 @@ class _SpanKeptSensor(SensorEntity):
         self._key = kept.suffix
         unit, state_class = standin.look(kept.device_class, kept.suffix)
         self._attr_unique_id = kept.unique_id
-        self._attr_name = kept.name
+        self._attr_name = standin.kept_name(kept.suffix, kept.name, feeds.local_fed(entry.options))
         self._attr_device_class = _device_class(kept.device_class)
         self._attr_native_unit_of_measurement = unit
         self._attr_state_class = None if state_class is None else SensorStateClass(state_class)
