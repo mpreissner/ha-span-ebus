@@ -1531,6 +1531,8 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
         for coordinator in coordinators:
             if coordinator.cloud_key == key:
                 return coordinator
+        # A lone coordinator is expected not to match: the stem is the entity
+        # uid prefix, not the link key, so the one panel is the right one.
         return coordinators[0] if len(coordinators) == 1 else None
 
     async def _link_prechecks(self) -> str | None:
