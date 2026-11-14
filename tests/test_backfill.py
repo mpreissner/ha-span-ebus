@@ -32,10 +32,18 @@ def record_with(*spans, row="site_energy", now=None, draw=False):
 
 
 def test_runner_only_on_local_first_with_tokens_and_target():
-    assert bf.should_run("local_first", has_tokens=True, has_target=True)
-    assert not bf.should_run("local_only", has_tokens=True, has_target=True)
-    assert not bf.should_run("local_first", has_tokens=False, has_target=True)
-    assert not bf.should_run("local_first", has_tokens=True, has_target=False)
+    ok = {"has_tokens": True, "has_target": True, "single_panel_site": True}
+    assert bf.should_run("local_first", **ok)
+    assert not bf.should_run("local_only", **ok)
+    assert not bf.should_run("local_first", **{**ok, "has_tokens": False})
+    assert not bf.should_run("local_first", **{**ok, "has_target": False})
+
+
+def test_runner_never_on_a_multi_panel_site():
+    # How the cloud aggregates a site of several panels is unknown.
+    assert not bf.should_run(
+        "local_first", has_tokens=True, has_target=True, single_panel_site=False
+    )
 
 
 def test_mode_values_match_the_transport_modes():
@@ -491,6 +499,23 @@ def test_partial_prefix_waits_during_a_run():
     bf.queue(gap, {})
     bf.settle_queued(gap, bf.Verdict(1, 3), now=T0, at_setup=False)
     assert gap["status"] == bf.QUEUED
+
+
+def test_partial_prefix_is_never_written_again_in_the_same_session():
+    rec = record_with((T0, T0 + 3 * H))
+    gap = bf.gaps(rec)[0]
+    gap["hours"] = [[bf.iso(h), k] for h, k in HOURS]
+    gap["status"] = bf.READY
+    bf.queue(gap, bf.snapshot(gap, ROWS))
+    later = T0 + 6 * H
+    for minutes in (0, 15, 60, 360):
+        now = later + timedelta(minutes=minutes)
+        bf.settle_queued(gap, bf.Verdict(1, 3), now=now, at_setup=False)
+        assert gap["status"] == bf.QUEUED
+        assert bf.plan(rec, now=now, cloud_shown=False) == bf.Plan((), (), None)
+        # The same stretch reported again is cut off, not recorded afresh.
+        assert not bf.add_gap(rec, "site_energy", T0, T0 + 3 * H, now=now)
+    assert bf.hours_of(gap) == HOURS
 
 
 @pytest.mark.parametrize(("j", "left"), [(0, 3), (2, 1)])

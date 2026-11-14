@@ -223,6 +223,7 @@ async def _start_backfill(
         _transport_mode(entry).value,
         has_tokens=CONF_TOKENS in entry.data,
         has_target=transport.link is not None and transport.link.site_history is not None,
+        single_panel_site=transport.link is not None and transport.link.single_panel_site,
     ):
         return
     runtime.backfill = backfill.GapBackfill(

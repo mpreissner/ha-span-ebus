@@ -89,13 +89,15 @@ ALL_FIELDS = tuple(sorted({name for parts in ROW_FIELDS.values() for name in par
 _STEP_SECONDS = {Resolution.QUARTER_HOURLY: 900, Resolution.HOURLY: 3_600}
 
 
-def should_run(mode: str, *, has_tokens: bool, has_target: bool) -> bool:
+def should_run(mode: str, *, has_tokens: bool, has_target: bool, single_panel_site: bool) -> bool:
     """Whether an entry gets a backfill runner at all.
 
     Only a local-first entry that holds cloud tokens and knows its site's history
-    target. A local-only entry never talks to the cloud, so it never gets one.
+    target. A local-only entry never talks to the cloud, so it never gets one. A
+    site of several panels gets none either: how the cloud splits its history
+    between them is unknown.
     """
-    return mode == "local_first" and has_tokens and has_target
+    return mode == "local_first" and has_tokens and has_target and single_panel_site
 
 
 # --- time helpers ------------------------------------------------------------------
