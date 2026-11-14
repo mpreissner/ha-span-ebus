@@ -1511,9 +1511,9 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             warning = ""
             if keeps_link_without_cloud(entry.data, cloud_stem_key=CONF_CLOUD_STEM):
                 # A cloud entry linked to its panel: stand-ins keep updating,
-                # and what only the account fed stops, for the legacy repair.
+                # and fallback-only rows stop (unmatched ones never updated).
                 listed = legacy_repair.current(self.hass, entry)
-                if count := len(listed.unmatched) + len(listed.fallback_only):
+                if count := len(listed.fallback_only):
                     note = await self._note(LINK_NOTE_CLOUD_REMOVE)
                     warning = "\n\n" + _fill(note, {"count": str(count)})
             return self.async_show_form(
