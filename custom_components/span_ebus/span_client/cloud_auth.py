@@ -33,6 +33,7 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -372,15 +373,33 @@ def refresh(refresh_token: str) -> CloudTokens:
 # never stored, per the module contract).
 
 
+_TOKEN_LOCKS: dict[str, threading.RLock] = {}
+_TOKEN_LOCKS_GUARD = threading.Lock()
+
+
+def token_lock(path: Path) -> threading.RLock:
+    """The lock every reader, refresher and writer of one token store holds.
+
+    Re-entrant, so a holder may call `save_tokens` or `discard_tokens` itself.
+    """
+    key = str(Path(path).expanduser().absolute())
+    with _TOKEN_LOCKS_GUARD:
+        return _TOKEN_LOCKS.setdefault(key, threading.RLock())
+
+
 def discard_tokens(path: Path) -> None:
     """Delete a token store, if there is one. Never raises."""
-    with contextlib.suppress(OSError):
+    with token_lock(path), contextlib.suppress(OSError):
         Path(path).expanduser().unlink(missing_ok=True)
 
 
 def save_tokens(path: Path, tokens: CloudTokens) -> None:
     """Persist tokens to `path` as 0600 JSON."""
-    path = Path(path).expanduser()
+    with token_lock(path):
+        _save_tokens(Path(path).expanduser(), tokens)
+
+
+def _save_tokens(path: Path, tokens: CloudTokens) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "access_token": tokens.access_token,
@@ -429,20 +448,29 @@ def access_token_from_store(path: Path) -> str:
     it holds. Each of those needs the user to sign in again, and nothing else.
     Transient failures raise `CloudAuthError` (or a `requests` error) instead, so
     a caller can tell "try later" from "this will never work".
+
+    Callers sharing a store take turns: the store is read under its lock, so a
+    second caller picks up the token the first just refreshed instead of
+    spending the refresh token again. A store removed during the refresh stays
+    removed.
     """
-    tokens = load_tokens(path)
-    if tokens is None:
-        raise CloudCredentialsRejected(
-            f"no cloud credentials at {path}; re-authenticate the SPAN Panel (eBus) "
-            "integration in Home Assistant"
-        )
-    if not tokens.expired:
+    with token_lock(path):
+        tokens = load_tokens(path)
+        if tokens is None:
+            raise CloudCredentialsRejected(
+                f"no cloud credentials at {path}; re-authenticate the SPAN Panel (eBus) "
+                "integration in Home Assistant"
+            )
+        if not tokens.expired:
+            return tokens.access_token
+        if not tokens.refresh_token:
+            raise CloudCredentialsRejected(
+                "cached access token expired and no refresh token is stored"
+            )
+        tokens = refresh(tokens.refresh_token)
+        if Path(path).expanduser().exists():
+            save_tokens(path, tokens)
         return tokens.access_token
-    if not tokens.refresh_token:
-        raise CloudCredentialsRejected("cached access token expired and no refresh token is stored")
-    tokens = refresh(tokens.refresh_token)
-    save_tokens(path, tokens)
-    return tokens.access_token
 
 
 def user_id_from_token(access_token: str) -> str | None:
