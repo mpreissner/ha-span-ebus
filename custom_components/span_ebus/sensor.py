@@ -683,7 +683,7 @@ class SpanDerivedEnergySensor(_SpanDerivedSensor, RestoreSensor):
                 history.get_last_state_changes, hass, 1, self.entity_id
             )
         except Exception as exc:  # noqa: BLE001 — a cross-check must not block setup
-            _LOGGER.debug("%s: recorder cross-check skipped: %s", self._row.key, exc)
+            _LOGGER.debug("%s: recorder cross-check skipped: %s", self._row.key, type(exc).__name__)
             return None, None
         states = changes.get(self.entity_id) or []
         if not states:
