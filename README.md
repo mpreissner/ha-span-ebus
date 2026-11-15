@@ -1,20 +1,13 @@
 # ha-span-ebus
 
-Live per-circuit data from a **SPAN Panel MAIN 40 (Gen3)** in Home Assistant.
+Live per-circuit data and control for a **SPAN Panel MAIN 40 (Gen3)** in Home
+Assistant.
 
 A HACS custom integration (`custom_components/span_ebus`) that runs inside Home
-Assistant and streams live telemetry from SPAN's cloud (Cognito → gRPC → Ably
-SSE). This is the path that works **today**, while the panel's local API is not
-yet enabled. Live-validated end to end (see [docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md)).
-
-When SPAN enables the local MAIN 40 API (~H2 2026), the integration will prefer
-it: talk to the panel's own Electrification Bus (Homie 5 over MQTT) directly on
-your LAN, and fall back to the cloud when local is unreachable or not yet
-provisioned. That is a change of transport, not of deployment — the integration
-still runs inside Home Assistant, still a HACS install, and your entities do not
-change either way. The panel's broker is already healthy on :8883; the REST tier
-that issues its credentials is still dormant (see
-[docs/FINDINGS.md](docs/FINDINGS.md)).
+Assistant. It talks to the panel directly over your network, using SPAN's
+official local API (Homie 5 over MQTT, panel firmware r202639 or later), and can
+use your SPAN account over the cloud as a fallback. Panels on older firmware, or
+that you'd rather not register locally, can still be added over the cloud alone.
 
 Requires Home Assistant 2024.12.0 or newer.
 
@@ -23,43 +16,93 @@ Requires Home Assistant 2024.12.0 or newer.
 1. In HACS, add this repository as a **custom repository** (category:
    Integration), or install it if listed.
 2. **Restart Home Assistant.**
-3. **Settings → Devices & Services → Add Integration → “SPAN Panel (eBus)”.**
-4. Sign in with your SPAN account email and password. That's it — nothing to
-   look up or paste.
+3. **Settings → Devices & Services → Add Integration → "SPAN Panel (eBus)"**,
+   then choose how to add it.
 
-Your password is used **once**, locally, to compute the Cognito SRP proof and
-obtain access tokens; it is never stored. Only the resulting tokens are kept
-(auto-refreshing), and a re-auth prompt appears if they ever fully expire.
+### A panel on my network (recommended)
 
-Setup takes up to a minute: it registers this install as a telemetry client and
-waits for a real frame before finishing, rather than completing and leaving you
-with zero entities. You then get one device per panel, updated as fast as the
-panel reports — once or twice a second over ethernet, dropping to about once a
-minute if it falls back to its cellular connection — with:
+Panels found on your network are listed; otherwise enter the panel's address.
+Enter the panel's passphrase from the SPAN app. It is used once to register Home
+Assistant with the panel and is never stored or logged.
 
-- **each circuit** named as you named it in the SPAN app, reporting power and
-  current (a 120 V branch does not meter its own voltage, so none is offered);
-- **the panel** — power, line frequency, per-leg voltage and per-leg current
-  (L1/L2, for checking how evenly the legs are loaded), plus a combined current
-  that is the *higher* of the two legs rather than their sum, i.e. busbar loading
-  to compare against your main breaker;
-- **panel overhead** — the main feed's power less the sum of every circuit, i.e.
-  the steady draw of the panel's own relays and electronics (never below zero),
-  with an energy total alongside so it can be tracked as a device on the Energy
-  dashboard. SPAN does not meter this one, so its kWh are integrated from the
-  power reading rather than read back from the panel;
-- **the main feed** and the **site flows** SPAN reports (grid, home, …).
+You're then asked whether to sign in to your SPAN account as a **cloud
+fallback** (recommended) or stay **local only**. You can change this later under
+Connection (see below).
 
-"Grid" means what feeds this panel: the power at its main feed, under SPAN's
-own name for it. If solar or storage is installed upstream of the panel, it is
-not your utility import.
+### My SPAN account, over the cloud
+
+Sign in with your SPAN account email and password. Your password is used
+**once** to obtain access tokens and is never stored. Only the tokens are kept;
+they refresh automatically, and a re-auth prompt appears if they ever fully
+expire. Setup takes up to a minute: it waits for the first live reading before
+finishing, so a problem shows up as an error rather than an entry with no
+entities. With several panels on the account, you pick which ones this Home
+Assistant runs.
+
+### What you get
+
+One device per panel, updated about once a second:
+
+- **each circuit**, named as in the SPAN app, with power, current and energy, and
+  a breaker **switch** and **shed priority** where the panel allows control (local);
+- **the panel**: power, line frequency, per-leg voltage and per-leg current
+  (L1/L2), plus a combined current that is the *higher* of the two legs, i.e.
+  busbar loading to compare against your main breaker;
+- **panel overhead**: the main feed's power less the sum of every circuit, i.e.
+  the steady draw of the panel's own electronics, with an energy total;
+- **the main feed** and the **site flows**: grid, home, solar and battery power
+  and energy;
+- on a local panel, **status sensors** (door, Ethernet, Wi-Fi, power control),
+  the shed forecast where published, and **battery, solar, EV charger and
+  grid-isolation devices** linked to the panel (untested live);
+- a diagnostic **Transport** sensor showing `local`, `cloud` or `offline`.
+
+Readings are rounded and written only when they change, to keep the recorder
+database small.
+
+"Grid" means what feeds this panel: the power at its main feed. If solar or
+storage is installed upstream of the panel, it is not your utility import (see
+[Topology](#topology)).
 
 Circuit entity ids are keyed on SPAN's internal circuit identifier rather than its
 label or panel space, so renaming a circuit in the SPAN app keeps its history.
 
-There is nothing to configure beyond the sign-in: no YAML and no environment
-variables. A panel added over its local API has optional control options (see
-below).
+There is no YAML and no environment variables. Optional settings are under
+**Configure** (see below).
+
+## Moving a cloud entry to the local API
+
+If you already run the panel over the cloud, don't add it again: open the cloud
+entry's **Configure → Link the local panel**, and enter the panel's address and
+passphrase. The cloud account stays as the fallback.
+
+Linking keeps your entities, entity ids, history, statistics and dashboards:
+
+- each entity that has a local reading moves onto it (circuit power, current,
+  energy and switches; panel voltage, frequency, current and overhead; feed
+  power and energy);
+- site totals (grid, home, solar, battery, voltage, frequency and their energy)
+  are kept and fed from the panel;
+- SPAN's directional site flows (grid to home, solar to grid, battery to grid
+  and the like), generator, balance and residual have no local reading: they
+  update only while the cloud is carrying the panel;
+- a circuit the panel doesn't report stops updating.
+
+The confirmation screen counts each group before anything changes. Afterwards,
+two repairs may appear: one fixes the one-time jump between the last cloud
+energy reading and the first local one, and one offers to remove old cloud
+entities that no longer update (their statistics stay).
+
+**Energy dashboard:** entries keep working, except any that use the directional
+site flows above (for example *solar to grid energy* as return to grid). Swap
+those for the panel's feed energy sensors. On a panel with something other than
+the utility meter feeding it, the grid sensors are renamed (see
+[Topology](#topology)); their ids don't change.
+
+It works the other way round too: a panel added on your network can sign in to
+your SPAN account as a fallback under **Connection**, and Home Assistant matches
+it to the account's panel without creating new entities. That direction, and
+picking the account's panel by hand when the serials differ, are untested live.
 
 ## Circuit control
 
@@ -220,17 +263,20 @@ left out. The mapping check is reported as `confirmed`, `flipped`,
 **Settings → Devices & services → SPAN Panel (eBus) → Configure → Connection**
 chooses how Home Assistant reaches a panel added over its local API:
 
-- **Local, with cloud fallback:** your SPAN account is used only when the local
-  connection becomes unavailable, and to backfill missing site, solar and battery
-  energy for gaps of five minutes or more, such as after a Home Assistant
-  restart. Backfill covers the last 7 days on single-panel sites; circuit energy
-  is not backfilled. Choosing it asks you to sign in to your SPAN account.
-- **Local only:** your SPAN account is removed from Home Assistant for this
-  panel, and the ability to backfill missing energy data is lost. Entities and
-  their history stay.
+- **Local, with cloud fallback** (the default): your SPAN account is used for two
+  things only.
+  - **Failover:** if the local link is down for a minute (or silent for two),
+    readings switch to the cloud, and switch back after five minutes of a
+    healthy local link. Controls are unavailable while on the cloud, and a
+    repair appears if it stays on the cloud for over an hour.
+  - **Backfill:** gaps of five minutes or more in the home, solar and battery
+    energy totals, from the last 7 days (such as after a Home Assistant restart),
+    are filled from the cloud's history. This works on single-panel sites;
+    circuit energy is not backfilled.
 
-This release removes the stored SPAN account from panels set to Local only; to
-use fallback again, sign in under Connection.
+  Choosing it asks you to sign in to your SPAN account.
+- **Local only:** your SPAN account is removed from Home Assistant for this
+  panel. There is no failover and no backfill. Entities and their history stay.
 
 ## Several panels
 
@@ -275,32 +321,38 @@ cloud entry.
 
 ## How it gets your live data
 
-SPAN's realtime telemetry arrives on an Ably channel named
+**Locally**, Home Assistant registers with the panel once using its passphrase,
+pins the panel's certificate authority, and subscribes to the panel's
+Electrification Bus (Homie 5 over MQTT on port 8883). A panel that moves to a new
+address is followed when it is rediscovered, and **Reconfigure** changes the
+address by hand.
+
+**Over the cloud**, SPAN's realtime telemetry arrives on an Ably channel named
 `c:<userId>:<deviceUUID>`. The `deviceUUID` is a **client identifier we generate
-ourselves** — SPAN issues nothing here; the `AblyToken` RPC echoes back whatever
-we send. What actually starts the data flowing is the `SubscribeAndGetTraits`
-RPC, which registers our channel as a subscriber for the panel's hardware
-resources. The integration mints a UUID on first setup and reuses it for the life
-of the config entry. See [docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md) §3.
+ourselves**; what starts the data flowing is the `SubscribeAndGetTraits` RPC,
+which registers our channel as a subscriber for the panel's hardware resources.
+See [docs/CLOUD-FLOW.md](docs/CLOUD-FLOW.md) §3.
 
 ## Layout
 
 ```
 custom_components/span_ebus/
   __init__.py        config entry setup / unload
-  config_flow.py     sign-in + re-auth flow
+  config_flow.py     setup, linking, options and re-auth flows
   coordinator.py     stream lifecycle, entity discovery, state
-  sensor.py          circuit / panel / site-flow sensors
-  switch.py          circuit relay switches
-  select.py          shed priority, grid-state control (local)
-  number.py          EV charger current limit (local)
-  lock.py            EV charger lock (local)
+  transport.py       local-first transport with cloud failover
+  backfill.py        cloud history backfill for energy gaps
+  sensor.py, switch.py, select.py, number.py, lock.py, binary_sensor.py,
+  button.py          entity platforms
+  repairs.py, legacy_repair.py   energy-jump and stale-entity repairs
+  leg_balance.py, services.py    leg balance and credential rotation
   logbook.py         logbook lines for control commands
-  span_client/       the panel data layer, and the only copy of it
+  span_client/       the panel data layer (no Home Assistant imports)
     backend.py       CloudBackend: stream lifecycle, traits, commands
-    cloud_*.py       Cognito auth, gRPC, protobuf, Ably SSE, telemetry
+    cloud_*.py       Cognito auth, gRPC, protobuf, Ably SSE, telemetry, history
+    local/           local API: onboarding, TLS, MQTT, Homie, commands
+    identity.py, link.py, standin.py, legacy.py   cloud-to-local linking
     models.py        normalized panel / node / property / reading types
-    local/           staged for the local API; not imported yet
 tests/               run against span_client, i.e. against what ships
 docs/CLOUD-FLOW.md   the cloud path, end to end
 docs/CLOUD-PROTO.md  protobuf shapes for the gRPC calls
@@ -309,6 +361,6 @@ docs/FINDINGS.md     empirical results from this panel
 
 ## References
 
-- [SPAN API Client Docs](https://github.com/spanio/SPAN-API-Client-Docs) — spec `r202627` matches this panel
+- [SPAN API Client Docs](https://github.com/spanio/SPAN-API-Client-Docs) — the local API, spec `r202639`
 - [Griswoldlabs/span-panel-ha](https://github.com/Griswoldlabs/span-panel-ha) — the gRPC approach, now defunct
 - [SpanPanel/span](https://github.com/SpanPanel/span) — Gen2 REST integration
