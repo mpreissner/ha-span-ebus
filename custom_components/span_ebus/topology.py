@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
 from .const import CONF_FEEDS, CONF_LOCAL_SERIAL, CONF_PANELS, DOMAIN
+from .device_lookup import device_by_identifier
 from .span_client import feeds
 from .span_client.link import link_from_options
 
@@ -58,7 +59,7 @@ def panel_name(hass: HomeAssistant, key: str) -> str | None:
     """
     registry = dr.async_get(hass)
     for identifier in _identifiers(hass, key):
-        device = registry.async_get_device(identifiers={identifier})
+        device = device_by_identifier(registry, identifier)
         if device is not None:
             return feeds.panel_label(device.name_by_user, device.model)
     return None

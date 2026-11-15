@@ -35,6 +35,7 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_call_later
 
 from .const import CONF_CLOUD_STEM, CONF_CLOUD_UNMATCHED, CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER
+from .device_lookup import device_by_identifier
 from .shown import round_value
 from .span_client import feeds, standin
 from .span_client.fallback import RELAY
@@ -327,10 +328,7 @@ def async_track_panel_device(
             return
         registry = dr.async_get(hass)
         (identifier,) = info["identifiers"]
-        if hasattr(registry, "async_get_device_by_identifier"):  # HA 2026.x and later
-            device = registry.async_get_device_by_identifier(identifier, entry.entry_id)
-        else:
-            device = registry.async_get_device(identifiers={identifier})
+        device = device_by_identifier(registry, identifier, entry.entry_id)
         if device is None:  # created by the first entity; caught on a later snapshot
             return
         last = current

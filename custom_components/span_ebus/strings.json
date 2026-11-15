@@ -137,6 +137,7 @@
       "reconfigure_successful": "The panel address was updated.",
       "not_local": "Only panels added over the local API have an address to change.",
       "cloud_account_configured": "This SPAN account is already set up over the cloud. Remove that entry first, then add the panel locally.",
+      "link_from_cloud_entry": "A SPAN account is already set up over the cloud. To connect its panel locally, open that entry's Configure and choose Link the local panel. To add a different panel, add it by its address.",
       "panel_configured_locally": "A panel on this SPAN account is already set up locally, with this account as its cloud fallback. Remove that entry first to add the whole account over the cloud.",
       "panel_not_on_account": "This panel isn't on that SPAN account.",
       "cannot_connect": "Could not reach the panel.",
