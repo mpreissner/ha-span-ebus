@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -29,6 +30,8 @@ class SpanRuntime:
     energy_step: EnergyStepTracker | None = None
     backfill: GapBackfill | None = None
     hooks: list[CoordinatorHook] = field(default_factory=list)
+    # One leg-balance press at a time; the action doesn't take it.
+    leg_balance_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def add_platform(self, hook: CoordinatorHook) -> None:
         self.hooks.append(hook)

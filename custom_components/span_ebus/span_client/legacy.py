@@ -28,7 +28,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .identity import RegistryEntryView, transport_uid
+from .identity import RegistryEntryView, leg_balance_uid, transport_uid
 from .local import model
 from .standin import FALLBACK, STANDIN, UNMATCHED, classify_kept
 
@@ -64,7 +64,7 @@ def produced_uids(snapshot: model.Snapshot, panel_key: str) -> frozenset[str]:
     A superset on purpose: rows are counted whether or not they exist yet, and
     whether or not a stand-in shows them instead.
     """
-    uids = {transport_uid(panel_key)}
+    uids = {transport_uid(panel_key), leg_balance_uid(panel_key)}
     for row in model.ROWS:
         for device_id in model.row_devices(snapshot, row):
             uids.add(model.row_uid(row, panel_key, device_id))

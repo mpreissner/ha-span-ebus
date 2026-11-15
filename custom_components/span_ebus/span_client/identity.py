@@ -151,6 +151,11 @@ def transport_uid(panel_key: str) -> str:
     return f"{panel_key}_{_TRANSPORT}"
 
 
+def leg_balance_uid(panel_key: str) -> str:
+    """The Analyze leg balance button's uid. Not cloud-shaped: it has no "/"."""
+    return f"{panel_key}_analyze_leg_balance"
+
+
 @dataclass(frozen=True, slots=True)
 class _Local:
     """The local uids that exist, and which lugs device is U and which D."""
