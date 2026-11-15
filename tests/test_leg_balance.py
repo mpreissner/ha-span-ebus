@@ -345,7 +345,7 @@ def test_heavy_leg_b_circuit_moves_to_an_empty_leg_a_space():
         Leg.B,
         Leg.A,
     )
-    assert move.to_space == 10  # the nearest empty leg-A space
+    assert move.to_space == 9  # the nearest empty leg-A space in its column
     when = sorted(circuits[0].mean_w)
     by_name = {c.name: c for c in circuits}
 
@@ -611,3 +611,178 @@ def test_every_response_has_the_notice():
         analyze(site(), balanced_below_a=1000),
     ):
         assert lb.response(result, 28)["notice"] == lb.NOTICE
+
+
+# --- review fixes: helpers on the panel's facts ---------------------------------------------
+
+
+def _facts() -> model.CircuitFacts:
+    snapshot = model.build_snapshot(capture_tree(), PANEL)
+    return next(
+        c
+        for c in snapshot.circuits.values()
+        if c.feeds is None and c.fed_by is None and not c.is_remote_ct and c.role is model.Role.LOAD
+    )
+
+
+@pytest.mark.parametrize("role", [model.Role.SOLAR, model.Role.GENERATOR])
+def test_a_producer_counts_negative(role):
+    producer = replace(_facts(), role=role)
+    assert lb.load_series(producer, {T0: 1200.0}) == {T0: -1200.0}
+    # A remote CT keeps the panel's + = import sign.
+    assert lb.load_series(replace(producer, is_remote_ct=True), {T0: 1200.0}) == {T0: 1200.0}
+
+
+@pytest.mark.parametrize("role", [model.Role.LOAD, model.Role.STORAGE])
+def test_a_load_counts_positive(role):
+    assert lb.load_series(replace(_facts(), role=role), {T0: 600.0}) == {T0: 600.0}
+
+
+def test_held_still_reasons_in_order():
+    plain = _facts()
+    none = model.ControlOptions()
+    protected = model.ControlOptions(protected=frozenset({plain.device_id}))
+    sub = model.Link(via_kind="panel", via_id="dev-0001", status="OK")
+    pv = model.Link(via_kind="pv", via_id="dev-0002", status="OK")
+    assert lb.held_still(plain, none) is None
+    assert lb.held_still(plain, protected) is Exclusion.PROTECTED
+    assert (
+        lb.held_still(replace(plain, role=model.Role.STORAGE), none) is Exclusion.STORAGE_OR_SOLAR
+    )
+    assert lb.held_still(replace(plain, feeds=pv), none) is Exclusion.STORAGE_OR_SOLAR
+    assert lb.held_still(replace(plain, feeds=sub), none) is Exclusion.FEEDS_PANEL
+    assert lb.held_still(replace(plain, fed_by=sub), none) is Exclusion.FED_BY_PANEL
+    assert lb.held_still(replace(plain, is_remote_ct=True), none) is Exclusion.REMOTE_CT
+    # The first match wins.
+    everything = replace(plain, role=model.Role.STORAGE, fed_by=sub, is_remote_ct=True)
+    assert lb.held_still(everything, protected) is Exclusion.PROTECTED
+    assert lb.held_still(everything, none) is Exclusion.STORAGE_OR_SOLAR
+
+
+def test_lug_history_subtracts_the_feedthrough():
+    up = ({T0: 30.0, T0 + HOUR: 32.0}, {T0: 20.0, T0 + HOUR: 25.0})
+    down = ({T0: 10.0, T0 + HOUR: 12.0}, {T0: 5.0})
+    legs, shared = lb.lug_history("hour", up, down, has_feedthrough=True)
+    assert not shared
+    assert legs == LegHistory("hour", {T0: 20.0, T0 + HOUR: 20.0}, {T0: 15.0})
+
+
+@pytest.mark.parametrize("down", [None, ({}, {}), ({T0: 1.0}, {})])
+def test_lug_history_without_feedthrough_statistics_is_shared(down):
+    up = ({T0: 30.0}, {T0: 20.0})
+    legs, shared = lb.lug_history("hour", up, down, has_feedthrough=True)
+    assert shared
+    assert legs == LegHistory("hour", {T0: 30.0}, {T0: 20.0})
+
+
+def test_lug_history_plain_and_missing():
+    up = ({T0: 30.0}, {T0: 20.0})
+    assert lb.lug_history("5minute", up, None, has_feedthrough=False) == (
+        LegHistory("5minute", {T0: 30.0}, {T0: 20.0}),
+        False,
+    )
+    assert lb.lug_history("hour", None, None, has_feedthrough=False) == (None, False)
+    assert lb.lug_history("hour", None, None, has_feedthrough=True) == (None, True)
+    assert lb.lug_history("hour", ({T0: 1.0}, {}), None, has_feedthrough=False) == (None, False)
+
+
+def test_shared_lugs_from_the_helper_are_unconfirmed():
+    circuits = site()
+    when = sorted(circuits[0].mean_w)
+    measured = lugs_for(circuits, when)
+    legs, shared = lb.lug_history(
+        "hour", (measured.mean_a, measured.mean_b), None, has_feedthrough=True
+    )
+    assert analyze(circuits, legs=legs, lugs_shared=shared).mapping is MappingCheck.UNCONFIRMED
+
+
+# --- review fixes: the analysis -------------------------------------------------------------
+
+
+def test_three_spaces_count_as_two_pole():
+    assert lb.is_two_pole(circuit("Odd", (23, 25, 27), {}, poles=None, nominal_voltage=None))
+
+
+@pytest.mark.parametrize(
+    ("space", "taken", "partner"),
+    [
+        (23, {21}, {25}),  # the free side
+        (23, {25}, {21}),
+        (9, set(), {11}),  # 7 is out of MAIN 40's range
+        (48, set(), {46}),  # 50 is too
+        (23, set(), {21, 25}),  # ambiguous: both
+    ],
+)
+def test_a_one_space_two_pole_claims_its_partner(space, taken, partner):
+    base = site()
+    when = sorted(base[0].mean_w)
+    others = [
+        circuit(
+            f"Held {s}", (s,), dict.fromkeys(when, 0.0), movable=False, reason=Exclusion.PROTECTED
+        )
+        for s in taken
+    ]
+    oven = circuit("Oven", (space,), {}, poles=2, nominal_voltage=240.0)
+    result = analyze([*base, *others, oven])
+    for s in partner:
+        assert s not in result.empty_spaces
+    plain = analyze([*base, *others])
+    lost = set(plain.empty_spaces) - set(result.empty_spaces) - {space}
+    assert lost == partner - {s for c in base for s in c.spaces}
+
+
+def _crowded(open_spaces, extra=()):
+    """A heavy leg-B circuit at 19 against a steady leg-B load at 20; every
+    other space is held except `open_spaces`."""
+    when = periods(200)
+    heavy = circuit("Heavy", (19,), wavy(1, 1800, 2400, when))
+    load = {20: 2000.0}
+    held = [
+        circuit(
+            f"Held {s}",
+            (s,),
+            dict.fromkeys(when, load.get(s, 0.0)),
+            movable=False,
+            reason=Exclusion.PROTECTED,
+        )
+        for s in SPACES
+        if s not in (19, *open_spaces) and s not in {x for c in extra for x in c.spaces}
+    ]
+    return [heavy, *held, *extra]
+
+
+def test_the_partner_space_is_never_a_target():
+    # Without the oven, 17 is the nearest leg-A space in the heavy circuit's column.
+    assert analyze(_crowded((15, 17, 21))).moves[0].to_space == 17
+    # A two-pole breaker reporting only 15, with 13 held, sits on 15 and 17.
+    oven = circuit("Oven", (15,), {}, poles=2, nominal_voltage=240.0)
+    result = analyze(_crowded((17, 21), extra=(oven,)))
+    assert 17 not in result.empty_spaces
+    assert result.moves[0].to_space == 21
+
+
+def test_the_target_prefers_the_same_column():
+    # 18 (leg A, even column) is nearer than 17 (leg A, the same odd column).
+    assert analyze(_crowded((17, 18))).moves[0].to_space == 17
+    # With only the other column open, it is offered.
+    assert analyze(_crowded((18,))).moves[0].to_space == 18
+    # The same column wins over a nearer space across.
+    assert analyze(_crowded((18, 21))).moves[0].to_space == 21
+
+
+def test_few_lug_periods_are_unchecked():
+    circuits = site()
+    when = sorted(circuits[0].mean_w)
+    few = lugs_for(circuits, when[-47:])
+    result = analyze(circuits, legs=few)
+    assert result.mapping is MappingCheck.UNCHECKED
+    assert result.fit_r is None
+    assert result.fit_points == 47
+    enough = analyze(circuits, legs=lugs_for(circuits, when[-48:]))
+    assert enough.mapping is MappingCheck.CONFIRMED
+
+
+def test_not_movable_without_a_reason_is_an_error():
+    base = site()
+    with pytest.raises(ValueError, match="needs a reason"):
+        analyze([replace(base[0], movable=False), *base[1:]])

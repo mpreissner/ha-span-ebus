@@ -772,6 +772,9 @@
     },
     "leg_balance_not_loaded": {
       "message": "This entry is not loaded. Analyze its leg balance once it is running."
+    },
+    "leg_balance_read_failed": {
+      "message": "Couldn't read or analyze this panel's recorded history. Check that the recorder is running, then try again."
     }
   },
   "services": {

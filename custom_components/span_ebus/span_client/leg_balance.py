@@ -22,6 +22,8 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal, NamedTuple
 
+from .local import model
+
 MIN_GAIN_A = 2.0  # a move must lower "high" by at least this many amps...
 MIN_GAIN_PCT = 10.0  # ...and by at least this share of today's "high"
 BALANCED_BELOW_A = 5.0  # a "high" under this is balanced: nothing to suggest
@@ -98,7 +100,7 @@ class MappingCheck(StrEnum):
     CONFIRMED = "confirmed"
     FLIPPED = "flipped"
     UNCONFIRMED = "unconfirmed"
-    UNCHECKED = "unchecked"  # no lug history to check against
+    UNCHECKED = "unchecked"  # under MIN_FIT_POINTS periods of lug history to check against
 
 
 class Problem(StrEnum):
@@ -177,9 +179,78 @@ class Analysis:
 
 
 def is_two_pole(circuit: CircuitIn) -> bool:
-    if circuit.poles == 2 or len(circuit.spaces) == 2:
+    if circuit.poles == 2 or len(circuit.spaces) >= 2:
         return True
     return circuit.nominal_voltage is not None and round(circuit.nominal_voltage) == 240
+
+
+# --- from the panel's facts ------------------------------------------------------------
+
+
+def load_series(
+    circuit: model.CircuitFacts, mean_w: Mapping[datetime, float]
+) -> dict[datetime, float]:
+    """A circuit's recorded mean power, signed + while it draws.
+
+    The power sensor reads + while producing for solar and a generator, so
+    theirs is negated. A remote CT keeps the panel's + = import sign.
+    """
+    if circuit.role in model.PRODUCERS and not circuit.is_remote_ct:
+        return {when: -value for when, value in mean_w.items()}
+    return dict(mean_w)
+
+
+def held_still(circuit: model.CircuitFacts, options: model.ControlOptions) -> Exclusion | None:
+    """Why a circuit is counted but never moved, first match wins; else None."""
+    if circuit.device_id in options.protected:
+        return Exclusion.PROTECTED
+    if model.feeds_storage_or_solar(circuit):
+        return Exclusion.STORAGE_OR_SOLAR
+    if circuit.feeds is not None:
+        return Exclusion.FEEDS_PANEL
+    if circuit.fed_by is not None:
+        return Exclusion.FED_BY_PANEL
+    if circuit.is_remote_ct:
+        return Exclusion.REMOTE_CT
+    return None
+
+
+Series = Mapping[datetime, float]
+
+
+def _difference(upstream: Series, feedthrough: Series) -> dict[datetime, float]:
+    return {
+        when: value - feedthrough[when] for when, value in upstream.items() if when in feedthrough
+    }
+
+
+def lug_history(
+    period: Period,
+    upstream: tuple[Series, Series] | None,
+    feedthrough: tuple[Series, Series] | None,
+    *,
+    has_feedthrough: bool,
+) -> tuple[LegHistory | None, bool]:
+    """(this panel's own leg currents, lugs shared) from the recorded lug means.
+
+    With a feedthrough, the upstream lugs also carry the panel it feeds: its
+    currents are subtracted when both have history. Without that history the
+    upstream currents are used as they are and the lugs are reported shared,
+    so the leg check is never confirmed.
+    """
+    shared = False
+    if upstream is None:
+        return None, has_feedthrough
+    mean_a, mean_b = upstream
+    if has_feedthrough:
+        if feedthrough is not None and feedthrough[0] and feedthrough[1]:
+            mean_a = _difference(mean_a, feedthrough[0])
+            mean_b = _difference(mean_b, feedthrough[1])
+        else:
+            shared = True
+    if not mean_a or not mean_b:
+        return None, shared
+    return LegHistory(period=period, mean_a=dict(mean_a), mean_b=dict(mean_b)), shared
 
 
 def _quantile(sorted_values: Sequence[float], q: float) -> float:
@@ -227,14 +298,32 @@ class _Counted:
     amps: list[float] = field(default_factory=list)  # per aligned period
 
 
+def _partner_spaces(space: int, claims: Mapping[int, int], spaces: range | None) -> set[int]:
+    """The space a two-pole breaker reporting only `space` also takes.
+
+    Its other pole is in the same column, one row up or down. The side that is
+    in range and not claimed by another circuit; both when that is ambiguous.
+    """
+    candidates = {
+        other
+        for other in (space - 2, space + 2)
+        if (other in spaces if spaces is not None else other >= 1) and other not in claims
+    }
+    return candidates
+
+
 def _split(
-    circuits: Sequence[CircuitIn],
+    circuits: Sequence[CircuitIn], spaces: range | None = None
 ) -> tuple[list[Listed], list[CircuitIn], set[int]]:
     """Ignored circuits, the single-pole rest, and every claimed space."""
     claims: dict[int, int] = {}
     for circuit in circuits:
         for space in set(circuit.spaces):
             claims[space] = claims.get(space, 0) + 1
+    claimed = set(claims)
+    for circuit in circuits:
+        if len(set(circuit.spaces)) == 1 and is_two_pole(circuit):
+            claimed |= _partner_spaces(circuit.spaces[0], claims, spaces)
     ignored: list[Listed] = []
     single: list[CircuitIn] = []
     for circuit in circuits:
@@ -247,7 +336,7 @@ def _split(
             ignored.append(Listed(circuit.name, Exclusion.SHARED_SPACE))
         else:
             single.append(circuit)
-    return ignored, single, set(claims)
+    return ignored, single, claimed
 
 
 def _aligned(counted: Sequence[_Counted]) -> list[datetime]:
@@ -283,7 +372,10 @@ def analyze(
     confirmed.
     """
     period = legs.period if legs is not None else (period or "hour")
-    ignored, single, claimed = _split(circuits)
+    for circuit in circuits:
+        if not circuit.movable and circuit.reason is None:
+            raise ValueError("a circuit that is not movable needs a reason")
+    ignored, single, claimed = _split(circuits, spaces)
     empty = tuple(s for s in spaces if s not in claimed) if spaces is not None else ()
 
     counted = [_Counted(c, c.spaces[0], leg_of(c.spaces[0])) for c in single]
@@ -310,10 +402,8 @@ def analyze(
             reason = Exclusion.LOW_COVERAGE
         if reason is not None:
             not_moved.append(Listed(c.circuit.name, reason))
-        elif c.circuit.movable:
-            movable.append(c)
         else:
-            not_moved.append(Listed(c.circuit.name, Exclusion.LOW_COVERAGE))
+            movable.append(c)
 
     n = len(periods)
     span = _span_hours(periods, period)
@@ -366,18 +456,13 @@ def analyze(
 
     # The leg check (L9): predicted A - B against the lugs' measured A - B.
     mapping, fit_r, flipped = MappingCheck.UNCHECKED, None, False
-    if legs is not None and lug_periods:
+    if legs is not None and len(lug_periods) >= MIN_FIT_POINTS:
         index = {when: i for i, when in enumerate(periods)}
         predicted = [sum_a[index[p]] - sum_b[index[p]] for p in lug_periods]
         measured = [legs.mean_a[p] - legs.mean_b[p] for p in lug_periods]
         r = _pearson(predicted, measured)
         spread = max(measured) - min(measured)
-        decisive = (
-            r is not None
-            and len(lug_periods) >= MIN_FIT_POINTS
-            and spread >= FIT_SPREAD_A
-            and not lugs_shared
-        )
+        decisive = r is not None and spread >= FIT_SPREAD_A and not lugs_shared
         mapping, fit_r = MappingCheck.UNCONFIRMED, r
         if decisive and r is not None and r >= FIT_R:
             mapping = MappingCheck.CONFIRMED
@@ -386,6 +471,7 @@ def analyze(
         if flipped:
             legs_now(True)
     elif lugs_shared:
+        # The feedthrough's currents have no history: the lugs can't confirm anything.
         mapping = MappingCheck.UNCONFIRMED
     check = {"mapping": mapping, "fit_r": fit_r, "fit_points": len(lug_periods)}
 
@@ -441,8 +527,9 @@ def _moves(
         if targets:
             after = score([sign * amps for amps in c.amps])
             if passes(after):
-                # Every empty space on the other leg scores the same: offer the nearest.
-                to = min(targets, key=lambda s: (abs(s - c.space), s))
+                # Every empty space on the other leg scores the same: offer the
+                # nearest, in the same column first.
+                to = min(targets, key=lambda s: ((s - c.space) % 2 != 0, abs(s - c.space), s))
                 found.append(_move("move", c, to, here, None, typical, high, after))
     by_leg = [c for c in movable if leg(c) is Leg.A], [c for c in movable if leg(c) is Leg.B]
     for c in by_leg[0]:

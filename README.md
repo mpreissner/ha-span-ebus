@@ -187,12 +187,17 @@ The response gives the typical and high (95th percentile) difference between
 the legs in amps, which leg is heavier, and each suggestion with the change it
 would make. It also lists the circuits it left out (two-pole circuits, shared
 spaces) and the ones it counted but never moves (protected circuits, battery or
-solar, circuits feeding or fed by another panel).
+solar, circuits feeding or fed by another panel, and circuits measured by a
+remote CT).
 
 Which spaces sit on which leg is worked out from the panel layout, then checked
 against the panel's own lug currents. The response says whether that check
-confirmed it; if it didn't, check the leg of each space by hand. Suggestions
-need 72 hours of history; with less, the response shows the imbalance only.
+confirmed it (`confirmed`), found the legs the other way round (`flipped`),
+ran but didn't confirm it (`unconfirmed`), or couldn't run for lack of lug
+history (`unchecked`); unless it's confirmed, check the leg of each space by
+hand. With under about 4 hours of recorded data
+there's no result at all (not enough history). Suggestions need 72 hours of
+history; with less, the response shows the imbalance only.
 
 These are suggestions only. Moving a breaker means working inside the panel:
 have a licensed electrician check and do any move.

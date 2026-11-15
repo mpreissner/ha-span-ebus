@@ -18,6 +18,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
@@ -87,27 +88,13 @@ def _feeds_other_panels(
     return branch, over_lugs
 
 
-def _held_still(circuit: model.CircuitFacts, options: model.ControlOptions) -> lb.Exclusion | None:
-    """Why a circuit is counted but never moved (L8), or None."""
-    if circuit.device_id in options.protected:
-        return lb.Exclusion.PROTECTED
-    if model.feeds_storage_or_solar(circuit):
-        return lb.Exclusion.STORAGE_OR_SOLAR
-    if circuit.feeds is not None:
-        return lb.Exclusion.FEEDS_PANEL
-    if circuit.fed_by is not None:
-        return lb.Exclusion.FED_BY_PANEL
-    if circuit.is_remote_ct:
-        return lb.Exclusion.REMOTE_CT
-    return None
+def _read_failed(err: Exception) -> HomeAssistantError:
+    """The action's error when the history can't be read or analyzed.
 
-
-def _difference(
-    upstream: Mapping[datetime, float], feedthrough: Mapping[datetime, float]
-) -> dict[datetime, float]:
-    return {
-        when: value - feedthrough[when] for when, value in upstream.items() if when in feedthrough
-    }
+    Only the exception's type is logged: its text can name statistic ids.
+    """
+    _LOGGER.debug("Leg balance: reading or analyzing the history failed (%s)", type(err).__name__)
+    return HomeAssistantError(translation_domain=DOMAIN, translation_key="leg_balance_read_failed")
 
 
 async def async_analyze(
@@ -167,10 +154,8 @@ async def async_analyze(
     ) -> tuple[list[lb.CircuitIn], lb.LegHistory | None, bool]:
         circuits: list[lb.CircuitIn] = []
         for key, circuit, entity_id, feeds_panel in plans:
-            series = dict(means.get(entity_id, {})) if entity_id is not None else {}
-            if circuit.role in model.PRODUCERS:
-                series = {when: -value for when, value in series.items()}
-            reason = _held_still(circuit, options)
+            series = means.get(entity_id, {}) if entity_id is not None else {}
+            reason = lb.held_still(circuit, options)
             if reason is None and entity_id is None:
                 reason = lb.Exclusion.LOW_COVERAGE
             circuits.append(
@@ -182,43 +167,41 @@ async def async_analyze(
                     nominal_voltage=circuit.nominal_voltage,
                     movable=reason is None,
                     reason=reason,
-                    mean_w=series,
+                    mean_w=lb.load_series(circuit, series),
                     feeds_panel=feeds_panel,
                 )
             )
-        legs = None
-        shared = False
-        if upstream_ids is not None:
-            mean_a = means.get(upstream_ids[0], {})
-            mean_b = means.get(upstream_ids[1], {})
-            if feedthrough:
-                down_a = means.get(feedthrough_ids[0], {}) if feedthrough_ids else {}
-                down_b = means.get(feedthrough_ids[1], {}) if feedthrough_ids else {}
-                if down_a and down_b:
-                    mean_a, mean_b = _difference(mean_a, down_a), _difference(mean_b, down_b)
-                else:
-                    shared = True
-            if mean_a and mean_b:
-                legs = lb.LegHistory(period=period, mean_a=mean_a, mean_b=mean_b)
-        elif feedthrough:
-            shared = True
+
+        def pair(ids: tuple[str, str] | None) -> tuple[dict, dict] | None:
+            return (means.get(ids[0], {}), means.get(ids[1], {})) if ids is not None else None
+
+        legs, shared = lb.lug_history(
+            period, pair(upstream_ids), pair(feedthrough_ids), has_feedthrough=feedthrough
+        )
         return circuits, legs, shared
 
     spaces = lb.panel_spaces(snapshot.panel.model if snapshot.panel is not None else None)
 
     async def run(period: lb.Period, span_days: int) -> lb.Analysis:
-        circuits, legs, shared = inputs(await read(period, span_days), period)
-        return await hass.async_add_executor_job(
-            lambda: lb.analyze(
-                circuits,
-                legs,
-                spaces,
-                period=period,
-                min_gain_a=min_gain_a,
-                balanced_below_a=balanced_below_a,
-                lugs_shared=shared,
+        try:
+            means = await read(period, span_days)
+        except Exception as err:
+            raise _read_failed(err) from err
+        circuits, legs, shared = inputs(means, period)
+        try:
+            return await hass.async_add_executor_job(
+                lambda: lb.analyze(
+                    circuits,
+                    legs,
+                    spaces,
+                    period=period,
+                    min_gain_a=min_gain_a,
+                    balanced_below_a=balanced_below_a,
+                    lugs_shared=shared,
+                )
             )
-        )
+        except Exception as err:
+            raise _read_failed(err) from err
 
     analysis = await run("hour", days)
     if lb.use_short_term(analysis):
