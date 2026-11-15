@@ -710,6 +710,7 @@ READ_FAILED = (
     "Couldn't read or analyze this panel's recorded history. Check that the recorder is "
     "running, then try again."
 )
+NO_RESULT = "There's no result for this panel yet."
 _DEFAULT_PANEL_NAME = "SPAN panel"
 _PERIOD_WORDS = {"hour": "hourly", "5minute": "5-minute"}
 _IGNORED_WORDS = {
@@ -737,8 +738,9 @@ def notification_title(name_by_user: str | None) -> str:
 
 
 def _md(text: Any) -> str:
-    """A circuit name as literal text in markdown."""
-    return _MARKDOWN.sub(r"\\\1", str(text))
+    """A circuit name as literal text in markdown, on one line."""
+    flat = str(text).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return _MARKDOWN.sub(r"\\\1", flat)
 
 
 def _a(value: Any) -> str:
@@ -794,7 +796,7 @@ def _result_blocks(response: Mapping[str, Any]) -> list[str]:
     problem = response.get("problem")
     note = response.get("problem_note")
     if problem in (Problem.NOT_ENOUGH_HISTORY, Problem.NO_LAYOUT):
-        return [note] if note else []
+        return [note or NO_RESULT]
     blocks: list[str] = []
     if problem == Problem.SHORT_HISTORY and note:
         blocks.append(note)

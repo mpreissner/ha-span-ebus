@@ -1012,3 +1012,20 @@ def test_button_platform_is_set_up():
     button = (COMPONENT / "button.py").read_text()
     assert "if transport is None:" in button
     assert "entity_category" not in button
+
+
+def test_notification_keeps_circuit_names_on_one_line():
+    out = lb.response(analyze(site()), 28)
+    item = {**out["suggestions"][0], "circuit": "Bath\nfan\r\nup\rstairs"}
+    text = _markdown({**out, "suggestions": [item]})
+    line = next(x for x in text.splitlines() if x.startswith("1. "))
+    assert "**Bath fan up stairs**" in line
+    assert "\r" not in text
+
+
+@pytest.mark.parametrize("problem", ["not_enough_history", "no_layout"])
+def test_notification_without_a_problem_note_falls_back(problem):
+    out = lb.response(analyze(site(47)), 28)
+    for note in (None, ""):
+        text = _markdown({**out, "problem": problem, "problem_note": note})
+        assert text == f"{lb.NO_RESULT}\n\n_{lb.NOTICE}_"
