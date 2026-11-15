@@ -170,11 +170,38 @@ This action has not been tested against a real panel yet.
 
 ## Leg balance (local panels)
 
-The `span_ebus.analyze_leg_balance` action reads up to 90 days of recorded
-circuit power for a panel added over its local API, works out how unevenly the
-two legs (L1 and L2) are loaded, and suggests up to three single-pole breaker
-moves or swaps that would even them out. It changes nothing. Run it from
-**Developer tools > Actions** with "Return response" on:
+Press **Analyze leg balance** on the panel's device page (under Controls). The
+result appears in Notifications and replaces the previous one.
+
+It reads up to 28 days of recorded circuit power for a panel added over its
+local API and changes nothing. The notification shows:
+
+- how much history it used;
+- whether the leg of each space was checked against the panel's own lug
+  currents: confirmed, flipped (the legs are the other way round, and the
+  suggestions allow for it), unconfirmed or unchecked. Unless it says
+  confirmed, check the leg of each space by hand;
+- the typical and high (95th percentile) difference between the legs in amps,
+  and which leg is heavier;
+- up to three single-pole breaker moves or swaps, each with the high and
+  typical difference before and after;
+- how many circuits it left out (two-pole circuits, shared spaces) and how many
+  it counted but never moves (protected circuits, battery or solar, circuits
+  feeding or fed by another panel, circuits measured by a remote CT, and
+  circuits with too little history).
+
+With under about 4 hours of recorded data there's no result at all. Suggestions
+need 72 hours of history; with less, it shows the imbalance only.
+
+These are suggestions only. Moving a breaker means working inside the panel:
+have a licensed electrician check and do any move.
+
+### Advanced: the action
+
+The `span_ebus.analyze_leg_balance` action runs the same analysis and returns
+the full result. Use it for a different window or thresholds, or to use the
+result in a script or card. Run it from **Developer tools > Actions** with
+"Return response" on:
 
 ```yaml
 action: span_ebus.analyze_leg_balance
@@ -183,24 +210,10 @@ data:
   days: 28                        # 7 to 90
 ```
 
-The response gives the typical and high (95th percentile) difference between
-the legs in amps, which leg is heavier, and each suggestion with the change it
-would make. It also lists the circuits it left out (two-pole circuits, shared
-spaces) and the ones it counted but never moves (protected circuits, battery or
-solar, circuits feeding or fed by another panel, and circuits measured by a
-remote CT).
-
-Which spaces sit on which leg is worked out from the panel layout, then checked
-against the panel's own lug currents. The response says whether that check
-confirmed it (`confirmed`), found the legs the other way round (`flipped`),
-ran but didn't confirm it (`unconfirmed`), or couldn't run for lack of lug
-history (`unchecked`); unless it's confirmed, check the leg of each space by
-hand. With under about 4 hours of recorded data
-there's no result at all (not enough history). Suggestions need 72 hours of
-history; with less, the response shows the imbalance only.
-
-These are suggestions only. Moving a breaker means working inside the panel:
-have a licensed electrician check and do any move.
+The response holds the same fields as the notification, plus each suggestion's
+circuit and spaces, the empty spaces, and the reason each left-out circuit was
+left out. The mapping check is reported as `confirmed`, `flipped`,
+`unconfirmed` or `unchecked`.
 
 ## Connection (local panels)
 
