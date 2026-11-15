@@ -28,3 +28,21 @@ def test_drops_configured_and_duplicates():
 
 def test_nothing_found():
     assert offerable([], configured_hosts=[], configured_serials=[]) == []
+
+
+def test_stale_sightings_by_host_or_serial():
+    from span_client.local.discovery import Sighting, stale_sightings
+
+    flows = [
+        Sighting("a", "10.0.0.5", None),  # same host, not probed yet
+        Sighting("b", "10.0.0.9", "NT-0000-TEST"),  # same panel, cloud spelling, new address
+        Sighting("c", "10.0.0.6", "nt-1111-other"),  # another panel
+        Sighting("d", None, None),  # nothing to match on
+    ]
+    assert stale_sightings(flows, host="10.0.0.5", serial="nt-0000-test") == ["a", "b"]
+
+
+def test_stale_sightings_none():
+    from span_client.local.discovery import stale_sightings
+
+    assert stale_sightings([], host="10.0.0.5", serial="nt-0000-test") == []

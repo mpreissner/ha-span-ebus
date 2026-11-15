@@ -81,6 +81,7 @@ from .const import (
     LOCAL_REAUTH,
     TOKEN_DIR,
 )
+from .device_lookup import device_by_identifier
 from .span_client import cloud_auth, feeds
 from .span_client import energy_step as es
 from .span_client.backend import (
@@ -835,6 +836,13 @@ class SpanEbusConfigFlow(_FeedSteps, _LocalRegistration, ConfigFlow, domain=DOMA
                 )
                 self.hass.config_entries.async_schedule_reload(entry.entry_id)
                 return self.async_abort(reason="already_configured")
+        if any(
+            _is_cloud_account(entry.data)
+            for entry in self._async_current_entries(include_ignore=False)
+        ):
+            # Its panel joins that entry through Link the local panel; a discovery
+            # card would offer a second, separate entry. Adding by hand still works.
+            return self.async_abort(reason="link_from_cloud_entry")
         try:
             status, ca_pem = await onboard.probe_panel(session, host)
         except NotFound:
@@ -1489,7 +1497,7 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             ),
         )
         for identifier in identifiers:
-            device = registry.async_get_device(identifiers={(DOMAIN, identifier)})
+            device = device_by_identifier(registry, (DOMAIN, identifier))
             if device is not None:
                 return device
         return None
@@ -2241,11 +2249,12 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
                 registry.async_update_entity(entity_id, new_unique_id=new)
                 applied.append((entity_id, old, new))
             if stem != local[CONF_LOCAL_SERIAL]:
-                device = devices.async_get_device(identifiers={(DOMAIN, stem)})
+                device = device_by_identifier(devices, (DOMAIN, stem), entry.entry_id)
                 if device is not None:
                     merged = (device.id, set(device.identifiers))
                     devices.async_update_device(
-                        device.id, merge_identifiers={(DOMAIN, local[CONF_LOCAL_SERIAL])}
+                        device.id,
+                        new_identifiers={*device.identifiers, (DOMAIN, local[CONF_LOCAL_SERIAL])},
                     )
             if record_store is not None:
                 await record_store.async_save(es.new_record(dt_util.utcnow(), lasts))
@@ -2279,8 +2288,27 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             )
             return self.async_abort(reason="migration_failed")
         self._committed = True
+        self._abort_stale_discoveries(local)
         self.hass.config_entries.async_schedule_reload(entry.entry_id)
         return self.async_create_entry(data=options)
+
+    def _abort_stale_discoveries(self, local: Mapping[str, Any]) -> None:
+        """Drop discovery cards for the panel just linked; it is set up now."""
+        manager = self.hass.config_entries.flow
+        sightings = []
+        for flow in manager.async_progress_by_handler(DOMAIN):
+            context = flow.get("context") or {}
+            if context.get("source") != SOURCE_ZEROCONF:
+                continue
+            host = (context.get("title_placeholders") or {}).get("host")
+            sightings.append(discovery.Sighting(flow["flow_id"], host, context.get("unique_id")))
+        for flow_id in discovery.stale_sightings(
+            sightings, host=str(local.get(CONF_HOST, "")), serial=str(local[CONF_LOCAL_SERIAL])
+        ):
+            try:
+                manager.async_abort(flow_id)
+            except Exception as err:  # noqa: BLE001 — the link is saved; a card may stay
+                _LOGGER.debug("could not drop a discovery card: %s", type(err).__name__)
 
     async def _undo_link(
         self,

@@ -54,3 +54,29 @@ def offerable(
             serials.add(candidate.serial)
         kept.append(candidate)
     return sorted(kept, key=lambda c: (c.name.lower(), c.host))
+
+
+@dataclass(frozen=True)
+class Sighting:
+    """A discovery flow in progress: its id, and the panel it is about.
+
+    `serial` is the flow's unique id, set once the panel was probed.
+    """
+
+    flow_id: str
+    host: str | None
+    serial: str | None
+
+
+def stale_sightings(flows: Iterable[Sighting], *, host: str, serial: str) -> list[str]:
+    """The flows about a panel that was just set up, by host or serial.
+
+    Serials compare without case: the panel reports lowercase, the cloud uppercase.
+    """
+    wanted = serial.strip().casefold()
+    return [
+        flow.flow_id
+        for flow in flows
+        if (flow.host is not None and flow.host == host)
+        or (flow.serial is not None and flow.serial.strip().casefold() == wanted)
+    ]

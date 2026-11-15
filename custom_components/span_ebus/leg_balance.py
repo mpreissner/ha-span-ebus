@@ -26,6 +26,7 @@ from homeassistant.util import dt as dt_util
 
 from . import recorder_api
 from .const import CONF_LOCAL_SERIAL, DOMAIN
+from .device_lookup import device_by_identifier
 from .span_client import feeds
 from .span_client import leg_balance as lb
 from .span_client.backend import same_serial
@@ -231,7 +232,7 @@ def _name_by_user(hass: HomeAssistant, entry: ConfigEntry) -> str | None:
     serial = entry.data.get(CONF_LOCAL_SERIAL)
     if not serial:
         return None
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, serial)})
+    device = device_by_identifier(dr.async_get(hass), (DOMAIN, serial), entry.entry_id)
     return device.name_by_user if device is not None else None
 
 
