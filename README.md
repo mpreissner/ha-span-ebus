@@ -168,6 +168,35 @@ outside it can keep it:
 
 This action has not been tested against a real panel yet.
 
+## Leg balance (local panels)
+
+The `span_ebus.analyze_leg_balance` action reads up to 90 days of recorded
+circuit power for a panel added over its local API, works out how unevenly the
+two legs (L1 and L2) are loaded, and suggests up to three single-pole breaker
+moves or swaps that would even them out. It changes nothing. Run it from
+**Developer tools > Actions** with "Return response" on:
+
+```yaml
+action: span_ebus.analyze_leg_balance
+data:
+  config_entry_id: <your entry>   # or device_id; optional with one local panel
+  days: 28                        # 7 to 90
+```
+
+The response gives the typical and high (95th percentile) difference between
+the legs in amps, which leg is heavier, and each suggestion with the change it
+would make. It also lists the circuits it left out (two-pole circuits, shared
+spaces) and the ones it counted but never moves (protected circuits, battery or
+solar, circuits feeding or fed by another panel).
+
+Which spaces sit on which leg is worked out from the panel layout, then checked
+against the panel's own lug currents. The response says whether that check
+confirmed it; if it didn't, check the leg of each space by hand. Suggestions
+need 72 hours of history; with less, the response shows the imbalance only.
+
+These are suggestions only. Moving a breaker means working inside the panel:
+have a licensed electrician check and do any move.
+
 ## Connection (local panels)
 
 **Settings → Devices & services → SPAN Panel (eBus) → Configure → Connection**
