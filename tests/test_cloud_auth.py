@@ -200,3 +200,99 @@ def test_a_store_that_cannot_produce_a_token_asks_for_the_user(tmp_path):
     )
     with pytest.raises(ca.CloudCredentialsRejected):
         ca.access_token_from_store(path)
+
+
+def _expired_store(path):
+    ca.save_tokens(
+        path,
+        ca.CloudTokens(
+            access_token="old", id_token="it", refresh_token="rt", expires_at=time.time() - 10
+        ),
+    )
+
+
+def test_concurrent_callers_refresh_a_shared_store_once(tmp_path, monkeypatch):
+    import threading
+
+    path = tmp_path / "tokens.json"
+    _expired_store(path)
+    calls = []
+
+    def refresh(refresh_token):
+        calls.append(refresh_token)
+        time.sleep(0.05)  # long enough for the other caller to arrive
+        return ca.CloudTokens(
+            access_token=f"new-{len(calls)}",
+            id_token="it",
+            refresh_token="rt2",
+            expires_at=time.time() + 3600,
+        )
+
+    monkeypatch.setattr(ca, "refresh", refresh)
+    start = threading.Barrier(2)
+    got = []
+
+    def caller():
+        start.wait()
+        got.append(ca.access_token_from_store(path))
+
+    threads = [threading.Thread(target=caller) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert calls == ["rt"]
+    assert got == ["new-1", "new-1"]
+    assert ca.load_tokens(path).refresh_token == "rt2"
+
+
+def test_a_store_removed_during_a_refresh_stays_removed(tmp_path, monkeypatch):
+    path = tmp_path / "tokens.json"
+    _expired_store(path)
+
+    def refresh(_refresh_token):
+        path.unlink()
+        return ca.CloudTokens(
+            access_token="new", id_token="it", refresh_token="rt2", expires_at=time.time() + 3600
+        )
+
+    monkeypatch.setattr(ca, "refresh", refresh)
+    assert ca.access_token_from_store(path) == "new"
+    assert not path.exists()
+
+
+def test_the_token_lock_is_per_store(tmp_path):
+    a = ca.token_lock(tmp_path / "a.json")
+    assert ca.token_lock(tmp_path / "a.json") is a
+    assert ca.token_lock(tmp_path / "b.json") is not a
+
+
+def test_discard_tokens_removes_the_store(tmp_path):
+    path = tmp_path / "entry.json"
+    path.write_text("{}")
+    ca.discard_tokens(path)
+    assert not path.exists()
+
+
+def test_discard_tokens_without_a_store_is_quiet(tmp_path):
+    ca.discard_tokens(tmp_path / "missing.json")
+    ca.discard_tokens(tmp_path)  # a directory cannot be unlinked; still no raise
+    assert tmp_path.exists()
+
+
+def test_a_successful_login_logs_no_account_email(monkeypatch, caplog):
+    # The email identifies the account holder; debug logs end up in issues.
+    email = "someone@example.invalid"
+    replies = iter(
+        [
+            {"ChallengeName": "PASSWORD_VERIFIER", "ChallengeParameters": {}},
+            {"AuthenticationResult": {"AccessToken": "a", "IdToken": "i", "RefreshToken": "r"}},
+        ]
+    )
+    monkeypatch.setattr(ca, "_cognito_call", lambda target, body: next(replies))
+    monkeypatch.setattr(ca, "_process_challenge", lambda *args: {})
+    with caplog.at_level("DEBUG", logger=ca.log.name):
+        tokens = ca.authenticate(email, "not-a-real-passphrase")
+    assert tokens.access_token == "a"
+    assert "login succeeded" in caplog.text
+    assert email not in caplog.text

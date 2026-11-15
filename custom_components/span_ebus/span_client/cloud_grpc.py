@@ -160,6 +160,10 @@ class CloudGrpcClient:
         """SearchResourcesForSerial: map a panel serial → its trait resources."""
         return self.call("SearchResourcesForSerial", request)
 
+    def get_resources_for_hardware(self, request: bytes) -> bytes:
+        """GetResourcesForHardware: serial and model code → the board's resources."""
+        return self.call("GetResourcesForHardware", request)
+
     def subscribe_and_get_traits(self, request: bytes) -> bytes:
         """SubscribeAndGetTraits: register for telemetry → a trait snapshot.
 

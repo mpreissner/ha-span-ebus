@@ -19,11 +19,19 @@ uv.lock
 *.crt
 *.pem
 span-ca-certs/
+# Throwaway certificates made for the TLS tests; no panel's.
+!tests/fixtures/tls/*.pem
 
 # Runtime token caches (local + HA config dir).
 .span_ebus/
 .span-cloud.json
 span_at.txt
 span_id.txt
+span-capture.txt
 
 .claude/
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
+.mempalace/

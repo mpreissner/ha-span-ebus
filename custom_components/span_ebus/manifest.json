@@ -1,12 +1,14 @@
 {
   "domain": "span_ebus",
   "name": "SPAN Panel (eBus)",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@mpreissner"],
   "config_flow": true,
   "documentation": "https://github.com/mpreissner/ha-span-ebus",
   "integration_type": "device",
-  "iot_class": "cloud_push",
+  "iot_class": "local_push",
   "issue_tracker": "https://github.com/mpreissner/ha-span-ebus/issues",
-  "requirements": ["h2>=4.0.0"],
-  "version": "0.1.16"
+  "requirements": ["h2>=4.0.0", "paho-mqtt>=2.1"],
+  "version": "1.0.0",
+  "zeroconf": ["_ebus._tcp.local."]
 }

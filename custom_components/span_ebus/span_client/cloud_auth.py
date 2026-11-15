@@ -24,6 +24,7 @@ is discarded.
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime
 import hashlib
 import hmac
@@ -31,6 +32,8 @@ import json
 import logging
 import os
 import secrets
+import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -340,7 +343,7 @@ def authenticate(username: str, password: str) -> CloudTokens:
         raise CloudAuthError(
             f"login did not complete; Cognito returned challenge {result.get('ChallengeName')!r}"
         )
-    log.info("Cognito login succeeded for %s", username)
+    log.debug("Cognito login succeeded")
     return _tokens_from_result(auth)
 
 
@@ -370,9 +373,33 @@ def refresh(refresh_token: str) -> CloudTokens:
 # never stored, per the module contract).
 
 
+_TOKEN_LOCKS: dict[str, threading.RLock] = {}
+_TOKEN_LOCKS_GUARD = threading.Lock()
+
+
+def token_lock(path: Path) -> threading.RLock:
+    """The lock every reader, refresher and writer of one token store holds.
+
+    Re-entrant, so a holder may call `save_tokens` or `discard_tokens` itself.
+    """
+    key = str(Path(path).expanduser().absolute())
+    with _TOKEN_LOCKS_GUARD:
+        return _TOKEN_LOCKS.setdefault(key, threading.RLock())
+
+
+def discard_tokens(path: Path) -> None:
+    """Delete a token store, if there is one. Never raises."""
+    with token_lock(path), contextlib.suppress(OSError):
+        Path(path).expanduser().unlink(missing_ok=True)
+
+
 def save_tokens(path: Path, tokens: CloudTokens) -> None:
     """Persist tokens to `path` as 0600 JSON."""
-    path = Path(path).expanduser()
+    with token_lock(path):
+        _save_tokens(Path(path).expanduser(), tokens)
+
+
+def _save_tokens(path: Path, tokens: CloudTokens) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "access_token": tokens.access_token,
@@ -382,11 +409,17 @@ def save_tokens(path: Path, tokens: CloudTokens) -> None:
         "token_type": tokens.token_type,
     }
     # Write via a private temp file so a reader never sees a half-written store.
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        json.dump(payload, fh)
-    os.replace(tmp, path)
+    # The name is unique because every panel's backend shares this store and may
+    # refresh at the same moment; mkstemp also creates it 0600.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
 
 
 def load_tokens(path: Path) -> CloudTokens | None:
@@ -415,20 +448,29 @@ def access_token_from_store(path: Path) -> str:
     it holds. Each of those needs the user to sign in again, and nothing else.
     Transient failures raise `CloudAuthError` (or a `requests` error) instead, so
     a caller can tell "try later" from "this will never work".
+
+    Callers sharing a store take turns: the store is read under its lock, so a
+    second caller picks up the token the first just refreshed instead of
+    spending the refresh token again. A store removed during the refresh stays
+    removed.
     """
-    tokens = load_tokens(path)
-    if tokens is None:
-        raise CloudCredentialsRejected(
-            f"no cloud credentials at {path}; re-authenticate the SPAN Panel (eBus) "
-            "integration in Home Assistant"
-        )
-    if not tokens.expired:
+    with token_lock(path):
+        tokens = load_tokens(path)
+        if tokens is None:
+            raise CloudCredentialsRejected(
+                f"no cloud credentials at {path}; re-authenticate the SPAN Panel (eBus) "
+                "integration in Home Assistant"
+            )
+        if not tokens.expired:
+            return tokens.access_token
+        if not tokens.refresh_token:
+            raise CloudCredentialsRejected(
+                "cached access token expired and no refresh token is stored"
+            )
+        tokens = refresh(tokens.refresh_token)
+        if Path(path).expanduser().exists():
+            save_tokens(path, tokens)
         return tokens.access_token
-    if not tokens.refresh_token:
-        raise CloudCredentialsRejected("cached access token expired and no refresh token is stored")
-    tokens = refresh(tokens.refresh_token)
-    save_tokens(path, tokens)
-    return tokens.access_token
 
 
 def user_id_from_token(access_token: str) -> str | None:
@@ -446,7 +488,7 @@ def user_id_from_token(access_token: str) -> str | None:
         body = access_token.split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
     except (IndexError, ValueError) as exc:
-        log.debug("could not read claims from the access token: %s", exc)
+        log.debug("could not read claims from the access token: %s", type(exc).__name__)
         return None
     username = claims.get("username")
     return username if isinstance(username, str) and username else None

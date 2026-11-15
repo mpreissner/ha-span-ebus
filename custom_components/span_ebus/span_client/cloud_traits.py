@@ -58,7 +58,15 @@ VENDOR_SPAN = 1
 TRAIT_CIRCUIT = 15
 TRAIT_LABEL = 16
 TRAIT_SPACE = 17
+TRAIT_FEEDER = 21
 TRAIT_SWITCH = 31
+
+# Feeder kind, field 2 of trait 1/21 — which of a panel's non-circuit telemetry
+# instances is the main feed and which feeds a downstream panel. Decoded from a
+# contributor's notes rather than a capture of ours, so every consumer must work
+# without it: an unclassified feed falls back to the single-feed rule.
+FEEDER_MAIN_BREAKER = 3
+FEEDER_FEEDTHROUGH = 4
 
 # SwitchState. Only CLOSED means the circuit is energized; OPEN and the two
 # not-a-state values are all "not energized", but only OPEN is *known* to be.
@@ -142,6 +150,34 @@ def parse_trait_snapshot(raw: bytes) -> dict[int, CircuitInfo]:
         switchable,
     )
     return circuits
+
+
+def parse_feeder_kinds(raw: bytes) -> dict[int, int]:
+    """Map telemetry instance id -> feeder kind from a trait snapshot.
+
+    Assumes trait 1/21 shares its instance ids with the telemetry feed
+    instances, as trait 1/15 does with circuits. Returns an empty mapping —
+    never raises — when the snapshot is empty or carries no readable kinds.
+    """
+    if not raw:
+        return {}
+    try:
+        traits = _index_traits(raw)
+    except (ProtoError, ValueError) as exc:
+        log.debug("could not index the trait snapshot for feeder kinds: %s", exc)
+        return {}
+    kinds: dict[int, int] = {}
+    for vendor, trait, instance in traits:
+        if (vendor, trait) != (VENDOR_SPAN, TRAIT_FEEDER):
+            continue
+        inner = _trait_inner(traits, TRAIT_FEEDER, instance)
+        try:
+            kind = inner.get_int_opt(2) if inner is not None else None
+        except (ProtoError, ValueError):
+            kind = None
+        if kind is not None:
+            kinds[instance] = kind
+    return kinds
 
 
 def _index_traits(raw: bytes) -> dict[tuple[int, int, int], TraitEntry]:

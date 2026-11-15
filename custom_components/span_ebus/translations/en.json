@@ -3,10 +3,69 @@
     "step": {
       "user": {
         "title": "SPAN Panel (eBus)",
+        "description": "How do you want to add SPAN?",
+        "menu_options": {
+          "local": "A panel on my network (firmware r202639 or later)",
+          "cloud": "My SPAN account, over the cloud"
+        }
+      },
+      "cloud": {
+        "title": "Sign in to SPAN",
         "description": "Sign in with your SPAN account. Your password is used once to obtain access tokens and is never stored.\n\nSetup registers this Home Assistant install as a telemetry client and waits for the first live frame before finishing, so it may take up to a minute.",
         "data": {
           "email": "Email",
           "password": "Password"
+        }
+      },
+      "local_pick": {
+        "title": "Choose your panel",
+        "description": "These SPAN panels were found on your network. Pick one, or enter an address yourself.",
+        "data": {
+          "panel": "Panel"
+        }
+      },
+      "local_host": {
+        "title": "Find your panel",
+        "description": "Enter the panel's IP address or hostname. The panel needs firmware r202639 or later.",
+        "data": {
+          "host": "Host"
+        }
+      },
+      "local_unsupported": {
+        "title": "Local API not available",
+        "description": "This panel doesn't offer SPAN's local API yet; it arrives with firmware r202639. You can add your SPAN account over the cloud instead, or try another address.",
+        "menu_options": {
+          "cloud": "Use the cloud instead",
+          "local_host": "Try another address"
+        }
+      },
+      "local_auth": {
+        "title": "Enter the panel passphrase",
+        "description": "Find the passphrase in the SPAN app, under the panel's settings. It is used once to register Home Assistant with the panel and is never stored.\n\nThe panel at {host} presented a certificate authority with fingerprint:\n`{fingerprint}`",
+        "data": {
+          "passphrase": "Passphrase"
+        }
+      },
+      "cloud_fallback": {
+        "title": "Use the cloud as a fallback?",
+        "description": "Home Assistant now talks to the panel directly. Signing in to your SPAN account as well lets it fall back to the cloud when the panel can't be reached locally.",
+        "menu_options": {
+          "cloud": "Sign in for the cloud fallback (recommended)",
+          "local_only": "Local only: never use the cloud"
+        }
+      },
+      "reauth_local": {
+        "title": "Re-register with the panel",
+        "description": "The panel at {host} no longer accepts Home Assistant's credentials. Enter the passphrase from the SPAN app to register again; it is never stored.\n\nCertificate authority fingerprint:\n`{fingerprint}`",
+        "data": {
+          "passphrase": "Passphrase"
+        }
+      },
+      "reconfigure": {
+        "title": "Change the panel address",
+        "description": "Enter the panel's new IP address or hostname. The panel there must present the same certificate authority as before.",
+        "data": {
+          "host": "Host"
         }
       },
       "reauth_confirm": {
@@ -16,17 +75,753 @@
           "email": "Email",
           "password": "Password"
         }
+      },
+      "panels": {
+        "title": "Choose your panels",
+        "description": "These panels are on your SPAN account. Tick the ones that belong to this Home Assistant.",
+        "data": {
+          "panels": "Panels"
+        }
+      },
+      "feed": {
+        "title": "What feeds each panel?",
+        "description": "Choose how each panel gets its power. Most panels have their own supply."
+      },
+      "feed_circuit": {
+        "title": "Which circuit feeds this panel?",
+        "description": "Choose the circuit on {upstream} that feeds {panel}.",
+        "data": {
+          "circuit": "Circuit"
+        }
+      },
+      "cloud_pick_panel": {
+        "title": "Which panel is this?",
+        "description": "Your SPAN account lists no panel with this panel's serial. Pick the one that is this panel, and Home Assistant will check that its circuits sit on the same breaker spaces. Or keep this panel local only, with no cloud fallback.",
+        "data": {
+          "panel": "Panel"
+        }
+      },
+      "cloud_pick_confirm": {
+        "title": "Check the panel",
+        "description": "The SPAN account lists this panel under a different serial. Check that it's the same panel. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to finish setup."
+      },
+      "cloud_pick_check": {
+        "title": "Checking the panel"
       }
     },
     "error": {
       "invalid_auth": "Invalid email or password.",
       "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
-      "no_telemetry": "Signed in, but SPAN published no telemetry within the setup timeout. Check that your panel is online in the SPAN mobile app, then try again."
+      "no_telemetry": "Signed in, but SPAN published no telemetry within the setup timeout. Check that your panel is online in the SPAN mobile app, then try again.",
+      "no_panels": "Choose at least one panel.",
+      "feed_cycle": "Panels can't feed each other. Check the answers for a loop.",
+      "rate_limited": "The panel is limiting requests. Wait {retry_after} seconds and try again.",
+      "invalid_passphrase": "The panel didn't accept that passphrase.",
+      "panel_not_ready": "The panel isn't ready yet. Try again in a minute.",
+      "broker_auth": "The panel registered Home Assistant but its broker refused the login. Try again.",
+      "panel_unreachable": "Could not reach the panel at that address.",
+      "no_ready_state": "Connected to the panel, but it didn't report ready in time. Try again.",
+      "ca_mismatch": "The device at that address isn't this panel, or couldn't be reached.",
+      "unknown": "Unexpected error. Check the logs and try again.",
+      "not_a_panel": "The device at that address doesn't look like a SPAN panel.",
+      "panel_not_on_account": "That panel isn't on this SPAN account. Pick another.",
+      "panel_on_cloud_entry": "That panel already runs here as part of a SPAN account added over the cloud. Pick another, or keep this panel local only.",
+      "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Pick another, or keep this panel local only.",
+      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again, or keep this panel local only."
     },
     "abort": {
-      "already_configured": "This SPAN account is already configured.",
+      "already_configured": "This SPAN panel or account is already configured.",
       "reauth_successful": "Re-authentication was successful.",
-      "wrong_account": "The credentials are for a different SPAN account than the one being re-authenticated."
+      "wrong_account": "The credentials are for a different SPAN account than the one being re-authenticated.",
+      "already_in_progress": "This panel is already being set up.",
+      "reconfigure_successful": "The panel address was updated.",
+      "not_local": "Only panels added over the local API have an address to change.",
+      "cloud_account_configured": "This SPAN account is already set up over the cloud. Remove that entry first, then add the panel locally.",
+      "panel_configured_locally": "A panel on this SPAN account is already set up locally, with this account as its cloud fallback. Remove that entry first to add the whole account over the cloud.",
+      "panel_not_on_account": "This panel isn't on that SPAN account.",
+      "cannot_connect": "Could not reach the panel.",
+      "not_supported": "This panel's firmware doesn't offer the local API yet.",
+      "unknown": "Unexpected error."
+    },
+    "flow_title": "{host}",
+    "progress": {
+      "check_circuits": "Reading this panel's circuits and the ones SPAN lists for the panel you picked. This takes up to 20 seconds."
+    }
+  },
+  "options": {
+    "step": {
+      "panel": {
+        "title": "Panel options",
+        "menu_options": {
+          "transport": "Connection",
+          "topology": "Topology",
+          "controls": "Controls"
+        }
+      },
+      "transport": {
+        "title": "Connection",
+        "description": "Choose how Home Assistant reaches this panel.",
+        "data": {
+          "transport_mode": "Connection"
+        }
+      },
+      "topology": {
+        "title": "Topology",
+        "description": "Choose what feeds this panel. This answer is for this panel only: each SPAN panel answers for itself, and saving here doesn't change any other panel.\n\n- **Utility meter feeds this panel directly:** its sensors are named Grid, and its grid energy can be the Energy dashboard's grid source.\n- **Solar or a battery between the meter and this panel:** its sensors are named Feed. Don't use them as the grid source; use the utility meter or your solar or battery system's grid meter.\n- **Another panel's feed-through lugs** or **a breaker on another panel:** its sensors are named Feed. Don't use them as the grid source; the upstream panel already counts this one.\n\nSaving reloads the panel.{others}",
+        "data": {
+          "supply": "What feeds this panel"
+        }
+      },
+      "topology_panel": {
+        "title": "Which panel feeds this one?",
+        "description": "The panel that feeds this one. Panels from your SPAN account and panels found on your network are listed too, even if Home Assistant doesn't run them.",
+        "data": {
+          "upstream": "Which panel"
+        }
+      },
+      "topology_circuit": {
+        "title": "Which circuit feeds this panel?",
+        "description": "Choose the circuit on {upstream} that feeds {panel}.",
+        "data": {
+          "circuit": "Which breaker"
+        }
+      },
+      "init": {
+        "title": "SPAN account",
+        "menu_options": {
+          "panels": "Choose panels",
+          "link_local": "Link the local panel"
+        }
+      },
+      "panels": {
+        "title": "Choose your panels",
+        "description": "Tick the panels on your SPAN account that belong to this Home Assistant.",
+        "data": {
+          "panels": "Panels"
+        }
+      },
+      "confirm_remove": {
+        "title": "Remove panels?",
+        "description": "This removes {count} device(s) and their entities from Home Assistant. Saved energy totals are kept, so ticking a panel again resumes them."
+      },
+      "feed": {
+        "title": "What feeds each panel?",
+        "description": "Choose how each panel gets its power. Most panels have their own supply."
+      },
+      "feed_circuit": {
+        "title": "Which circuit feeds this panel?",
+        "description": "Choose the circuit on {upstream} that feeds {panel}.",
+        "data": {
+          "circuit": "Circuit"
+        }
+      },
+      "cloud_add": {
+        "title": "Sign in to your SPAN account",
+        "description": "Optional. If the local connection becomes unavailable, Home Assistant reads the panel through your SPAN account until it recovers. Controls stay local only. While the local connection works, Home Assistant only contacts your account to backfill missing solar, battery and site energy for gaps of five minutes or more, such as after a Home Assistant restart.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "cloud_add_confirm": {
+        "title": "Add cloud fallback",
+        "description": "Found this panel on your SPAN account. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to add the fallback. No new entities are created."
+      },
+      "cloud_remove": {
+        "title": "Use local only",
+        "description": "Home Assistant removes your SPAN account for this panel and runs it over the local connection only. The ability to backfill missing site, solar and battery energy, such as after a Home Assistant restart, is lost. Entities and their history stay.{warning}"
+      },
+      "cloud_pick_panel": {
+        "title": "Which panel is this?",
+        "description": "Your SPAN account lists no panel with this panel's serial. Pick the one that is this panel, and Home Assistant will check that its circuits sit on the same breaker spaces.",
+        "data": {
+          "panel": "Panel"
+        }
+      },
+      "cloud_pick_confirm": {
+        "title": "Check the panel",
+        "description": "The SPAN account lists this panel under a different serial. Check that it's the same panel. {matched} of {total} circuits matched; {unmatched} have no cloud reading and show unknown while on the cloud. Submit to add the fallback. No new entities are created."
+      },
+      "link_local": {
+        "title": "Link the local panel",
+        "description": "Home Assistant reads this panel over your home network and keeps your SPAN account as its fallback. Entities keep their names and history. Enter the panel's address and the passphrase from the SPAN app. The passphrase is not stored.",
+        "data": {
+          "host": "Address",
+          "passphrase": "Passphrase"
+        }
+      },
+      "link_confirm": {
+        "title": "Link the local panel",
+        "description": "{matched} of {total} entities move onto the local panel and keep their history. {standins} are kept, now fed by the panel. {fallback_only} are only updated while the local connection is down. {unmatched} are no longer updated.\n\nEnergy totals jump once when they switch to the panel's own meters. Home Assistant will offer to fix that in Repairs.\n\n{serial_note}{grid_energy_note}"
+      },
+      "controls": {
+        "title": "Controls",
+        "description": "Choose which controls Home Assistant may use on this panel. Saving reloads the panel.{hidden}",
+        "data": {
+          "protected_circuits": "Protected circuits",
+          "relay_override": "Allow switching storage and solar circuits",
+          "islanding_control": "Grid-state control"
+        },
+        "data_description": {
+          "protected_circuits": "These circuits' switches stay unavailable, and any command to switch them is refused. Their priority can still be changed.",
+          "relay_override": "These circuits feed a battery or solar inverter, so their switches are unavailable by default. Opening one can cut a battery or solar supply. Tick a circuit only if you understand the effect.",
+          "islanding_control": "Adds a control that tells the panel the grid is up, or clears that. It is only available while the battery cannot report the grid state itself. Asserting the wrong state can affect how the panel sheds circuits."
+        }
+      }
+    },
+    "error": {
+      "no_panels": "Choose at least one panel.",
+      "feed_cycle": "Panels can't feed each other. Check the answers for a loop.",
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
+      "not_a_panel": "The device at that address doesn't look like a SPAN panel.",
+      "unknown": "Unexpected error. Check the logs and try again.",
+      "rate_limited": "The panel is limiting requests. Wait {retry_after} seconds and try again.",
+      "invalid_passphrase": "The panel didn't accept that passphrase.",
+      "panel_not_ready": "The panel isn't ready yet. Try again in a minute.",
+      "broker_auth": "The panel registered Home Assistant but its broker refused the login. Try again.",
+      "no_ready_state": "Connected to the panel, but it didn't report ready in time. Try again.",
+      "panel_unreachable": "Could not reach the panel at that address.",
+      "not_supported": "This panel's firmware doesn't offer the local API yet."
+    },
+    "abort": {
+      "cannot_connect": "Could not reach the SPAN cloud. Please try again.",
+      "panel_not_on_account": "This panel isn't on that SPAN account.",
+      "panel_on_cloud_entry": "This panel already runs here as part of a SPAN account added over the cloud. Remove it from that entry first.",
+      "panel_circuits_mismatch": "Only {matched} of {total} circuits on that panel sit on the same breaker spaces as this one, so it doesn't look like the same panel. Try again and pick another, or use this panel locally only.",
+      "panel_unverified": "Couldn't read the circuits needed to check that panel is this one. Try again later, or use this panel locally only.",
+      "multi_panel_upgrade": "This SPAN account runs more than one panel here. Remove it and add each panel locally instead.",
+      "uid_collision": "Some of this panel's entities already exist in Home Assistant. Remove the other entry for this panel first.",
+      "migration_failed": "Linking failed and nothing was changed. Check the logs and try again.",
+      "link_not_running": "This SPAN account isn't running. Wait for it to load and try again.",
+      "link_unreadable": "Couldn't read the panel or its circuits. Nothing was changed. Try again later.",
+      "already_configured": "This panel is already set up in Home Assistant.",
+      "unknown": "Unexpected error.",
+      "link_other_panel": "The panel at that address is another panel on this SPAN account, not the one this entry runs. Check the address.",
+      "link_nothing_matched": "None of this account's entities match the local panel, so nothing was changed. Check that this is the right panel.",
+      "controls_unavailable": "Connect to the panel first: the controls are built from what it reports."
+    },
+    "progress": {
+      "link_check": "Reading the panel and matching its circuits. This takes up to 20 seconds."
+    }
+  },
+  "issues": {
+    "new_panels": {
+      "title": "New SPAN panel found",
+      "description": "{count} panel(s) on your SPAN account are not set up here. To add or dismiss them, open the SPAN Panel (eBus) integration, select Configure and tick the panels that belong to this Home Assistant."
+    },
+    "transport_fallback": {
+      "title": "{title} is using the cloud",
+      "description": "Home Assistant lost its local connection to {title} over an hour ago and is reading the panel through the SPAN cloud. Check that the panel is powered and on your network; if its address changed, select Reconfigure on the entry. It moves back to the local connection by itself once that has been healthy for five minutes."
+    },
+    "energy_step": {
+      "title": "{title}: fix a one-time jump in energy history",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Fix the energy jump",
+            "description": "{title} now reads circuit and grid energy from the panel's own meters instead of your SPAN account. Those meters count from when the panel was installed, so the Energy dashboard recorded one false jump around {hour} for these sensors:\n\n{entities}\n\nSelect Submit and Home Assistant removes that jump from their history. Nothing else changes. Choose Ignore if you want to keep it.\n\nCan't be fixed automatically:\n{skipped}"
+          },
+          "result": {
+            "title": "Energy history fixed",
+            "description": "Fixed {applied} sensors. The Energy dashboard updates within a few minutes.\n\nNot changed ({skipped_count}):\n{skipped}"
+          }
+        },
+        "abort": {
+          "not_running": "The integration isn't running. Try again once it has started."
+        }
+      }
+    },
+    "legacy_entities": {
+      "title": "{title} has old cloud entities",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Remove old cloud entities",
+            "description": "{count} entities from the earlier cloud setup of {title} are not updated from the panel:\n{groups}\n\n{entities}\n\nTheir history stays available in Statistics. Select Submit to remove them."
+          }
+        },
+        "abort": {
+          "not_running": "The integration isn't running. Try again once it has started.",
+          "nothing_left": "There are no old cloud entities left to remove."
+        }
+      }
+    }
+  },
+  "selector": {
+    "local_pick": {
+      "options": {
+        "manual": "Enter an address"
+      }
+    },
+    "transport_mode": {
+      "options": {
+        "local_first": "Local, with cloud fallback: your SPAN account is used only when the local connection becomes unavailable, and to backfill missing site, solar and battery energy for gaps of five minutes or more, such as after a Home Assistant restart. Backfill covers the last 7 days on single-panel sites; circuit energy is not backfilled.",
+        "local_only": "Local only: your SPAN account is removed from Home Assistant for this panel, and the ability to backfill missing energy data is lost."
+      }
+    },
+    "supply": {
+      "options": {
+        "own_supply": "Utility meter feeds this panel directly",
+        "behind_der": "Utility meter, with solar or a battery between the meter and this panel",
+        "lugs": "Another panel's feed-through lugs",
+        "branch": "A breaker on another panel"
+      }
+    },
+    "cloud_pick_panel": {
+      "options": {
+        "local_only": "Keep this panel local only"
+      }
+    },
+    "energy_step_reason": {
+      "options": {
+        "excluded_from_recorder": "not recorded",
+        "recorder_not_loaded": "recorder not running",
+        "no_statistics": "no statistics recorded",
+        "no_statistics_recorded": "no statistics recorded",
+        "no_prior_reading": "no earlier reading",
+        "unexpected": "history doesn't show the jump",
+        "changed_since": "already adjusted by hand",
+        "nothing": "none"
+      }
+    },
+    "link_note": {
+      "options": {
+        "serial_mismatch": "The SPAN account lists this panel under a different serial. {matched} of {total} circuits sit on the same breaker spaces, so it looks like the same panel; check that it is before you submit.",
+        "grid_energy": "Site grid energy is one of the sensors only updated while the local connection is down, because this site has several panels. If your Energy dashboard uses it, switch to the panel's imported energy sensor.",
+        "cloud_remove_fallback_only": "{count} sensors that only your SPAN account provides stop updating. You can remove them afterwards.",
+        "controls_no_override": "No circuit on this panel feeds a battery or solar inverter, so there are none to allow switching.",
+        "controls_no_islanding": "Grid-state control appears only on panels with a battery whose grid state the panel lets Home Assistant set."
+      }
+    },
+    "legacy_group": {
+      "options": {
+        "duplicate": "{count} left from an earlier version, no longer updated",
+        "unmatched": "{count} for circuits the link could not pair, never updated",
+        "fallback_only": "{count} only updated while the local connection is down",
+        "fallback_only_local": "{count} that only your SPAN account provides; with local only they never update",
+        "more": "…and {count} more"
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "door": {
+        "name": "Door"
+      },
+      "ethernet": {
+        "name": "Ethernet"
+      },
+      "wifi": {
+        "name": "Wi-Fi"
+      },
+      "pcs_active": {
+        "name": "PCS active"
+      },
+      "pcs_enabled": {
+        "name": "PCS enabled"
+      },
+      "grid_islandable": {
+        "name": "Grid islandable"
+      },
+      "bess_derived_connected": {
+        "name": "Connected"
+      },
+      "pv_derived_panel_link": {
+        "name": "Panel link"
+      },
+      "evse_derived_charging": {
+        "name": "Charging"
+      },
+      "evse_derived_ev_connected": {
+        "name": "EV connected"
+      },
+      "evse_derived_panel_link": {
+        "name": "Panel link"
+      }
+    },
+    "button": {
+      "analyze_leg_balance": {
+        "name": "Analyze leg balance"
+      }
+    },
+    "sensor": {
+      "transport": {
+        "name": "Transport",
+        "state": {
+          "local": "Local",
+          "cloud": "Cloud",
+          "offline": "Offline"
+        }
+      },
+      "panel_status": {
+        "name": "Panel status",
+        "state": {
+          "init": "Initializing",
+          "ready": "Ready",
+          "disconnected": "Disconnected",
+          "sleeping": "Sleeping",
+          "lost": "Lost",
+          "alert": "Alert",
+          "unknown": "Unknown"
+        }
+      },
+      "current_power": {
+        "name": "Current power"
+      },
+      "main_consumed_energy": {
+        "name": "Main meter consumed energy"
+      },
+      "main_produced_energy": {
+        "name": "Main meter produced energy"
+      },
+      "main_net_energy": {
+        "name": "Main meter net energy"
+      },
+      "feedthrough_power": {
+        "name": "Feedthrough power"
+      },
+      "feedthrough_imported_energy": {
+        "name": "Feedthrough imported energy"
+      },
+      "feedthrough_exported_energy": {
+        "name": "Feedthrough exported energy"
+      },
+      "grid_power": {
+        "name": "Grid power"
+      },
+      "feed_power": {
+        "name": "Feed power"
+      },
+      "feed_consumed_energy": {
+        "name": "Feed consumed energy"
+      },
+      "feed_produced_energy": {
+        "name": "Feed produced energy"
+      },
+      "feed_net_energy": {
+        "name": "Feed net energy"
+      },
+      "site_power": {
+        "name": "Site power"
+      },
+      "pv_power": {
+        "name": "PV power"
+      },
+      "battery_power": {
+        "name": "Battery power"
+      },
+      "frequency": {
+        "name": "Frequency"
+      },
+      "voltage_a": {
+        "name": "L1 voltage"
+      },
+      "voltage_b": {
+        "name": "L2 voltage"
+      },
+      "busbar_current": {
+        "name": "Busbar current"
+      },
+      "upstream_current_a": {
+        "name": "Upstream current L1"
+      },
+      "upstream_current_b": {
+        "name": "Upstream current L2"
+      },
+      "feedthrough_current_a": {
+        "name": "Feedthrough current L1"
+      },
+      "feedthrough_current_b": {
+        "name": "Feedthrough current L2"
+      },
+      "main_breaker_rating": {
+        "name": "Main breaker rating"
+      },
+      "service_rating": {
+        "name": "Service rating"
+      },
+      "upstream_protection_rating": {
+        "name": "Upstream protection rating"
+      },
+      "main_relay": {
+        "name": "Main relay",
+        "state": {
+          "unknown": "Unknown",
+          "open": "Open",
+          "closed": "Closed"
+        }
+      },
+      "vendor_cloud": {
+        "name": "Vendor cloud",
+        "state": {
+          "unknown": "Unknown",
+          "unconnected": "Not connected",
+          "connected": "Connected"
+        }
+      },
+      "software_version": {
+        "name": "Software version"
+      },
+      "pcs_import_limit": {
+        "name": "PCS import limit"
+      },
+      "pcs_binding_constraint": {
+        "name": "PCS binding constraint",
+        "state": {
+          "fsr": "FSR",
+          "doe": "DOE",
+          "voltage": "Voltage",
+          "off_grid": "Off-grid",
+          "requested": "Requested",
+          "operator": "Operator",
+          "none": "None",
+          "unknown": "Unknown"
+        }
+      },
+      "time_to_priority_shed": {
+        "name": "Time to priority shed"
+      },
+      "total_time_remaining": {
+        "name": "Total time remaining"
+      },
+      "mid_grid_grid_forming_entity": {
+        "name": "Grid-forming source",
+        "state": {
+          "battery": "Battery",
+          "generator": "Generator",
+          "grid": "Grid",
+          "none": "None",
+          "pv": "Solar",
+          "unknown": "Unknown"
+        }
+      },
+      "bess_meter_active_power": {
+        "name": "Power"
+      },
+      "bess_soc_soc": {
+        "name": "State of charge"
+      },
+      "bess_soc_soe": {
+        "name": "Stored energy"
+      },
+      "bess_info_nameplate_capacity": {
+        "name": "Nameplate capacity"
+      },
+      "bess_status_communication_state": {
+        "name": "Communication",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "lost": "Lost",
+          "unknown": "Unknown"
+        }
+      },
+      "pv_info_nominal_power": {
+        "name": "Nominal power"
+      },
+      "evse_status_status": {
+        "name": "Status",
+        "state": {
+          "available": "Available",
+          "preparing": "Preparing",
+          "charging": "Charging",
+          "unavailable": "Unavailable"
+        }
+      },
+      "evse_meter_advertised_current": {
+        "name": "Advertised current"
+      },
+      "evse_config_max_charge_current": {
+        "name": "Maximum charge current"
+      },
+      "mid_grid_grid_state": {
+        "name": "Grid state",
+        "state": {
+          "up": "Up",
+          "down": "Down",
+          "degraded": "Degraded",
+          "unknown": "Unknown"
+        }
+      },
+      "mid_grid_islanding_state": {
+        "name": "Islanding state",
+        "state": {
+          "on_grid": "On grid",
+          "off_grid": "Off grid",
+          "unknown": "Unknown"
+        }
+      },
+      "overhead": {
+        "name": "Panel overhead"
+      },
+      "overhead_energy": {
+        "name": "Panel overhead energy"
+      },
+      "site_energy": {
+        "name": "Home energy"
+      },
+      "pv_energy": {
+        "name": "Solar energy"
+      },
+      "battery_energy": {
+        "name": "Battery energy"
+      }
+    },
+    "select": {
+      "priority": {
+        "name": "Priority",
+        "state": {
+          "off_grid": "Shed when off-grid",
+          "soc_threshold": "Shed at battery threshold",
+          "never": "Never shed"
+        }
+      },
+      "asserted_islanding": {
+        "name": "Grid state",
+        "state": {
+          "none": "Not asserted",
+          "on_grid": "On grid"
+        }
+      }
+    },
+    "number": {
+      "evse_config_user_max_charge_current": {
+        "name": "Charge current limit"
+      }
+    },
+    "lock": {
+      "evse_switch_lock_state": {
+        "name": "Lock"
+      }
+    }
+  },
+  "exceptions": {
+    "local_unavailable": {
+      "message": "The panel is not reachable on its local API right now, so the command was not sent."
+    },
+    "not_settable": {
+      "message": "The panel does not accept changes to this setting."
+    },
+    "bad_value": {
+      "message": "The panel does not accept that value for this setting."
+    },
+    "command_not_sent": {
+      "message": "The command could not be sent to the panel. Check its connection and try again."
+    },
+    "control_protected": {
+      "message": "This circuit is protected in the integration's options, so the command was not sent."
+    },
+    "control_storage_or_solar": {
+      "message": "This circuit feeds a battery or solar inverter, so the command was not sent. Allow it in the integration's options to switch it."
+    },
+    "control_not_opted_in": {
+      "message": "The grid-state control is turned off in the integration's options, so the command was not sent."
+    },
+    "control_gated": {
+      "message": "This control is not available right now, so the command was not sent."
+    },
+    "control_out_of_range": {
+      "message": "That value is outside the range the device accepts right now, so the command was not sent."
+    },
+    "evse_limit_out_of_range": {
+      "message": "The charge current limit must be between {min} and {max} A."
+    },
+    "rotate_no_local_panel": {
+      "message": "No loaded panel added over its local API matches this call. Pick a local panel's config entry or device."
+    },
+    "rotate_multiple_panels": {
+      "message": "More than one panel was added over its local API. Pick the panel's config entry or device."
+    },
+    "rotate_target_mismatch": {
+      "message": "The device does not belong to the config entry given. Give one of them, or a matching pair."
+    },
+    "rotate_not_local": {
+      "message": "This entry was not added over the panel's local API, so it has no local credentials to rotate."
+    },
+    "rotate_not_loaded": {
+      "message": "This entry is not loaded. Rotate its credentials once it is running."
+    },
+    "rotate_no_token": {
+      "message": "This entry has no local access token. Run reauthentication first; nothing was changed."
+    },
+    "rotate_no_ca": {
+      "message": "This entry has no pinned panel certificate. Run reauthentication first; nothing was changed."
+    },
+    "rotate_auth_failed": {
+      "message": "The panel refused this entry's access token. Run reauthentication; nothing was changed."
+    },
+    "rotate_rate_limited": {
+      "message": "The panel is limiting requests. Try again in {retry_after} seconds; nothing was changed."
+    },
+    "rotate_cannot_connect": {
+      "message": "The panel could not be reached, so the request was not sent. Nothing was changed."
+    },
+    "rotate_failed": {
+      "message": "The panel refused to rotate its credentials. Nothing was changed."
+    },
+    "rotate_outcome_unknown": {
+      "message": "The panel's answer was lost, so its passphrase may have changed. If it did, the new one is in the SPAN app: enter it in the reauthentication that follows."
+    },
+    "leg_balance_no_local_panel": {
+      "message": "No loaded panel added over its local API matches this call. Pick a local panel's config entry or device."
+    },
+    "leg_balance_multiple_panels": {
+      "message": "More than one panel was added over its local API. Pick the panel's config entry or device."
+    },
+    "leg_balance_target_mismatch": {
+      "message": "The device does not belong to the config entry given. Give one of them, or a matching pair."
+    },
+    "leg_balance_not_local": {
+      "message": "Leg balance is not supported yet for panels not added over their local API."
+    },
+    "leg_balance_not_loaded": {
+      "message": "This entry is not loaded. Analyze its leg balance once it is running."
+    },
+    "leg_balance_read_failed": {
+      "message": "Couldn't read or analyze this panel's recorded history. Check that the recorder is running, then try again."
+    }
+  },
+  "services": {
+    "rotate_credentials": {
+      "name": "Rotate local credentials",
+      "description": "Asks a panel added over its local API for a new passphrase and broker password, stores the password and reconnects. Admin users only. The new passphrase is returned in the response and nowhere else: a script that keeps the response in a variable keeps it in its trace, and debug logging of the websocket API logs it.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The panel's config entry. Optional when only one panel was added over its local API."
+        },
+        "device_id": {
+          "name": "Device",
+          "description": "Any device of the panel: the panel, a circuit or a subdevice. Optional when only one panel was added over its local API."
+        }
+      }
+    },
+    "analyze_leg_balance": {
+      "name": "Analyze leg balance",
+      "description": "Reads the recorded history of a panel added over its local API and suggests single-pole breaker moves or swaps that would even out the load on its two legs (L1 and L2). Read-only: nothing is changed. Suggestions only: have a licensed electrician check and do any move.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The panel's config entry. Optional when only one panel was added over its local API."
+        },
+        "device_id": {
+          "name": "Device",
+          "description": "Any device of the panel: the panel, a circuit or a subdevice. Optional when only one panel was added over its local API."
+        },
+        "days": {
+          "name": "Days",
+          "description": "How many days of history to analyze, from 7 to 90."
+        },
+        "min_gain_a": {
+          "name": "Minimum gain",
+          "description": "The least a suggestion must lower the high imbalance by, in amps (it must also lower it by 10 %)."
+        },
+        "balanced_below_a": {
+          "name": "Balanced below",
+          "description": "A high imbalance under this many amps counts as balanced, and nothing is suggested."
+        }
+      }
     }
   }
 }

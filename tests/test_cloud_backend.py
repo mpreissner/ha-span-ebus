@@ -443,6 +443,47 @@ def test_bootstrap_reads_serial_and_hardware_ids_from_one_call(monkeypatch, tmp_
     assert calls == ["sites", "ably", "ably"]
 
 
+def test_bootstrap_keeps_the_top_level_serial_when_the_site_has_none(monkeypatch, tmp_path):
+    # A site scan finds no panelboard here, and the broader scan must still win
+    # over keying every entity under the "span-cloud" placeholder.
+    sites = pb.field_message(
+        1,
+        pb.field_message(1, pb.field_string(1, "site-1"))
+        + pb.field_string(4, "XC-0000-00000")
+        + pb.field_message(3, pb.field_message(1, pb.field_string(2, "hw-1"))),
+    )
+
+    class FakeGrpc:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def get_sites_for_user(self):
+            return sites
+
+        def ably_token(self, request):
+            return pb.field_string(1, json.dumps({"keyName": "k", "nonce": "n", "mac": "m"}))
+
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", lambda p: "access")
+    monkeypatch.setattr(cloud.cloud_grpc, "CloudGrpcClient", FakeGrpc)
+    monkeypatch.setattr(
+        cloud.cloud_ably,
+        "request_token",
+        lambda req, **kw: cloud.cloud_ably.AblyTokenDetails(token="realtok"),
+    )
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "DEV", user_id="user", site_id="site-1")
+    backend.bootstrap()
+
+    assert backend._serial == "XC-0000-00000"
+    assert backend._hardware_ids == ["hw-1"]
+
+
 def test_probe_returns_schema_from_first_content_frame(monkeypatch, tmp_path):
     # The config flow uses probe() to prove the channel actually carries data.
     monkeypatch.setattr(cloud, "decode_frame", lambda raw: _frame())
@@ -1141,3 +1182,168 @@ def test_panel_overhead_is_never_negative():
     schema, readings = _overhead_inputs()
     readings["circuit-54/power"] = replace(readings["circuit-54/power"], value="2100.000")
     assert cloud.panel_overhead(schema, readings) == 0.0
+
+
+def _two_feed_inputs(feeders):
+    # The second three_wire instance is a feedthrough carrying 1500 W onward.
+    frame = _frame()
+    samples = [
+        *frame.resources["res1"],
+        CircuitSample(
+            instance_id=41,
+            kind="three_wire",
+            quality_pct=100,
+            combined=Channel(current_ma=6250, power_mw=1500000),
+        ),
+    ]
+    frame = replace(frame, resources={"res1": samples})
+    schema = cloud.schema_from_frame("<cloud-serial>", frame, _circuits(), feeders)
+    readings = {r.key: r for r in cloud.readings_from_frame(frame, 0.0, _circuits())}
+    return schema, readings
+
+
+def test_a_single_unclassified_feed_is_still_the_main_feed():
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits(), {})
+    readings = {r.key: r for r in cloud.readings_from_frame(_frame(), 0.0, _circuits())}
+    assert schema.properties["feed-2/power"].feeder_kind is None
+    assert round(cloud.panel_overhead(schema, readings), 3) == 1661.020
+
+
+def test_feeder_kind_is_recorded_on_the_feed_power():
+    schema, _ = _two_feed_inputs({2: 3, 41: 4})
+    assert schema.properties["feed-2/power"].feeder_kind == 3
+    assert schema.properties["feed-41/power"].feeder_kind == 4
+    assert schema.properties["circuit-54/power"].feeder_kind is None
+
+
+def test_two_unclassified_feeds_cannot_be_told_apart():
+    schema, readings = _two_feed_inputs({})
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_a_partly_classified_pair_of_feeds_is_not_guessed():
+    schema, readings = _two_feed_inputs({2: 3})
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_the_feedthrough_is_subtracted_from_the_main_feed():
+    # 2003.000 W in, 341.980 W to the branch, 1500.000 W on to the downstream panel.
+    schema, readings = _two_feed_inputs({2: 3, 41: 4})
+    assert round(cloud.panel_overhead(schema, readings), 3) == 161.020
+
+
+def test_the_feedthrough_reading_is_required_once_classified():
+    schema, readings = _two_feed_inputs({2: 3, 41: 4})
+    del readings["feed-41/power"]
+    assert cloud.panel_overhead(schema, readings) is None
+
+
+def test_a_lone_feed_is_the_main_feed_whatever_its_kind():
+    # A panel fed through lugs may tag its only feed as a feedthrough; it is
+    # still everything the panel takes in.
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits(), {2: 4})
+    readings = {r.key: r for r in cloud.readings_from_frame(_frame(), 0.0, _circuits())}
+    plain = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits())
+    assert cloud.panel_overhead(schema, readings) == pytest.approx(
+        cloud.panel_overhead(plain, readings)
+    )
+    assert cloud.panel_overhead(schema, readings) == pytest.approx(1661.020)
+
+
+def test_a_lone_feedthrough_tagged_feed_still_gets_the_overhead_pair(caplog):
+    schema = cloud.schema_from_frame("<cloud-serial>", _frame(), _circuits(), {2: 4})
+    feeds = [s for s in schema.properties.values() if cloud.is_main_feed_power(s)]
+    assert len(feeds) == 1
+    with caplog.at_level("DEBUG", logger=cloud.log.name):
+        assert cloud.is_overhead_feed(feeds[0], schema)
+    assert "lone feed" in caplog.text
+
+
+def test_the_overhead_pair_hangs_on_the_main_feed_beside_a_feedthrough():
+    schema, _ = _two_feed_inputs({2: 3, 41: 4})
+    gates = [s for s in schema.properties.values() if cloud.is_overhead_feed(s, schema)]
+    assert [s.feeder_kind for s in gates] == [3]
+
+
+def test_private_ids_stay_below_info_level(monkeypatch, caplog, tmp_path):
+    ids = iter([["gw-secret-old"], ["gw-secret-new"]])
+
+    class FakeGrpc:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_sites_for_user(self):
+            return b"sites"
+
+        def ably_token(self, request):
+            return b"token"
+
+        def subscribe_and_get_traits(self, request):
+            return b"snapshot"
+
+    monkeypatch.setattr(cloud.cloud_auth, "access_token_from_store", lambda path: "at")
+    monkeypatch.setattr(cloud.cloud_grpc, "CloudGrpcClient", lambda *a, **kw: FakeGrpc())
+    monkeypatch.setattr(cloud, "parse_sites_hardware_ids", lambda sites: next(ids))
+    monkeypatch.setattr(cloud, "_parse_sites_serial", lambda sites: "XC-SECRET")
+    monkeypatch.setattr(
+        cloud,
+        "parse_ably_token",
+        lambda raw, fallback_channel=None: cloud.AblyDirective(
+            token="tok", token_request=None, channel="c:user-secret:uuid-secret"
+        ),
+    )
+
+    backend = cloud.CloudBackend(tmp_path / "tok.json", "dev-uuid", user_id="u")
+    with caplog.at_level("INFO", logger=cloud.log.name):
+        backend.bootstrap()
+        backend._note_attach_ended(delivered=False, reason="no telemetry for 90s")
+        _, channel = backend.bootstrap()
+        backend.subscribe(channel)
+
+    assert "subscribable hardware ids changed" in caplog.text
+    assert "subscribed 1 resource(s)" in caplog.text
+    assert "secret" not in caplog.text.lower()
+
+
+# --- an entry already running the panel ------------------------------------------
+
+
+def test_serial_taken_by_unique_id_or_local_serial_in_any_case():
+    names = ("nt-0000-test", "XC-AAAA-0000")
+    assert cloud.serial_taken(["NT-0000-TEST"], [], names)
+    assert cloud.serial_taken([], ["xc-aaaa-0000"], names)
+    assert cloud.serial_taken(["acct-1"], [None, "XC-AAAA-0000"], names)
+
+
+def test_serial_taken_is_false_for_other_panels_and_blanks():
+    names = ("nt-0000-test", "XC-AAAA-0000", None)
+    assert not cloud.serial_taken(["acct-1", None, ""], [None, "nt-1111-test"], names)
+    assert not cloud.serial_taken(["nt-0000-test"], [], [None, ""])
+
+
+# --- a sibling panel on the account ------------------------------------------------
+
+
+def _sibling_sites():
+    main = cloud.PanelInfo("site-a", "XC-AAAA", "1-02100-04", None)
+    mlo = cloud.PanelInfo("site-b", "XC-BBBB", "1-02100-04", None)
+    return [
+        cloud.SiteInfo("site-a", ("site-a",), (main,)),
+        cloud.SiteInfo("site-b", ("site-b",), (mlo,)),
+    ]
+
+
+def test_sibling_answers_is_false_for_the_chosen_panel():
+    assert not cloud.sibling_answers(_sibling_sites(), "XC-AAAA", "xc-aaaa")
+
+
+def test_sibling_answers_refuses_another_panel_on_the_account():
+    assert cloud.sibling_answers(_sibling_sites(), "XC-AAAA", "xc-bbbb")
+
+
+def test_sibling_answers_leaves_an_unknown_serial_to_the_circuits():
+    assert not cloud.sibling_answers(_sibling_sites(), "XC-AAAA", "nt-0000-test")
+    assert not cloud.sibling_answers(_sibling_sites(), "XC-AAAA", None)

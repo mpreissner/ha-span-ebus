@@ -1,4 +1,4 @@
-"""SPAN Panel (eBus) integration — cloud push backend."""
+"""SPAN Panel (eBus) integration: the cloud push backend, and panels added locally."""
 
 from __future__ import annotations
 
@@ -8,25 +8,74 @@ import os
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
+from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
 
+from . import backfill, energy_step, legacy_repair
 from .const import (
+    CLOUD_DATA_KEYS,
+    CLOUD_OPTION_KEYS,
+    CONF_ACCESS_TOKEN,
+    CONF_CA_PEM,
+    CONF_CLIENT_NAME,
+    CONF_CLOUD_STEM,
+    CONF_DECLINED,
     CONF_DEVICE_UUID,
+    CONF_LOCAL_SERIAL,
+    CONF_PANELS,
+    CONF_PRIMARY_PANEL,
     CONF_SERIAL,
     CONF_TOKENS,
+    CONF_TRANSPORT_MODE,
     CONF_USER_ID,
+    DOMAIN,
     TOKEN_DIR,
 )
 from .coordinator import SpanCloudCoordinator, energy_store
-from .span_client import cloud_auth
+from .energy_step import EnergyStepTracker
+from .runtime import SpanRuntime
+from .services import async_setup_services
+from .span_client import cloud_auth, feeds
+from .span_client.backend import (
+    PanelPlan,
+    SiteInfo,
+    SiteStream,
+    discover_sites,
+    panel_plan,
+    primary_panel_for,
+    site_routes,
+    stream_identity,
+)
+from .span_client.backfill import should_run as backfill_wanted
+from .span_client.link import migration_ok
+from .span_client.local import model, onboard
+from .span_client.local.health import Mode
+from .transport import SpanTransportManager, fallback_issue_id, local_tree_store
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.BUTTON,
+    Platform.LOCK,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
-type SpanConfigEntry = ConfigEntry[SpanCloudCoordinator]
+# One coordinator per panel. A site has one stream: a panel alone on its site takes
+# all of it, and panels sharing a site take their split of it, since circuit
+# instance ids restart per panel. A shared site can also have a site device. A
+# panel added locally also has its transport, and its cloud coordinators, if
+# any, only once it has failed over.
+type SpanConfigEntry = ConfigEntry[SpanRuntime]
 
 
 def _write_token_file(path: Path, tokens: dict) -> None:
@@ -35,56 +84,317 @@ def _write_token_file(path: Path, tokens: dict) -> None:
     cloud_auth.save_tokens(path, cloud_auth.CloudTokens(**tokens))
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
-    token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
-    await hass.async_add_executor_job(_write_token_file, token_path, entry.data[CONF_TOKENS])
+def _site_coordinators(
+    hass: HomeAssistant,
+    entry: SpanConfigEntry,
+    site: SiteInfo,
+    primary_panel: str | None,
+    chosen: tuple[str, ...],
+    **common,
+) -> list[SpanCloudCoordinator]:
+    """Build the coordinators for one site: one, or one per device if it is shared."""
+    routes = site_routes(site, primary_panel, chosen)
+    if routes is None:
+        return [SpanCloudCoordinator(hass, entry, site=site, primary_panel=primary_panel, **common)]
+    identity = stream_identity(
+        site,
+        device_uuid=common["device_uuid"],
+        serial=common["serial"],
+        primary_panel=primary_panel,
+    )
+    stream = SiteStream(
+        common["token_path"],
+        identity.device_uuid,
+        routes=routes,
+        user_id=common["user_id"],
+        serial=identity.serial,
+    )
+    return [
+        SpanCloudCoordinator(
+            hass,
+            entry,
+            site=site,
+            primary_panel=primary_panel,
+            stream=stream,
+            panel=panel,
+            **common,
+        )
+        for panel in routes.devices
+    ]
 
-    # Prove the credentials before starting anything. Setup used to return True
-    # unconditionally, which meant a revoked refresh token looked like a healthy
-    # integration whose entities happened never to appear. This is free while the
-    # cached access token is still valid and one Cognito round-trip when it is
-    # not — the backend would have made that same call moments later anyway.
+
+def _discover_sites(token_path: Path) -> list[SiteInfo]:
+    """Executor thread: prove the credentials and read the account's sites."""
+    return discover_sites(cloud_auth.access_token_from_store(token_path))
+
+
+def _new_panels_issue(entry: SpanConfigEntry) -> str:
+    return f"new_panels_{entry.entry_id}"
+
+
+def _local_pending_issue(entry: SpanConfigEntry) -> str:
+    return f"local_pending_{entry.entry_id}"
+
+
+def _note_panels(hass: HomeAssistant, entry: SpanConfigEntry, plan: PanelPlan) -> None:
+    """Tell the user about panels the stored list doesn't account for."""
+    if plan.departed:
+        _LOGGER.info("%d chosen SPAN panel(s) are no longer on the account", plan.departed)
+    if not plan.running:
+        _LOGGER.warning("none of the chosen SPAN panels are on the account; nothing will run")
+    if plan.new:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            _new_panels_issue(entry),
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="new_panels",
+            translation_placeholders={"count": str(len(plan.new))},
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, _new_panels_issue(entry))
+
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the services once, so a call naming an entry that is not loaded
+    gets a clear error rather than "unknown action".
+    """
+    async_setup_services(hass)
+    return True
+
+
+def _transport_mode(entry: SpanConfigEntry) -> Mode:
     try:
-        await hass.async_add_executor_job(cloud_auth.access_token_from_store, token_path)
+        return Mode(entry.options.get(CONF_TRANSPORT_MODE, Mode.LOCAL_FIRST))
+    except ValueError:
+        return Mode.LOCAL_FIRST
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
+    """Minor 2 marks a linked entry and needs no reshaping; a newer major is refused."""
+    if not migration_ok(entry.version, entry.minor_version):
+        _LOGGER.error("entry from a newer major version; this release can't run it")
+        return False
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
+    runtime = SpanRuntime()
+    entry.runtime_data = runtime
+    if CONF_LOCAL_SERIAL in entry.data:
+        # Added over the local API. Earlier versions left this issue to say
+        # local telemetry was still to come.
+        ir.async_delete_issue(hass, DOMAIN, _local_pending_issue(entry))
+        # Local only means no SPAN account. Earlier versions could keep one
+        # behind it, unused; it goes before the transport or backfill read the
+        # entry, and a token file left from one goes with it.
+        if await feeds.remove_legacy_account(
+            entry,
+            update=hass.config_entries.async_update_entry,
+            discard_tokens=lambda: hass.async_add_executor_job(
+                cloud_auth.discard_tokens, _token_path(hass, entry)
+            ),
+            data_keys=CLOUD_DATA_KEYS,
+            option_keys=CLOUD_OPTION_KEYS,
+            cloud_stem_key=CONF_CLOUD_STEM,
+        ):
+            _LOGGER.info("Removed the unused SPAN account from a local-only panel entry")
+
+        async def build_cloud() -> list[SpanCloudCoordinator]:
+            return await _cloud_coordinators(hass, entry)
+
+        runtime.transport = SpanTransportManager(
+            hass,
+            entry,
+            runtime,
+            mode=_transport_mode(entry),
+            build_cloud=build_cloud if CONF_TOKENS in entry.data else None,
+        )
+        await runtime.transport.async_start()
+        # After a cloud entry got its panel: watch for the first local energy
+        # readings, which the entities write as soon as the platforms add them.
+        runtime.energy_step = EnergyStepTracker(hass, entry)
+        entry.async_on_unload(runtime.energy_step.async_stop)
+        await runtime.energy_step.async_start()
+        # Before the platforms: the integrated rows report gaps to it as they restore.
+        await _start_backfill(hass, entry, runtime)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        # Old cloud entities nothing local feeds: offer to remove them.
+        legacy_repair.async_check(hass, entry)
+        return True
+
+    # Prove the credentials before starting anything, and learn the topology in
+    # the same round-trip. A rejection is the user's to fix; anything else is a
+    # cloud hiccup Home Assistant should retry on its own schedule.
+    try:
+        coordinators = await _cloud_coordinators(hass, entry)
     except cloud_auth.CloudCredentialsRejected as err:
         raise ConfigEntryAuthFailed(str(err)) from err
     except Exception as err:
-        # Cognito being unreachable or unhappy is not the user's problem to fix;
-        # let Home Assistant retry setup on its own schedule.
         raise ConfigEntryNotReady(f"cannot reach SPAN cloud: {err}") from err
 
-    coordinator = SpanCloudCoordinator(
-        hass,
-        entry,
-        token_path=token_path,
-        device_uuid=entry.data[CONF_DEVICE_UUID],
-        user_id=entry.data.get(CONF_USER_ID),
-        serial=entry.data.get(CONF_SERIAL),
-    )
-    await coordinator.async_start()
-    entry.runtime_data = coordinator
+    for coordinator in coordinators:
+        await coordinator.async_start()
+    runtime.coordinators = coordinators
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
+async def _start_backfill(
+    hass: HomeAssistant, entry: SpanConfigEntry, runtime: SpanRuntime
+) -> None:
+    """Fill integrated-energy gaps from the cloud's history, on entries that can ask."""
+    transport = runtime.transport
+    if transport is None or not backfill_wanted(
+        _transport_mode(entry).value,
+        has_tokens=CONF_TOKENS in entry.data,
+        has_target=transport.link is not None and transport.link.site_history is not None,
+        single_panel_site=transport.link is not None and transport.link.single_panel_site,
+    ):
+        return
+    runtime.backfill = backfill.GapBackfill(
+        hass,
+        entry,
+        transport,
+        runtime.energy_step,
+        token_path=_token_path(hass, entry),
+        write_tokens=_write_token_file,
+    )
+    entry.async_on_unload(runtime.backfill.async_stop)
+    await runtime.backfill.async_setup()
+
+
+async def _cloud_coordinators(
+    hass: HomeAssistant, entry: SpanConfigEntry
+) -> list[SpanCloudCoordinator]:
+    """Read the account and build a coordinator per panel, unstarted.
+
+    Raises CloudCredentialsRejected when the stored tokens are dead, and
+    anything else when the cloud can't be read.
+    """
+    token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
+    await hass.async_add_executor_job(_write_token_file, token_path, entry.data[CONF_TOKENS])
+    sites = await hass.async_add_executor_job(_discover_sites, token_path)
+
+    common = {
+        "token_path": token_path,
+        "device_uuid": entry.data[CONF_DEVICE_UUID],
+        "user_id": entry.data.get(CONF_USER_ID),
+        "serial": entry.data.get(CONF_SERIAL),
+    }
+    if not sites:
+        # Unfamiliar topology shape: fall back to the original single stream
+        # rather than refusing to start.
+        _LOGGER.warning("could not split the SPAN account into sites; using one stream")
+        return [SpanCloudCoordinator(hass, entry, **common)]
+
+    _LOGGER.info("SPAN account has %d site(s)", len(sites))
+    _LOGGER.debug("SPAN site models: %s", ", ".join(s.model for s in sites))
+    # The key's presence is what makes this once-only: None is an answer, and
+    # asking again after a panel leaves would hand a scoped panel the entry's
+    # empty store.
+    if CONF_PRIMARY_PANEL not in entry.data:
+        data = {**entry.data, CONF_PRIMARY_PANEL: primary_panel_for(sites)}
+        hass.config_entries.async_update_entry(entry, data=data)
+    primary_panel = entry.data[CONF_PRIMARY_PANEL]
+    plan = panel_plan(sites, entry.options.get(CONF_PANELS), entry.options.get(CONF_DECLINED, ()))
+    if CONF_PANELS not in entry.options:
+        options = {**entry.options, CONF_PANELS: list(plan.chosen)}
+        hass.config_entries.async_update_entry(entry, options=options)
+    if CONF_LOCAL_SERIAL not in entry.data:
+        # A local panel's cloud fallback is that one panel by design; the
+        # account's other panels are not news.
+        _note_panels(hass, entry, plan)
+    return [
+        coordinator
+        for site in plan.running
+        for coordinator in _site_coordinators(
+            hass, entry, site, primary_panel, plan.chosen, **common
+        )
+    ]
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> bool:
+    runtime = entry.runtime_data
+    # Before the token file is discarded: a fetch in flight may refresh it.
+    if runtime.backfill is not None:
+        await runtime.backfill.async_stop()
+    # The transport goes first: a failover in flight would otherwise add cloud
+    # coordinators, and entities, to platforms that are being taken down.
+    if runtime.transport is not None:
+        await runtime.transport.async_stop()
+    runtime.hooks.clear()
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
-        await entry.runtime_data.async_shutdown()
-        token_path = Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
-        await hass.async_add_executor_job(_remove_quietly, token_path)
+        for coordinator in runtime.coordinators:
+            await coordinator.async_shutdown()
+        # Every unload: a local entry whose account was just removed may have
+        # had its token file rewritten by a refresh in flight.
+        await hass.async_add_executor_job(cloud_auth.discard_tokens, _token_path(hass, entry))
     return unloaded
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: SpanConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Let the user delete a device only once the panel no longer reports it.
+
+    Never the panel itself, and never on a cloud entry.
+    """
+    runtime = getattr(entry, "runtime_data", None)
+    transport = runtime.transport if runtime is not None else None
+    if transport is None:
+        return False
+    identifiers = frozenset(i for domain, i in device_entry.identifiers if domain == DOMAIN)
+    return model.device_removable(
+        transport.snapshot, transport.panel_key, entry.data[CONF_LOCAL_SERIAL], identifiers
+    )
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: SpanConfigEntry) -> None:
     """Drop the energy totals along with the entry that earned them.
 
-    Unloading keeps the store — that is a restart, and the totals are the point.
-    Deleting the entry means the panel is gone, and leaving the file behind would
-    resurrect stale kilowatt-hours if the same panel were ever set up again.
+    Unloading keeps the stores — that is a restart, and the totals are the point.
+    Deleting the entry means the panels are gone, and leaving files behind would
+    resurrect stale kilowatt-hours if the same panels were ever set up again.
+    The per-panel stores are named after panel keys that are only known while the
+    entry runs, so they are found by prefix.
     """
+    ir.async_delete_issue(hass, DOMAIN, _new_panels_issue(entry))
+    ir.async_delete_issue(hass, DOMAIN, _local_pending_issue(entry))
+    ir.async_delete_issue(hass, DOMAIN, fallback_issue_id(entry.entry_id))
+    legacy_repair.async_remove_issue(hass, entry.entry_id)
+    if CONF_ACCESS_TOKEN in entry.data:
+        # Best effort: the panel keeps a client registration until it is removed.
+        await onboard.discard_client(
+            async_get_clientsession(hass),
+            entry.data[CONF_HOST],
+            entry.data[CONF_CA_PEM],
+            entry.data[CONF_ACCESS_TOKEN],
+            entry.data[CONF_CLIENT_NAME],
+        )
+    await energy_step.async_remove(hass, entry.entry_id)
+    await backfill.async_remove(hass, entry.entry_id)
     await energy_store(hass, entry.entry_id).async_remove()
+    await local_tree_store(hass, entry.entry_id).async_remove()
+    storage = Path(hass.config.path(".storage"))
+    prefix = f"{DOMAIN}.{entry.entry_id}."
+    await hass.async_add_executor_job(_remove_by_prefix, storage, prefix)
+
+
+def _remove_by_prefix(directory: Path, prefix: str) -> None:
+    with contextlib.suppress(OSError):
+        for path in directory.glob(f"{prefix}*.energy"):
+            _remove_quietly(path)
+
+
+def _token_path(hass: HomeAssistant, entry: SpanConfigEntry) -> Path:
+    return Path(hass.config.path(TOKEN_DIR)) / f"{entry.entry_id}.json"
 
 
 def _remove_quietly(path: Path) -> None:

@@ -41,15 +41,24 @@ import logging
 import random
 import threading
 import time
+import uuid
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import cloud_ably, cloud_auth, cloud_commands, cloud_grpc, cloud_history
 from .cloud_pb import Message, ProtoError, field_message, field_string, field_varint, parse
 from .cloud_telemetry import CircuitSample, Frame, decode_frame
-from .cloud_traits import CircuitInfo, parse_trait_snapshot
+from .cloud_traits import (
+    FEEDER_FEEDTHROUGH,
+    FEEDER_MAIN_BREAKER,
+    CircuitInfo,
+    parse_feeder_kinds,
+    parse_trait_snapshot,
+)
 from .models import DataType, EnergySample, NodeKind, PanelSchema, PropertySpec, Reading
+from .overhead import overhead_w
 
 # Backend callbacks (previously defined on the daemon's backend Protocol).
 ReadingCallback = Callable[[Reading], None]
@@ -224,11 +233,59 @@ class AblyDirective:
 SITE_NODE = "site"
 
 
+# The site's flow to and from the grid. On a panel another panel feeds, that
+# flow is the feed's, so its entities are named for the feed; the property id,
+# and so the unique id, stays "grid".
+GRID_PROPERTY = "grid"
+FED_GRID_LABEL = "feed"
+
+
+def _shown_property(spec: PropertySpec, fed: bool) -> str:
+    if fed and spec.node_id == SITE_NODE and spec.property_id == GRID_PROPERTY:
+        return FED_GRID_LABEL
+    return spec.property_id
+
+
+def sensor_name(spec: PropertySpec, fed: bool = False) -> str:
+    """A cloud property's entity name: "Kitchen power", "Site grid"."""
+    node_label = spec.node_name or spec.node_id
+    return f"{node_label} {_shown_property(spec, fed)}".replace("_", " ")
+
+
+def energy_name(spec: PropertySpec, fed: bool = False) -> str:
+    """The name of a metered property's energy entity.
+
+    "power" is the node's own reading, so "Kitchen energy" rather than
+    "Kitchen power energy"; the site's directional flows keep their name.
+    """
+    node_label = spec.node_name or spec.node_id
+    prop = _shown_property(spec, fed)
+    qualifier = "" if spec.property_id == POWER_PROPERTY else f" {prop}"
+    return f"{node_label}{qualifier} energy".replace("_", " ")
+
+
+def sensor_uid(serial: str, spec: PropertySpec) -> str:
+    return f"{serial}_{spec.key}"
+
+
+def energy_uid(serial: str, spec: PropertySpec) -> str:
+    return f"{serial}_{spec.key}_energy"
+
+
 # --- pure mapping -------------------------------------------------------------
 
 
-def _circuit_node(instance_id: int) -> str:
+def _circuit_node(instance_id: int | str) -> str:
     return f"circuit-{instance_id}"
+
+
+def circuit_instance(spec: PropertySpec) -> int | None:
+    """The cloud instance id of a circuit's node, or None for any other node."""
+    prefix = _circuit_node("")
+    if spec.node_kind is not NodeKind.CIRCUIT or not spec.node_id.startswith(prefix):
+        return None
+    instance = spec.node_id.removeprefix(prefix)
+    return int(instance) if instance.isdigit() else None
 
 
 def _fmt(value: float | None) -> str | None:
@@ -282,13 +339,47 @@ def _node_for(sample: CircuitSample, circuits: dict[int, CircuitInfo]) -> tuple[
     return _circuit_node(sample.instance_id), NodeKind.CIRCUIT
 
 
-def _node_names(frame: Frame, circuits: dict[int, CircuitInfo]) -> dict[str, str]:
+def _feed_names(feed_ids: list[int], feeders: Mapping[int, int]) -> dict[int, str]:
+    """Display name per feed instance, by its feeder kind.
+
+    A panel's only feed is its main feed whatever its tag, the same rule
+    `is_overhead_feed` follows. With several, the main breaker is "Main feed",
+    the feedthrough lugs "Feedthrough", and one of no known kind is named by
+    its instance so no two feeds share a name.
+    """
+    if len(feed_ids) == 1:
+        return {feed_ids[0]: "Main feed"}
+    names: dict[int, str] = {}
+    for instance in feed_ids:
+        kind = feeders.get(instance)
+        if kind == FEEDER_MAIN_BREAKER:
+            names[instance] = "Main feed"
+        elif kind == FEEDER_FEEDTHROUGH:
+            names[instance] = "Feedthrough"
+        else:
+            names[instance] = f"Feed {instance}"
+    return names
+
+
+def _node_names(
+    frame: Frame, circuits: dict[int, CircuitInfo], feeders: Mapping[int, int] | None = None
+) -> dict[str, str]:
     """Display name per node id, from the trait snapshot where we have one.
 
     Labels are the user's own and need not be unique — two 20 A circuits can
     both be "Outlets" — so a repeated label is qualified with the panel spaces
-    the circuit occupies, which are unique by construction.
+    the circuit occupies, which are unique by construction. Feeds are named by
+    their feeder kind (`_feed_names`).
     """
+    feed_ids = sorted(
+        {
+            sample.instance_id
+            for samples in frame.resources.values()
+            for sample in samples
+            if _node_for(sample, circuits)[1] is NodeKind.LUGS
+        }
+    )
+    feed_names = _feed_names(feed_ids, feeders or {})
     names: dict[str, str] = {}
     labels: dict[int, str] = {}
     seen: dict[str, int] = {}
@@ -308,7 +399,7 @@ def _node_names(frame: Frame, circuits: dict[int, CircuitInfo]) -> dict[str, str
             if sample.kind == "panel":
                 names[node_id] = "Panel"
             elif node_id.startswith("feed-"):
-                names[node_id] = "Main feed"
+                names[node_id] = feed_names[sample.instance_id]
             elif sample.instance_id in labels:
                 label = labels[sample.instance_id]
                 info = circuits[sample.instance_id]
@@ -320,7 +411,10 @@ def _node_names(frame: Frame, circuits: dict[int, CircuitInfo]) -> dict[str, str
 
 
 def schema_from_frame(
-    serial: str, frame: Frame, circuits: dict[int, CircuitInfo] | None = None
+    serial: str,
+    frame: Frame,
+    circuits: dict[int, CircuitInfo] | None = None,
+    feeders: Mapping[int, int] | None = None,
 ) -> PanelSchema:
     """Synthesize a PanelSchema from one decoded frame.
 
@@ -328,18 +422,21 @@ def schema_from_frame(
     internal identifiers with no relation to panel spaces — a 40-space MAIN 40
     reports instances up to 56 — so `circuits`, parsed from the subscribe
     snapshot, supplies the user's labels, breaker ratings and real space numbers.
-    Without it nodes fall back to instance-id names.
+    Without it nodes fall back to instance-id names. `feeders`, from the same
+    snapshot, tags each feed with its feeder kind where trait 1/21 gives one.
 
     Properties are chosen per sample kind so every entity we advertise is one the
     wire actually feeds; the site directional flows get their own node.
     """
     circuits = circuits or {}
+    feeders = feeders or {}
     schema = PanelSchema(serial=serial)
-    names = _node_names(frame, circuits)
+    names = _node_names(frame, circuits, feeders)
 
     for samples in frame.resources.values():
         for sample in samples:
             node_id, kind = _node_for(sample, circuits)
+            feeder_kind = feeders.get(sample.instance_id) if kind is NodeKind.LUGS else None
             for prop_id, unit, _source, _attr in _PROPS_BY_KIND.get(sample.kind, ()):
                 schema.add(
                     PropertySpec(
@@ -350,6 +447,7 @@ def schema_from_frame(
                         datatype=DataType.FLOAT,
                         unit=unit,
                         node_name=names.get(node_id),
+                        feeder_kind=feeder_kind,
                     )
                 )
             # Only circuits whose switch trait the snapshot resolved get a relay,
@@ -459,11 +557,35 @@ def is_main_feed_power(spec: PropertySpec) -> bool:
     return spec.node_kind is NodeKind.LUGS and spec.property_id == POWER_PROPERTY
 
 
+def is_overhead_feed(spec: PropertySpec, schema: PanelSchema | None) -> bool:
+    """Whether `spec` is the feed a panel's overhead pair is built on.
+
+    The main feed, or a panel's only feed whatever its kind. A feed tagged as
+    feedthrough lugs is the downstream panel's only when this panel has another
+    feed; alone, the tag more likely means the panel itself is fed through lugs
+    (a downstream panel), and its feed is still all it takes in.
+    """
+    if not is_main_feed_power(spec):
+        return False
+    if spec.feeder_kind != FEEDER_FEEDTHROUGH:
+        return True
+    others = [] if schema is None else [
+        other
+        for other in schema.properties.values()
+        if is_main_feed_power(other) and other.key != spec.key
+    ]  # fmt: skip
+    if others:
+        return False
+    log.debug("A lone feed is tagged as feedthrough lugs; treating it as the main feed")
+    return True
+
+
 def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> float | None:
-    """Watts entering the panel that no branch circuit accounts for.
+    """Watts entering the panel that no branch circuit or downstream panel accounts for.
 
     The main feed (`feed-*/power`) is everything through the main lugs; the
-    branch meters are everything leaving on a breaker. What separates them is the
+    branch meters are everything leaving on a breaker, and a feedthrough feed is
+    everything leaving for a downstream panel. What separates them is the
     panel's own draw — its electronics and relays — which is a steady load and
     never negative.
 
@@ -474,24 +596,39 @@ def panel_overhead(schema: PanelSchema, readings: Mapping[str, Reading]) -> floa
     from −420 to +320 W. The result is still floored at zero, since the meters
     are not reconciled and a negative figure could only be their disagreement.
 
-    None until the main feed and *every* circuit has reported, so a circuit that
-    has not landed yet cannot masquerade as overhead of its whole draw — and None
-    on a panel that does not report exactly one main feed.
+    Which feed is which comes from trait 1/21's feeder kind. A single feed is
+    the main feed, with nothing leaving downstream, whatever its kind: a panel
+    fed through lugs may well tag its only feed as one (see
+    `is_overhead_feed`). Several feeds need every one classified — one main
+    breaker and at most one feedthrough — or there is no telling them apart, and
+    the result is None.
+
+    None until the feeds and *every* circuit have reported, so a circuit that
+    has not landed yet cannot masquerade as overhead of its whole draw.
     """
-    feeds = [spec.key for spec in schema.properties.values() if is_main_feed_power(spec)]
+    feeds = [spec for spec in schema.properties.values() if is_main_feed_power(spec)]
     keys = [
         spec.key
         for spec in schema.properties.values()
         if spec.node_kind is NodeKind.CIRCUIT and spec.property_id == POWER_PROPERTY
     ]
-    if len(feeds) != 1 or not keys:
+    if not keys:
         return None
+    if len(feeds) == 1:
+        main, through = feeds[0], None
+    else:
+        mains = [f for f in feeds if f.feeder_kind == FEEDER_MAIN_BREAKER]
+        throughs = [f for f in feeds if f.feeder_kind == FEEDER_FEEDTHROUGH]
+        if len(mains) != 1 or len(throughs) > 1 or len(mains) + len(throughs) != len(feeds):
+            return None
+        main, through = mains[0], (throughs[0] if throughs else None)
     try:
-        total = float(readings[feeds[0]].value)
-        branches = sum(float(readings[key].value) for key in keys)
+        feed_w = float(readings[main.key].value)
+        circuits_w = [float(readings[key].value) for key in keys]
+        through_w = float(readings[through.key].value) if through is not None else None
     except (KeyError, TypeError, ValueError):
         return None
-    return max(0.0, total - branches)
+    return overhead_w(feed_w, circuits_w, through_w, through is not None)
 
 
 def energy_samples(
@@ -618,7 +755,659 @@ def parse_sites_hardware_ids(raw: bytes) -> list[str]:
                     if value and value not in out:
                         out.append(value)
     except Exception as exc:  # noqa: BLE001 — a shape change must not break setup
-        log.debug("could not walk GetSitesForUser for hardware ids: %s", exc)
+        log.debug("could not walk GetSitesForUser for hardware ids: %s", type(exc).__name__)
+    return out
+
+
+# Panelboard model codes seen in GetSitesForUser. 1-02100-04 is documented in
+# CLOUD-FLOW.md; 1-04100-01 was observed on an account whose second site is a
+# MAIN 16 fed from a MAIN 40. Unknown codes fall back to a generic name.
+PANEL_MODELS = {
+    "1-02100-04": "MAIN 40",
+    "1-04100-01": "MAIN 16",
+}
+
+
+# Member kinds in GetSitesForUser: 4 site, 5 gateway, 6 bess. A panel's circuits
+# live on the resource named by its gateway's id.
+_KIND_GATEWAY = 5
+
+
+def same_serial(a: str | None, b: str | None) -> bool:
+    """Whether two spellings name the same panel serial.
+
+    The panel reports its serial in lowercase and SPAN's cloud in uppercase.
+    """
+    if not a or not b:
+        return False
+    return a.strip().casefold() == b.strip().casefold()
+
+
+def serial_taken(
+    unique_ids: Iterable[str | None],
+    local_serials: Iterable[str | None],
+    names: Iterable[str | None],
+) -> bool:
+    """Whether another entry already runs a panel known by any of `names`.
+
+    An entry runs it under its unique id, or (a cloud account entry given its
+    panel keeps the account's unique id) under the local serial in its data.
+    `names` are the spellings the panel goes by: its local serial and its key.
+    """
+    wanted = [name for name in names if name]
+    return any(same_serial(held, name) for held in (*unique_ids, *local_serials) for name in wanted)
+
+
+@dataclass(frozen=True)
+class PanelInfo:
+    """One panelboard from GetSitesForUser."""
+
+    site_id: str
+    serial: str | None
+    model_code: str | None
+    hardware_id: str | None  # the frame and trait resource id, once paired
+    stored_key: str | None = None  # the key already recorded for it, which holds
+
+    @property
+    def model(self) -> str:
+        return PANEL_MODELS.get(self.model_code or "", f"Panel {self.model_code or ''}".strip())
+
+    @property
+    def key(self) -> str:
+        """What this panel's energy store and stored choices are keyed by."""
+        return self.stored_key or self.serial or self.hardware_id or self.site_id
+
+    def answers_to(self, key: str | None) -> bool:
+        """Whether a recorded key means this panel.
+
+        A key recorded before the serial was known is the hardware id, and the
+        panel is still the same panel once SPAN reports the serial.
+
+        A serial matches whatever its case: the panel's own API spells it in
+        lowercase and SPAN's cloud in uppercase. Hardware and site ids are exact.
+        """
+        if key is None:
+            return False
+        return key in (self.key, self.hardware_id) or same_serial(key, self.serial)
+
+
+@dataclass(frozen=True)
+class SiteInfo:
+    """One site ("house" in the SPAN app) from GetSitesForUser.
+
+    SPAN can put each panel of a multi-panel install on its own site, so the
+    account's topology is a list of these, not one panel. Layout, by field:
+
+        1 sites[] {
+            1 { 1 site_id  2 label ... }
+            3 { 1 member[] { 1 kind  2 hardware_id ... }
+                2 panelboard[] { 4 { 3 serial  5 model_code }
+                                 8 component[] { 7 { 1 hardware_id } } } }
+        }
+
+    Every site has at least one panel. `name` is often a street address, so it
+    stays out of logs and device names.
+    """
+
+    site_id: str
+    hardware_ids: tuple[str, ...]
+    panels: tuple[PanelInfo, ...]
+    gateways: tuple[str, ...] = ()
+    name: str | None = field(default=None, repr=False)
+
+    @property
+    def lead(self) -> PanelInfo:
+        """The panel a site's single stream is named after."""
+        return next((p for p in self.panels if p.serial), self.panels[0])
+
+    @property
+    def serial(self) -> str | None:
+        return self.lead.serial
+
+    @property
+    def model(self) -> str:
+        return self.lead.model
+
+
+def _gateway_ids(group: Message) -> list[str]:
+    ids = (m.get_str(2) for m in group.get_msgs(1) if m.get_uint(1) == _KIND_GATEWAY)
+    return [value for value in ids if value]
+
+
+def _component_ids(board: Message) -> set[str]:
+    linked = (c.get_msg_opt(7) for c in board.get_msgs(8))
+    return {value for link in linked if link is not None and (value := link.get_str(1))}
+
+
+def _unique_claims(claims: dict[int, str]) -> dict[int, str]:
+    """Drop any gateway two boards claim: at most one is right, and nothing says which."""
+    counts = Counter(claims.values())
+    return {board: gateway for board, gateway in claims.items() if counts[gateway] == 1}
+
+
+def _pair_boards(groups: list[Message], gateways: list[str]) -> dict[int, str]:
+    """Pair boards, by position across the site, with their gateways.
+
+    Response order is never used: a wrong guess swaps two panels' circuits while
+    looking correct, so a board with no evidence stays unpaired.
+    """
+    placed = [(no, board) for no, group in enumerate(groups) for board in group.get_msgs(2)]
+    if len(placed) == 1 and len(gateways) == 1:
+        return {0: gateways[0]}
+
+    claims: dict[int, str] = {}
+    for position, (_, board) in enumerate(placed):
+        linked = _component_ids(board) & set(gateways)
+        if len(linked) == 1:
+            claims[position] = next(iter(linked))
+    paired = _unique_claims(claims)
+
+    for no, group in enumerate(groups):
+        boards = [position for position, (home, _) in enumerate(placed) if home == no]
+        ids = _gateway_ids(group)
+        lone = len(boards) == 1 and len(ids) == 1
+        if lone and boards[0] not in paired and ids[0] not in paired.values():
+            paired[boards[0]] = ids[0]
+    return paired
+
+
+def _parse_site(site: Message) -> SiteInfo | None:
+    head = site.get_msg_opt(1)
+    groups = site.get_msgs(3)
+    hardware_ids: list[str] = []
+    gateways: list[str] = []
+    for group in groups:
+        for member in group.get_msgs(1):
+            value = member.get_str(2)
+            if value and value not in hardware_ids:
+                hardware_ids.append(value)
+        for value in _gateway_ids(group):
+            if value not in gateways:
+                gateways.append(value)
+    if not hardware_ids:
+        return None
+    # A second kind 4 member must not read as a second site, so the id comes only
+    # from the head.
+    site_id = (head.get_str(1) if head is not None else None) or hardware_ids[0]
+
+    paired = _pair_boards(groups, gateways)
+    panels: list[PanelInfo] = []
+    for group in groups:
+        for board in group.get_msgs(2):
+            ident = board.get_msg_opt(4)
+            panels.append(
+                PanelInfo(
+                    site_id=site_id,
+                    serial=ident.get_str(3) if ident is not None else None,
+                    model_code=ident.get_str(5) if ident is not None else None,
+                    hardware_id=paired.get(len(panels)),
+                )
+            )
+    if not panels:
+        only = gateways[0] if len(gateways) == 1 else None
+        panels.append(PanelInfo(site_id, None, None, only))
+    return SiteInfo(
+        site_id=site_id,
+        hardware_ids=tuple(hardware_ids),
+        panels=tuple(panels),
+        gateways=tuple(gateways),
+        name=head.get_str(2) if head is not None else None,
+    )
+
+
+def parse_sites(raw: bytes) -> list[SiteInfo]:
+    """Split a GetSitesForUser response into its sites, in response order.
+
+    Sites without any subscribable hardware id are dropped — there is nothing
+    to stream for them. Empty on an unfamiliar shape; never raises.
+    """
+    if not raw:
+        return []
+    try:
+        return [info for site in parse(raw).get_msgs(1) if (info := _parse_site(site))]
+    except Exception as exc:  # noqa: BLE001 — a shape change must not break setup
+        log.debug("could not split GetSitesForUser into sites: %s", type(exc).__name__)
+        return []
+
+
+def _lookup_gateway(panel: PanelInfo, lookup: Callable[[bytes], bytes]) -> str | None:
+    """The gateway a GetResourcesForHardware answer names for one panel, if it does.
+
+    The response has a group's fields. An answer naming several gateways is the
+    whole site, which settles nothing, and a failed call counts as no answer.
+    """
+    request = field_string(1, panel.serial or "") + field_string(2, panel.model_code or "")
+    try:
+        result = parse(lookup(request))
+        ids = _gateway_ids(result)
+        boards = (board.get_msg_opt(4) for board in result.get_msgs(2))
+        holds_board = any(i is not None and i.get_str(3) == panel.serial for i in boards)
+    except Exception as exc:  # noqa: BLE001 — pairing is best effort
+        log.debug("GetResourcesForHardware gave no answer: %s", type(exc).__name__)
+        return None
+    return ids[0] if holds_board and len(ids) == 1 else None
+
+
+def discover_sites(access_token: str) -> list[SiteInfo]:
+    """Blocking: read the account's sites and pair their panels."""
+    with cloud_grpc.CloudGrpcClient(access_token) as grpc:
+        return pair_by_lookup(
+            parse_sites(grpc.get_sites_for_user()), grpc.get_resources_for_hardware
+        )
+
+
+def pair_by_lookup(sites: list[SiteInfo], lookup: Callable[[bytes], bytes]) -> list[SiteInfo]:
+    """Ask the cloud about boards the site response could not pair.
+
+    Only sites with several panels and an unpaired board are looked up, so a
+    one-panel site never makes this call.
+    """
+    return [_pair_site_by_lookup(site, lookup) for site in sites]
+
+
+def _pair_site_by_lookup(site: SiteInfo, lookup: Callable[[bytes], bytes]) -> SiteInfo:
+    if len(site.panels) < 2:
+        return site
+    taken = {panel.hardware_id for panel in site.panels}
+    claims: dict[int, str] = {}
+    for position, panel in enumerate(site.panels):
+        if panel.hardware_id is None and panel.serial:
+            gateway = _lookup_gateway(panel, lookup)
+            if gateway in site.gateways and gateway not in taken:
+                claims[position] = gateway
+    if not claims:
+        return site
+    paired = _unique_claims(claims)
+    panels = tuple(
+        replace(panel, hardware_id=paired[position]) if position in paired else panel
+        for position, panel in enumerate(site.panels)
+    )
+    return replace(site, panels=panels)
+
+
+def site_device_uuid(device_uuid: str, site_id: str) -> str:
+    """A stable, distinct client UUID per site, derived from the entry's own.
+
+    The device UUID names the Ably channel, and the channel is what a
+    SubscribeAndGetTraits registration publishes to — so two sites sharing one
+    UUID would interleave both panels' frames on one channel again.
+    """
+    return str(uuid.uuid5(uuid.UUID(device_uuid), f"site:{site_id}"))
+
+
+@dataclass(frozen=True)
+class StreamIdentity:
+    """What one stream is keyed by: its channel, its entities and its energy."""
+
+    device_uuid: str
+    serial: str | None
+    store_panel_key: str | None
+
+
+def primary_panel_for(sites: list[SiteInfo]) -> str | None:
+    """The panel that owns the entry's identity: an account's only panel, if so.
+
+    An account that starts with several has no panel the entry's identity could
+    mean, so none owns it, whichever sites they are on. Recorded once, because the
+    count changes later and the answer must not: see `stream_identity`.
+    """
+    panels = [panel for site in sites for panel in site.panels]
+    return panels[0].key if len(panels) == 1 else None
+
+
+def stream_identity(
+    site: SiteInfo | None,
+    *,
+    device_uuid: str,
+    serial: str | None,
+    primary_panel: str | None,
+) -> StreamIdentity:
+    """Key a stream by panel, except for the panel that owns the entry's identity.
+
+    That panel keeps the entry's own identity for good, so its entities, its
+    energy totals and its Ably channel carry on untouched, even after the account
+    gains another panel. Any other panel takes its own key, since the entry's
+    single saved serial is not true of it: two panels must never share a device.
+    """
+    if site is None or any(panel.answers_to(primary_panel) for panel in site.panels):
+        return StreamIdentity(device_uuid, serial or (site.serial if site else None), None)
+    return StreamIdentity(
+        site_device_uuid(device_uuid, site.site_id),
+        site.lead.key,
+        site.lead.key,
+    )
+
+
+@dataclass(frozen=True)
+class SiteRoutes:
+    """How one shared site's stream divides up: which device each block feeds."""
+
+    site_id: str
+    panels: tuple[PanelInfo, ...]
+    # Where the site's own block and flows go: the primary panel if the site holds
+    # it, since moving them would orphan their history, otherwise a site device.
+    flows_owner: PanelInfo
+    # Every gateway on the site, ticked or not, so names don't shift with the ticks.
+    gateways: tuple[str, ...] = ()
+
+    @property
+    def devices(self) -> tuple[PanelInfo, ...]:
+        if self.flows_owner in self.panels:
+            return self.panels
+        return (*self.panels, self.flows_owner)
+
+    @property
+    def blocks(self) -> dict[str, str]:
+        """Resource id -> the key of the device that takes it."""
+        routes = {panel.hardware_id: panel.key for panel in self.panels if panel.hardware_id}
+        routes[self.site_id] = self.flows_owner.key
+        return routes
+
+
+def _gateway_panels(site: SiteInfo) -> tuple[PanelInfo, ...]:
+    """One panel per gateway: a board that could not be paired leaves it nameless."""
+    boards = {panel.hardware_id: panel for panel in site.panels if panel.hardware_id}
+    return tuple(
+        boards.get(gateway, PanelInfo(site.site_id, None, None, gateway))
+        for gateway in site.gateways
+    )
+
+
+def site_choices(site: SiteInfo) -> tuple[PanelInfo, ...]:
+    """What a site offers the picker: the devices it will really become."""
+    if len(site.panels) < 2 or len(site.gateways) < 2:
+        return (site.lead,)
+    return _gateway_panels(site)
+
+
+def _is_chosen(panel: PanelInfo, chosen: Iterable[str]) -> bool:
+    return any(panel.answers_to(key) for key in chosen)
+
+
+def site_routes(
+    site: SiteInfo, primary_panel: str | None, chosen: Iterable[str] | None = None
+) -> SiteRoutes | None:
+    """Plan the split of a site with several panels. None means don't split.
+
+    One panel takes every block, as it always has. Several panels behind a single
+    gateway share one block, where instance ids are unique, so nothing collides
+    and the site stays one device. Otherwise each gateway is one panel: a board
+    that could not be paired with it leaves it nameless but still correct. A panel
+    left out of `chosen` gets no route, so its blocks are dropped, and a site that
+    is split stays split however few of its panels are chosen.
+    """
+    if len(site.panels) < 2:
+        return None
+    if len(site.gateways) < 2:
+        log.warning(
+            "SPAN site has %d panels on %d gateway(s), so its circuits stay on one "
+            "device; please share a capture so this layout can be supported",
+            len(site.panels),
+            len(site.gateways),
+        )
+        return None
+    panels = _gateway_panels(site)
+    if chosen is not None:
+        panels = tuple(panel for panel in panels if _is_chosen(panel, chosen))
+    owner = next((panel for panel in panels if panel.answers_to(primary_panel)), None)
+    return SiteRoutes(
+        site.site_id,
+        panels,
+        owner or PanelInfo(site.site_id, None, None, site.site_id),
+        site.gateways,
+    )
+
+
+def _panel_name(panel: PanelInfo, gateways: tuple[str, ...]) -> str:
+    if panel.serial:
+        return f"SPAN {panel.model} {panel.serial}"
+    if panel.hardware_id in gateways:
+        return f"SPAN panel {gateways.index(panel.hardware_id) + 1}"
+    return "SPAN site"
+
+
+def device_name(panel: PanelInfo, routes: SiteRoutes) -> str:
+    """Name a device on a shared site. Never the site's label: that is an address."""
+    return _panel_name(panel, routes.gateways)
+
+
+def panel_labels(sites: list[SiteInfo]) -> dict[str, str]:
+    """Panel key -> what the picker calls it. Forms only: a site's name is an address."""
+    labels: dict[str, str] = {}
+    for site in sites:
+        for panel in site_choices(site):
+            name = _panel_name(panel, site.gateways).removeprefix("SPAN ")
+            label = f"{site.name}: {name}" if site.name else name
+            # Forms key their fields by label, so two must never match.
+            taken = list(labels.values())
+            labels[panel.key] = f"{label} ({taken.count(label) + 1})" if label in taken else label
+    return labels
+
+
+def find_panel(sites: list[SiteInfo], key: str) -> tuple[SiteInfo, PanelInfo] | None:
+    """The picker's panel for a key, with the site it is on."""
+    for site in sites:
+        for panel in site_choices(site):
+            if panel.answers_to(key):
+                return site, panel
+    return None
+
+
+def sibling_answers(sites: Iterable[SiteInfo], chosen_key: str, serial: str | None) -> bool:
+    """Whether a serial belongs to another panel on the account than the chosen one.
+
+    Overlapping space numbers (a MAIN 40 beside an MLO 48) can pass the
+    circuit check, so a sibling that answers refuses the link. A serial no
+    panel answers to (the cloud lists this one under another) is left to the
+    circuit check.
+    """
+    if not serial:
+        return False
+    return any(
+        panel.answers_to(serial) and not panel.answers_to(chosen_key)
+        for site in sites
+        for panel in (*site.panels, *site_choices(site))
+    )
+
+
+def panel_circuits(
+    access_token: str,
+    site: SiteInfo,
+    panel: PanelInfo,
+    *,
+    user_id: str | None,
+    device_uuid: str,
+    primary_panel: str | None,
+) -> dict[int, CircuitInfo]:
+    """Blocking: one panel's circuits, read from its site's trait snapshot.
+
+    The snapshot answers the subscribe directly, so this needs no stream. It asks
+    for the channel the way a stream does, and a running stream shares it.
+    """
+    return parse_trait_snapshot(
+        _panel_snapshot(
+            access_token, site, panel, user_id=user_id, device_uuid=device_uuid,
+            primary_panel=primary_panel,
+        )
+    )  # fmt: skip
+
+
+def panel_traits(
+    access_token: str,
+    site: SiteInfo,
+    panel: PanelInfo,
+    *,
+    user_id: str | None,
+    device_uuid: str,
+    primary_panel: str | None,
+) -> tuple[dict[int, CircuitInfo], dict[int, int]]:
+    """Blocking: as `panel_circuits`, with the feeder kinds of the same snapshot."""
+    snapshot = _panel_snapshot(
+        access_token, site, panel, user_id=user_id, device_uuid=device_uuid,
+        primary_panel=primary_panel,
+    )  # fmt: skip
+    return parse_trait_snapshot(snapshot), parse_feeder_kinds(snapshot)
+
+
+def _panel_snapshot(
+    access_token: str,
+    site: SiteInfo,
+    panel: PanelInfo,
+    *,
+    user_id: str | None,
+    device_uuid: str,
+    primary_panel: str | None,
+) -> bytes:
+    """Blocking: the trait snapshot of one panel, split from its site's if shared."""
+    identity = stream_identity(
+        site, device_uuid=device_uuid, serial=None, primary_panel=primary_panel
+    )
+    fallback = f"c:{user_id}:{identity.device_uuid}" if user_id else None
+    with cloud_grpc.CloudGrpcClient(access_token) as grpc:
+        directive = parse_ably_token(
+            grpc.ably_token(field_string(1, identity.device_uuid)), fallback_channel=fallback
+        )
+        if directive.channel is None:
+            raise cloud_grpc.GrpcError(5, "no channel to subscribe on", "AblyToken")
+        request = build_subscribe_request(directive.channel, site.hardware_ids)
+        snapshot = grpc.subscribe_and_get_traits(request)
+    routes = site_routes(site, None)
+    if routes is None:
+        return snapshot
+    return split_snapshot(snapshot, routes, set()).get(panel.key, b"")
+
+
+def pin_panels(sites: list[SiteInfo], recorded: Iterable[str]) -> list[SiteInfo]:
+    """Hold each panel to the key already recorded for it.
+
+    A panel recorded by hardware id keeps that key once its serial is known, or
+    pairing it later would make it a new device with new totals.
+    """
+    keys = tuple(recorded)
+
+    def pin(panel: PanelInfo) -> PanelInfo:
+        key = next((key for key in keys if panel.answers_to(key)), None)
+        return replace(panel, stored_key=key) if key else panel
+
+    return [replace(site, panels=tuple(pin(panel) for panel in site.panels)) for site in sites]
+
+
+@dataclass(frozen=True)
+class PanelPlan:
+    """The account's panels read against the entry's stored answers."""
+
+    sites: list[SiteInfo]
+    chosen: tuple[str, ...]  # recorded keys, or every panel if nothing was chosen yet
+    new: tuple[str, ...]  # on the account, and neither chosen nor declined
+    departed: int  # recorded, but no longer on the account
+
+    @property
+    def running(self) -> list[SiteInfo]:
+        return [
+            site
+            for site in self.sites
+            if any(_is_chosen(panel, self.chosen) for panel in site_choices(site))
+        ]
+
+
+def panel_plan(
+    sites: list[SiteInfo], recorded: Iterable[str] | None, declined: Iterable[str] = ()
+) -> PanelPlan:
+    """Decide which panels run. No record yet means every panel does.
+
+    A panel the record doesn't know stays off until the user says otherwise: it
+    may not belong to this Home Assistant.
+    """
+    known = [*(recorded or ()), *declined]
+    pinned = pin_panels(sites, known)
+    panels = [panel for site in pinned for panel in site_choices(site)]
+    if recorded is None:
+        return PanelPlan(pinned, tuple(panel.key for panel in panels), (), 0)
+    new = tuple(panel.key for panel in panels if not _is_chosen(panel, known))
+    departed = sum(1 for key in recorded if not any(p.answers_to(key) for p in panels))
+    return PanelPlan(pinned, tuple(recorded), new, departed)
+
+
+def device_keys(
+    sites: list[SiteInfo], chosen: Iterable[str], primary_panel: str | None
+) -> set[str]:
+    """The HA devices these panels make, including any site device they bring."""
+    picked = tuple(chosen)
+    keys: set[str] = set()
+    for site in panel_plan(sites, picked).running:
+        routes = site_routes(site, primary_panel, picked)
+        keys |= {device.key for device in routes.devices} if routes else {site.lead.key}
+    return keys
+
+
+def panel_identity(
+    site: SiteInfo,
+    panel: PanelInfo,
+    *,
+    device_uuid: str,
+    serial: str | None,
+    primary_panel: str | None,
+) -> StreamIdentity:
+    """Key one panel of a shared site. They share its channel and nothing else."""
+    stream = stream_identity(
+        site, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
+    )
+    if panel.answers_to(primary_panel):
+        return StreamIdentity(stream.device_uuid, serial or panel.key, None)
+    return StreamIdentity(stream.device_uuid, panel.key, panel.key)
+
+
+def _drop_block(block_id: str | None, unrouted: set[str | None]) -> None:
+    if block_id not in unrouted:
+        unrouted.add(block_id)
+        log.debug("dropping a block that belongs to no panel here")
+
+
+def split_frame(frame: Frame, routes: SiteRoutes, unrouted: set[str | None]) -> dict[str, Frame]:
+    """Divide a frame between a site's devices, keyed by device.
+
+    A device appears only if the frame held something for it, and a frame may hold
+    any mix of blocks or none. `unrouted` remembers blocks already logged as dropped.
+    """
+    blocks = routes.blocks
+    parts: dict[str, dict[str, list[CircuitSample]]] = {}
+    for resource_id, samples in frame.resources.items():
+        key = blocks.get(resource_id)
+        if key is None:
+            _drop_block(resource_id, unrouted)
+            continue
+        parts.setdefault(key, {})[resource_id] = samples
+
+    out = {key: replace(frame, resources=res, site_flows={}) for key, res in parts.items()}
+    if frame.site_flows:
+        owner = routes.flows_owner.key
+        out[owner] = replace(
+            out.get(owner, frame), resources=parts.get(owner, {}), site_flows=frame.site_flows
+        )
+    return out
+
+
+def split_snapshot(raw: bytes, routes: SiteRoutes, unrouted: set[str | None]) -> dict[str, bytes]:
+    """Divide a trait snapshot between a site's devices, keyed by device.
+
+    Each part is a snapshot in its own right, so `parse_trait_snapshot` needs no
+    idea that a site can hold two panels. An unparseable snapshot yields nothing,
+    which is what `parse_trait_snapshot` makes of one too.
+    """
+    blocks = routes.blocks
+    out: dict[str, bytes] = {}
+    try:
+        for block in parse(raw).values(1):
+            ref = parse(block).get_msg(1)
+            resource_id = ref.get_str(1) if ref is not None else None
+            key = blocks.get(resource_id) if resource_id else None
+            if key is None:
+                _drop_block(resource_id, unrouted)
+                continue
+            out[key] = out.get(key, b"") + field_message(1, block)
+    except (ProtoError, ValueError, TypeError) as exc:
+        log.debug("unparseable trait snapshot (%d bytes): %s", len(raw), exc)
+        return {}
     return out
 
 
@@ -688,11 +1477,18 @@ class CloudBackend:
         key_name: str = cloud_ably.DEFAULT_KEY_NAME,
         reconnect_seconds: float = 5.0,
         on_auth_failed: AuthFailedCallback | None = None,
+        site_id: str | None = None,
     ) -> None:
         self._token_store = Path(token_store)
         self._device_uuid = device_uuid
         self._user_id = user_id
         self._serial = serial
+        # When set, this backend streams only that site's panel. Each site needs
+        # its own backend (and its own device UUID, hence its own Ably channel):
+        # circuit instance ids restart per panel, so two panels on one channel
+        # collide on ids like 21-27 and overwrite each other's names, readings
+        # and relay targets. None keeps the original whole-account behavior.
+        self._site_id = site_id
         self._host = host
         self._key_name = key_name
         self._reconnect_seconds = reconnect_seconds
@@ -706,6 +1502,8 @@ class CloudBackend:
         self._resolved_hardware_ids: list[str] = []
         # instance id -> circuit identity, from the subscribe snapshot.
         self._circuits: dict[int, CircuitInfo] = {}
+        # feed instance id -> trait 1/21 feeder kind, from the same snapshot.
+        self._feeders: dict[int, int] = {}
         # What `fetch_energy` asks about, learned from the frames: resource ->
         # instance -> node id, and the site flows this panel publishes.
         self._energy_targets: dict[str, dict[int, str]] = {}
@@ -868,6 +1666,22 @@ class CloudBackend:
                 samples.extend(energy_samples(series, targets, self._energy_flows))
         return samples
 
+    def traits(self) -> tuple[dict[int, CircuitInfo], dict[int, int]]:
+        """The circuits and feeder kinds of the last trait snapshot.
+
+        Both are replaced whole on the backend's thread, so reading them from
+        another thread sees one snapshot's or the next's, never a mix of a dict.
+        """
+        return self._circuits, self._feeders
+
+    def site_history_target(self) -> tuple[str, int] | None:
+        """The resource and instance SPAN keeps the site's history under, once seen."""
+        for resource, instances in self._energy_targets.items():
+            for instance, node in instances.items():
+                if node == SITE_NODE:
+                    return resource, instance
+        return None
+
     def _requester_id(self, access_token: str) -> str:
         """Who a write says it is: this user's SPAN id.
 
@@ -938,7 +1752,7 @@ class CloudBackend:
             attached_at = time.monotonic()
             try:
                 token, channel = self.bootstrap()
-                log.info("attaching to Ably channel %s", channel)
+                log.debug("attaching to the Ably channel")
                 # The watchdog measures from the attach, not from the last frame
                 # of the previous connection, so the reconnect gets a full budget.
                 self._last_frame = attached_at = time.monotonic()
@@ -961,7 +1775,7 @@ class CloudBackend:
                 else:
                     reason = "cloud stream closed"
             except Exception as exc:  # noqa: BLE001 — keep the daemon alive
-                reason = f"cloud stream error ({exc})"
+                reason = f"cloud stream error ({type(exc).__name__})"
             if self._stop.is_set():
                 return
             # Frames arriving after the attach are the only proof the attempt was
@@ -1058,12 +1872,23 @@ class CloudBackend:
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
             if self._serial is None or not self._hardware_ids:
                 sites = grpc.get_sites_for_user()
+                site = None
+                if self._site_id is not None:
+                    site = next((s for s in parse_sites(sites) if s.site_id == self._site_id), None)
+                    if site is None:
+                        raise cloud_grpc.GrpcError(
+                            5,
+                            "the site is no longer on this account",
+                            "GetSitesForUser",
+                        )
                 if self._serial is None:
-                    self._serial = _parse_sites_serial(sites)
+                    self._serial = (site.serial if site else None) or _parse_sites_serial(sites)
                     if self._serial:
-                        log.info("resolved panel serial %s from GetSitesForUser", self._serial)
+                        log.debug("resolved the panel serial from GetSitesForUser")
                 if not self._hardware_ids:
-                    self._hardware_ids = parse_sites_hardware_ids(sites)
+                    self._hardware_ids = (
+                        list(site.hardware_ids) if site else parse_sites_hardware_ids(sites)
+                    )
                     if (
                         self._resolved_hardware_ids
                         and self._hardware_ids != self._resolved_hardware_ids
@@ -1071,13 +1896,13 @@ class CloudBackend:
                         # Worth a WARNING: this is the silent-channel cause, and
                         # a line naming both sets is what proves it in the field.
                         log.warning(
-                            "subscribable hardware ids changed (%s -> %s); the "
+                            "subscribable hardware ids changed (%d -> %d); the "
                             "previous set is why the channel went quiet",
-                            self._resolved_hardware_ids,
-                            self._hardware_ids,
+                            len(self._resolved_hardware_ids),
+                            len(self._hardware_ids),
                         )
                     self._resolved_hardware_ids = self._hardware_ids
-                    log.debug("subscribable hardware ids: %s", self._hardware_ids)
+                    log.debug("subscribable hardware ids: %d", len(self._hardware_ids))
 
             request = field_string(1, self._device_uuid)
             directive = parse_ably_token(
@@ -1117,10 +1942,13 @@ class CloudBackend:
                         log.error(
                             "SubscribeAndGetTraits failed (%s); the channel will stay "
                             "silent until the next reconnect",
-                            exc,
+                            type(exc).__name__,
                         )
                     else:
-                        log.warning("relay state refresh failed (%s); keeping last known", exc)
+                        log.warning(
+                            "relay state refresh failed (%s); keeping last known",
+                            type(exc).__name__,
+                        )
                 first = False
                 if not self._wait_before_refresh(SWITCH_REFRESH_SECONDS):
                     return
@@ -1135,9 +1963,11 @@ class CloudBackend:
         switch state, so without this the value would only move when we ourselves
         commanded it.
         """
-        circuits = parse_trait_snapshot(self.subscribe(channel))
+        snapshot = self.subscribe(channel)
+        circuits = parse_trait_snapshot(snapshot)
         if circuits:
             self._circuits = circuits
+            self._feeders = parse_feeder_kinds(snapshot)
             if announce:
                 for info in circuits.values():
                     if info.switch is not None:
@@ -1179,9 +2009,8 @@ class CloudBackend:
         with cloud_grpc.CloudGrpcClient(access_token, host=self._host) as grpc:
             snapshot = grpc.subscribe_and_get_traits(request)
         log.info(
-            "subscribed %d resource(s) for telemetry on %s (%d-byte trait snapshot)",
+            "subscribed %d resource(s) for telemetry (%d-byte trait snapshot)",
             len(self._hardware_ids),
-            channel,
             len(snapshot),
         )
         return snapshot
@@ -1202,6 +2031,14 @@ class CloudBackend:
         # from a decoded frame rather than from raw bytes off the socket.
         self._last_frame = time.monotonic()
 
+        self._apply_frame(frame)
+
+    def _schema_source(self, frame: Frame) -> Frame:
+        """The frame that says what this panel holds."""
+        return frame
+
+    def _apply_frame(self, frame: Frame) -> None:
+        source = self._schema_source(frame)
         # The stream interleaves power frames (with circuits) and lean energy/
         # interval frames (empty of resources+flows). Hold the schema until a
         # content-bearing frame so we don't publish an empty topology — and,
@@ -1213,19 +2050,20 @@ class CloudBackend:
             and (self._circuits or time.monotonic() >= self._label_deadline)
         ):
             serial = self._serial or "span-cloud"
-            self._on_schema(schema_from_frame(serial, frame, self._circuits))
+            self._on_schema(schema_from_frame(serial, source, self._circuits, self._feeders))
             self._schema_sent = True
 
         # Only a content-bearing frame names the metering instances: the lean
         # interval frames carry a different site instance and no circuits at all,
         # so taking the identifiers from one would ask about the wrong things.
         if frame.resources or frame.site_flows:
-            targets = energy_targets(frame, self._circuits)
+            targets = energy_targets(source, self._circuits)
             if targets != self._energy_targets:
                 self._energy_targets = targets
                 log.debug(
-                    "energy targets: %s",
-                    {res: sorted(nodes) for res, nodes in targets.items()},
+                    "energy targets: %d node(s) on %d resource(s)",
+                    sum(len(nodes) for nodes in targets.values()),
+                    len(targets),
                 )
             if frame.site_flows:
                 self._energy_flows = tuple(frame.site_flows)
@@ -1234,3 +2072,132 @@ class CloudBackend:
             ts = frame.epoch_millis / 1000.0 if frame.epoch_millis else None
             for reading in readings_from_frame(frame, ts, self._circuits):
                 self._on_reading(reading)
+
+
+class SitePanelBackend(CloudBackend):
+    """One panel of a shared site: all of a backend but the stream.
+
+    Holds what `CloudBackend` holds for its one panel, so commands, energy and the
+    schema work unchanged, and is fed its slice of the site's stream by `SiteStream`.
+    """
+
+    def __init__(self, stream: SiteStream, token_store: Path, device_uuid: str, **kwargs) -> None:
+        super().__init__(token_store, device_uuid, **kwargs)
+        self._stream = stream
+        # A flows frame and a block frame may arrive apart, so unlike a whole
+        # site's frame neither one alone describes this panel.
+        self._seen = Frame(epoch_millis=0, site_id=None)
+
+    def start(self, on_schema: SchemaCallback, on_reading: ReadingCallback) -> None:
+        self._on_schema = on_schema
+        self._on_reading = on_reading
+        self._schema_sent = False
+        self._label_deadline = time.monotonic() + SCHEMA_LABEL_WAIT_SECONDS
+        self._stream.attach()
+
+    def stop(self, join_timeout: float = 10.0) -> None:
+        self._stream.detach(join_timeout)
+
+    def _request_refresh(self, delay: float) -> None:
+        self._stream._request_refresh(delay)
+
+    def _schema_source(self, frame: Frame) -> Frame:
+        return self._seen
+
+    def _apply_frame(self, frame: Frame) -> None:
+        seen = replace(
+            frame,
+            resources={**self._seen.resources, **frame.resources},
+            site_flows={**self._seen.site_flows, **frame.site_flows},
+        )
+        # Something new to describe: schema again, and the coordinator only adds
+        # the entities it has not seen.
+        if seen.resources.keys() != self._seen.resources.keys() or (
+            seen.site_flows.keys() != self._seen.site_flows.keys()
+        ):
+            self._schema_sent = False
+        self._seen = seen
+        super()._apply_frame(frame)
+
+
+class SiteStream(CloudBackend):
+    """The one stream of a site with several panels, split between them.
+
+    Starts once every panel has attached, so none misses the first snapshot.
+    """
+
+    def __init__(
+        self,
+        token_store: Path,
+        device_uuid: str,
+        *,
+        routes: SiteRoutes,
+        user_id: str | None = None,
+        serial: str | None = None,
+    ) -> None:
+        super().__init__(
+            token_store, device_uuid, user_id=user_id, serial=serial, site_id=routes.site_id
+        )
+        self._routes = routes
+        self._panels: dict[str, SitePanelBackend] = {}
+        self._attached = 0
+        self._unrouted: set[str | None] = set()
+
+    def panel_backend(
+        self, key: str, serial: str | None, on_auth_failed: AuthFailedCallback | None = None
+    ) -> SitePanelBackend:
+        # Any panel's coordinator can raise the prompt; there is one entry to reauth.
+        self._on_auth_failed = self._on_auth_failed or on_auth_failed
+        panel = SitePanelBackend(
+            self,
+            self._token_store,
+            self._device_uuid,
+            user_id=self._user_id,
+            serial=serial,
+            host=self._host,
+            key_name=self._key_name,
+            on_auth_failed=on_auth_failed,
+        )
+        self._panels[key] = panel
+        return panel
+
+    @property
+    def routes(self) -> SiteRoutes:
+        return self._routes
+
+    def attach(self) -> None:
+        self._attached += 1
+        if self._attached == len(self._panels):
+            super().start(lambda _schema: None, lambda _reading: None)
+
+    def detach(self, join_timeout: float = 10.0) -> None:
+        self._attached -= 1
+        if self._attached == 0:
+            super().stop(join_timeout)
+
+    def _refresh_circuits(self, channel: str, *, announce: bool = False) -> None:
+        parts = split_snapshot(self.subscribe(channel), self._routes, self._unrouted)
+        for key, panel in self._panels.items():
+            part = parts.get(key, b"")
+            circuits = parse_trait_snapshot(part)
+            if circuits:
+                panel._circuits = circuits
+                panel._feeders = parse_feeder_kinds(part)
+                if announce:
+                    for info in circuits.values():
+                        if info.switch is not None:
+                            panel._emit_relay_reading(info)
+            panel._label_deadline = 0.0
+
+    def _handle_frame(self, raw: bytes) -> None:
+        try:
+            frame = decode_frame(raw)
+        except Exception as exc:  # noqa: BLE001 — a bad frame must not kill the stream
+            log.debug("undecodable telemetry frame (%d bytes): %s", len(raw), exc)
+            return
+
+        self._last_frame = time.monotonic()
+        for key, part in split_frame(frame, self._routes, self._unrouted).items():
+            panel = self._panels.get(key)
+            if panel is not None:
+                panel._apply_frame(part)

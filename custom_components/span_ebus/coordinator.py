@@ -13,6 +13,7 @@ slow one.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import threading
@@ -24,13 +25,25 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN
+from .const import CONF_LOCAL_SERIAL, DOMAIN, MANUFACTURER, MODEL
 from .energy import EnergyLedger
-from .span_client.backend import CloudBackend
+from .span_client.backend import (
+    CloudBackend,
+    PanelInfo,
+    SiteInfo,
+    SiteStream,
+    device_name,
+    panel_identity,
+    same_serial,
+    stream_identity,
+)
+from .span_client.cloud_traits import CircuitInfo
+from .span_client.link import link_from_options
 from .span_client.models import EnergySample, PanelSchema, PropertySpec, Reading
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,9 +88,12 @@ ENERGY_STORE_VERSION = 1
 ENERGY_SAVE_DELAY_SECONDS = 30
 
 
-def energy_store(hass: HomeAssistant, entry_id: str) -> Store:
-    """The per-entry store holding the energy totals."""
-    return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{entry_id}.energy")
+def energy_store(hass: HomeAssistant, entry_id: str, panel_key: str | None = None) -> Store:
+    """The store holding the energy totals: the entry's own for the panel that owns
+    its identity, one per panel otherwise (the same circuit key exists on every
+    panel)."""
+    scope = f"{entry_id}.{panel_key}" if panel_key else entry_id
+    return Store(hass, ENERGY_STORE_VERSION, f"{DOMAIN}.{scope}.energy")
 
 
 @dataclass
@@ -106,18 +122,52 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         device_uuid: str,
         user_id: str | None,
         serial: str | None,
+        site: SiteInfo | None = None,
+        primary_panel: str | None = None,
+        stream: SiteStream | None = None,
+        panel: PanelInfo | None = None,
     ) -> None:
         # No update_interval: this is push, not poll.
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None, config_entry=entry)
         self.entry = entry
         self.schema: PanelSchema | None = None
-
-        self._backend = CloudBackend(
-            token_path,
-            device_uuid,
-            user_id=user_id,
-            serial=serial,
-            on_auth_failed=self._on_auth_failed,
+        # The site this coordinator streams, or None for the legacy single-stream
+        # setup. Its serial and model name the HA device.
+        self.site = site
+        self.model = site.model if site else MODEL
+        # The board behind this device, where its key isn't its serial. Without a
+        # serial there is no serial or model to show.
+        self._board: PanelInfo | None = None
+        self._device_name: str | None = None
+        if stream is not None and panel is not None and site is not None:
+            # One device of a site whose stream it shares with the others.
+            identity = panel_identity(
+                site, panel, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
+            )
+            self.model = panel.model
+            self._device_name = device_name(panel, stream.routes)
+            self._board = panel
+            self._backend = stream.panel_backend(
+                panel.key, identity.serial, on_auth_failed=self._on_auth_failed
+            )
+        else:
+            identity = stream_identity(
+                site, device_uuid=device_uuid, serial=serial, primary_panel=primary_panel
+            )
+            self._backend = CloudBackend(
+                token_path,
+                identity.device_uuid,
+                user_id=user_id,
+                serial=identity.serial,
+                on_auth_failed=self._on_auth_failed,
+                site_id=site.site_id if site else None,
+            )
+            if site and site.lead.serial and site.lead.key != site.lead.serial:
+                self._board = site.lead
+        self._serial = identity.serial
+        # The picker key of the panel this streams, as a link records it.
+        self.cloud_key: str | None = (
+            panel.key if panel is not None else site.lead.key if site is not None else None
         )
         self._buffer: dict[str, Reading] = {}
         self._buffer_lock = threading.Lock()
@@ -136,44 +186,73 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         # once a minute while readings move twice a second — waking every power
         # sensor in the panel to announce a kilowatt-hour would be pure noise.
         self._ledger = EnergyLedger()
-        self._energy_store = energy_store(hass, entry.entry_id)
+        self._energy_store = energy_store(hass, entry.entry_id, identity.store_panel_key)
         self._energy_listeners: list[Callable[[], None]] = []
         self._cancel_energy_poll: Callable[[], None] | None = None
         self._energy_failures = 0
+        self._running = False
+        # Start and stop await I/O; a stop during a start must not interleave.
+        self._lifecycle = asyncio.Lock()
 
     # --- lifecycle ---------------------------------------------------------
 
     async def async_start(self) -> None:
-        """Start the backend thread. Non-blocking; frames arrive shortly after."""
-        self.data = {}
-        self._ledger.load(await self._energy_store.async_load())
-        self._backend.start(self._on_schema, self._on_reading)
-        self._cancel_grace = async_call_later(self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent)
-        self._cancel_stale_check = async_track_time_interval(
-            self.hass, self._check_staleness, STALE_CHECK_INTERVAL
-        )
-        # The first poll only marks where the meters stand; it is the second one
-        # that adds anything, which is why nothing here polls immediately.
-        self._cancel_energy_poll = async_track_time_interval(
-            self.hass, self._poll_energy, ENERGY_POLL_INTERVAL
-        )
+        """Start the backend thread. Non-blocking; frames arrive shortly after.
+
+        Callable again after `async_stop`: a linked entry stops its cloud on
+        failback and starts it on the next failover.
+        """
+        async with self._lifecycle:
+            if self._running:
+                return
+            if self.data is None:
+                self.data = {}
+            self._ledger.load(await self._energy_store.async_load())
+            self._backend.start(self._on_schema, self._on_reading)
+            self._running = True
+            self._cancel_grace = async_call_later(
+                self.hass, SCHEMA_GRACE_SECONDS, self._warn_if_silent
+            )
+            self._cancel_stale_check = async_track_time_interval(
+                self.hass, self._check_staleness, STALE_CHECK_INTERVAL
+            )
+            # The first poll only marks where the meters stand; it is the second
+            # one that adds anything, which is why nothing here polls immediately.
+            self._cancel_energy_poll = async_track_time_interval(
+                self.hass, self._poll_energy, ENERGY_POLL_INTERVAL
+            )
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
-        if self._cancel_grace is not None:
-            self._cancel_grace()
-            self._cancel_grace = None
-        if self._cancel_stale_check is not None:
-            self._cancel_stale_check()
-            self._cancel_stale_check = None
-        if self._cancel_energy_poll is not None:
-            self._cancel_energy_poll()
-            self._cancel_energy_poll = None
-        # Force the delayed save out: unloading an entry is not a Home Assistant
-        # stop, so nothing else will flush it, and a lost write means the totals
-        # restart from an old mark and re-count what came after it.
-        await self._energy_store.async_save(self._ledger.as_dict())
-        await self.hass.async_add_executor_job(self._backend.stop)
+        await self.async_stop()
+
+    async def async_stop(self) -> None:
+        """Stop streaming but stay usable: `async_start` resumes it.
+
+        Entities go unavailable, since the stream is no longer live.
+        """
+        async with self._lifecycle:
+            # Once only: a shared site stream counts its attached panels.
+            if not self._running:
+                return
+            for cancel in (self._cancel_grace, self._cancel_stale_check, self._cancel_energy_poll):
+                if cancel is not None:
+                    cancel()
+            self._cancel_grace = self._cancel_stale_check = self._cancel_energy_poll = None
+            try:
+                # Force the delayed save out: unloading an entry is not a Home
+                # Assistant stop, so nothing else will flush it, and a lost write
+                # means the totals restart from an old mark and re-count what
+                # came after it.
+                await self._energy_store.async_save(self._ledger.as_dict())
+            finally:
+                try:
+                    await self.hass.async_add_executor_job(self._backend.stop)
+                finally:
+                    self._running = False
+                    self._last_frame = None
+                    self._reported_live = True
+                    self.async_update_listeners()
 
     # --- authentication ----------------------------------------------------
 
@@ -191,7 +270,7 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         is a no-op when a flow is already open for the entry, so the latch in the
         backend and this together mean exactly one prompt.
         """
-        _LOGGER.debug("starting reauth flow for %s: %s", self.entry.title, reason)
+        _LOGGER.debug("starting reauth flow: %s", reason)
         self.entry.async_start_reauth(self.hass)
 
     # --- liveness ----------------------------------------------------------
@@ -241,6 +320,50 @@ class SpanCloudCoordinator(DataUpdateCoordinator[dict[str, Reading]]):
         )
 
     # --- entity registration ----------------------------------------------
+
+    @property
+    def serial(self) -> str:
+        """The panel serial entities are keyed and grouped under."""
+        if self.schema is not None:
+            return self.schema.serial
+        if self._serial:
+            return self._serial
+        return "span-cloud"
+
+    def device_info(self) -> DeviceInfo:
+        """One HA device per panel, named by model so two panels are told apart."""
+        board = self._board
+        serial = board.serial if board else self.serial
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.serial)},
+            name=self._device_name or self._linked_name() or f"SPAN {self.model} {serial}",
+            manufacturer=MANUFACTURER,
+            model=self.model if serial else None,
+            serial_number=serial,
+        )
+
+    def traits(self) -> tuple[dict[int, CircuitInfo], dict[int, int]]:
+        """The circuits and feeder kinds the backend last read from SPAN."""
+        return self._backend.traits()
+
+    def site_history_target(self) -> tuple[str, int] | None:
+        """Where SPAN keeps the site's metered history, once a frame has named it."""
+        return self._backend.site_history_target()
+
+    def _linked_name(self) -> str | None:
+        """A panel added locally is named by its entry, whichever transport is live.
+
+        SPAN can list the panel under a serial unlike its own, so the link's
+        cloud key counts as well as the serial.
+        """
+        if CONF_LOCAL_SERIAL not in self.entry.data:
+            return None
+        if same_serial(self.serial, self.entry.data[CONF_LOCAL_SERIAL]):
+            return self.entry.title
+        link = link_from_options(self.entry.options)
+        if link is not None and self.cloud_key is not None and self.cloud_key == link.cloud_key:
+            return self.entry.title
+        return None
 
     @callback
     def register_entity_adder(

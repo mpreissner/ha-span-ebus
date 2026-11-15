@@ -11,14 +11,20 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SpanConfigEntry
-from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import SpanCloudCoordinator
+from .local_entity import (
+    SpanLocalEntity,
+    SpanUnmatchedEntity,
+    async_setup_local,
+    kept_cloud_entries,
+)
 from .span_client.backend import RELAY_PROPERTY
+from .span_client.local.commands import Control
 from .span_client.models import PropertySpec
 
 # SPAN's own vocabulary: a closed relay is an energized circuit.
@@ -31,8 +37,21 @@ async def async_setup_entry(
     entry: SpanConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator = entry.runtime_data
+    runtime = entry.runtime_data
+    if runtime.transport is not None:
+        async_setup_local(
+            entry, runtime.transport, async_add_entities, "switch", SpanLocalRelaySwitch
+        )
+        # A linked cloud entry's relays the link could not pair keep their
+        # entity, unavailable; no kept switch has any other source.
+        kept = kept_cloud_entries(hass, entry, "switch")
+        if kept:
+            async_add_entities(SpanUnmatchedSwitch(entry, runtime.transport, k) for k in kept)
+        return  # the cloud fallback creates no entities of its own
+    runtime.add_platform(lambda c: _register(c, async_add_entities))
 
+
+def _register(coordinator: SpanCloudCoordinator, async_add_entities: AddEntitiesCallback) -> None:
     @callback
     def add_specs(specs: list[PropertySpec]) -> None:
         async_add_entities(SpanRelaySwitch(coordinator, spec) for spec in specs)
@@ -53,19 +72,12 @@ class SpanRelaySwitch(CoordinatorEntity[SpanCloudCoordinator], SwitchEntity):
     def __init__(self, coordinator: SpanCloudCoordinator, spec: PropertySpec) -> None:
         super().__init__(coordinator)
         self._key = spec.key
-        serial = coordinator.schema.serial if coordinator.schema else "span-cloud"
+        serial = coordinator.serial
 
         node_label = spec.node_name or spec.node_id
         self._attr_name = f"{node_label} breaker".replace("_", " ")
         self._attr_unique_id = f"{serial}_{spec.key}"
-
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, serial)},
-            name=f"SPAN Panel {serial}",
-            manufacturer=MANUFACTURER,
-            model=MODEL,
-            serial_number=serial,
-        )
+        self._attr_device_info = coordinator.device_info()
 
     @property
     def is_on(self) -> bool | None:
@@ -99,3 +111,40 @@ class SpanRelaySwitch(CoordinatorEntity[SpanCloudCoordinator], SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_send_command(self._key, STATE_OPEN)
+
+
+class SpanLocalRelaySwitch(SpanLocalEntity, SwitchEntity):
+    """One breaker's relay, set over the panel's local API."""
+
+    _attr_device_class = SwitchDeviceClass.SWITCH
+    # Unavailable while protected, or while it feeds a battery or PV inverter
+    # without an override: the base class asks the transport's safety rules.
+    _control = Control.RELAY
+
+    @property
+    def is_on(self) -> bool | None:
+        """True when closed; None for UNKNOWN or anything else, never a guess."""
+        if self._value == STATE_CLOSED:
+            return True
+        if self._value == STATE_OPEN:
+            return False
+        return None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._async_command(STATE_CLOSED)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._async_command(STATE_OPEN)
+
+
+class SpanUnmatchedSwitch(SpanUnmatchedEntity, SwitchEntity):
+    """A relay the link could not pair with a local circuit."""
+
+    _attr_device_class = SwitchDeviceClass.SWITCH
+    _attr_is_on = None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        raise HomeAssistantError("This circuit is not paired with the local panel")
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        raise HomeAssistantError("This circuit is not paired with the local panel")
