@@ -2,8 +2,8 @@
 
 Recorder imports stay inside the functions: the recorder is an after-dependency,
 not a dependency, so the integration loads without it. Every read runs on the
-recorder's executor and asks for kWh, so the caller does no unit math; the
-adjust passes kWh too and the recorder converts.
+recorder's executor and asks for kWh (means: W and A), so the caller does no
+unit math; the adjust passes kWh too and the recorder converts.
 
 Statistic ids are entity ids, which are not logged here.
 """
@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant
 
 RECORDER = "recorder"
 _UNITS = {"energy": "kWh"}
+_MEAN_UNITS = {"power": "W", "electric_current": "A"}
 
 
 def loaded(hass: HomeAssistant) -> bool:
@@ -92,6 +93,36 @@ async def sums(
         if row.get("sum") is not None
     ]
     return sorted((when, total) for when, total in out if start <= when < end)
+
+
+async def means(
+    hass: HomeAssistant,
+    statistic_ids: Iterable[str],
+    start: datetime,
+    end: datetime,
+    period: Literal["5minute", "hour"],
+) -> dict[str, dict[datetime, float]]:
+    """Statistic id -> {row start in UTC: mean} for rows in [start, end), in one
+    read. Power comes in W and current in A. Ids with no rows are left out.
+    """
+    from homeassistant.components.recorder.statistics import statistics_during_period
+
+    wanted = set(statistic_ids)
+    if not wanted:
+        return {}
+    rows = await _instance(hass).async_add_executor_job(
+        lambda: statistics_during_period(hass, start, end, wanted, period, _MEAN_UNITS, {"mean"})
+    )
+    out: dict[str, dict[datetime, float]] = {}
+    for statistic_id, found in rows.items():
+        series = {
+            when: float(row["mean"])
+            for row in found or []
+            if row.get("mean") is not None and start <= (when := _start(row["start"])) < end
+        }
+        if series:
+            out[statistic_id] = series
+    return out
 
 
 def adjust(hass: HomeAssistant, statistic_id: str, start: datetime, kwh: float) -> None:

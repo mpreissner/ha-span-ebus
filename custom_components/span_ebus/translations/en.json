@@ -757,6 +757,24 @@
     },
     "rotate_outcome_unknown": {
       "message": "The panel's answer was lost, so its passphrase may have changed. If it did, the new one is in the SPAN app: enter it in the reauthentication that follows."
+    },
+    "leg_balance_no_local_panel": {
+      "message": "No loaded panel added over its local API matches this call. Pick a local panel's config entry or device."
+    },
+    "leg_balance_multiple_panels": {
+      "message": "More than one panel was added over its local API. Pick the panel's config entry or device."
+    },
+    "leg_balance_target_mismatch": {
+      "message": "The device does not belong to the config entry given. Give one of them, or a matching pair."
+    },
+    "leg_balance_not_local": {
+      "message": "Leg balance is not supported yet for panels not added over their local API."
+    },
+    "leg_balance_not_loaded": {
+      "message": "This entry is not loaded. Analyze its leg balance once it is running."
+    },
+    "leg_balance_read_failed": {
+      "message": "Couldn't read or analyze this panel's recorded history. Check that the recorder is running, then try again."
     }
   },
   "services": {
@@ -771,6 +789,32 @@
         "device_id": {
           "name": "Device",
           "description": "Any device of the panel: the panel, a circuit or a subdevice. Optional when only one panel was added over its local API."
+        }
+      }
+    },
+    "analyze_leg_balance": {
+      "name": "Analyze leg balance",
+      "description": "Reads the recorded history of a panel added over its local API and suggests single-pole breaker moves or swaps that would even out the load on its two legs (L1 and L2). Read-only: nothing is changed. Suggestions only: have a licensed electrician check and do any move.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The panel's config entry. Optional when only one panel was added over its local API."
+        },
+        "device_id": {
+          "name": "Device",
+          "description": "Any device of the panel: the panel, a circuit or a subdevice. Optional when only one panel was added over its local API."
+        },
+        "days": {
+          "name": "Days",
+          "description": "How many days of history to analyze, from 7 to 90."
+        },
+        "min_gain_a": {
+          "name": "Minimum gain",
+          "description": "The least a suggestion must lower the high imbalance by, in amps (it must also lower it by 10 %)."
+        },
+        "balanced_below_a": {
+          "name": "Balanced below",
+          "description": "A high imbalance under this many amps counts as balanced, and nothing is suggested."
         }
       }
     }
