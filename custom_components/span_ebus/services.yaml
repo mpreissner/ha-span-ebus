@@ -10,3 +10,45 @@ rotate_credentials:
       selector:
         device:
           integration: span_ebus
+analyze_leg_balance:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: span_ebus
+    device_id:
+      required: false
+      selector:
+        device:
+          integration: span_ebus
+    days:
+      required: false
+      default: 28
+      selector:
+        number:
+          min: 7
+          max: 90
+          step: 1
+          unit_of_measurement: days
+          mode: box
+    min_gain_a:
+      required: false
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.5
+          unit_of_measurement: A
+          mode: box
+    balanced_below_a:
+      required: false
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.5
+          unit_of_measurement: A
+          mode: box

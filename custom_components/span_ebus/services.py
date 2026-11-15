@@ -1,8 +1,9 @@
-"""The integration's services: `rotate_credentials`.
+"""The integration's services: `rotate_credentials` and `analyze_leg_balance`.
 
-The flow lives in `span_client.local.rotation`, free of Home Assistant; this
-module only finds the entry and wires the side effects in. The new passphrase
-is in the response and nowhere else: never logged, stored or put in an error.
+The rotation flow lives in `span_client.local.rotation`, free of Home
+Assistant; this module only finds the entry and wires the side effects in. The
+new passphrase is in the response and nowhere else: never logged, stored or put
+in an error. The leg-balance action is read-only (`leg_balance`).
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ from .const import (
     CONF_LOCAL_SERIAL,
     DOMAIN,
 )
+from .leg_balance import async_analyze
+from .span_client import leg_balance as lb
 from .span_client.local import rotation
 from .span_client.local.rest import SpanLocalApi, SpanLocalError
 from .transport import local_mqtt_for
@@ -37,12 +40,28 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
 
 SERVICE_ROTATE_CREDENTIALS = "rotate_credentials"
+SERVICE_ANALYZE_LEG_BALANCE = "analyze_leg_balance"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_DEVICE_ID = "device_id"
 ROTATION_LOCKS = "rotation_locks"
+LEG_BALANCE = "leg_balance"  # the prefix of its error keys
+
+ATTR_DAYS = "days"
+ATTR_MIN_GAIN_A = "min_gain_a"
+ATTR_BALANCED_BELOW_A = "balanced_below_a"
 
 ROTATE_SCHEMA = vol.Schema(
     {vol.Optional(ATTR_CONFIG_ENTRY_ID): str, vol.Optional(ATTR_DEVICE_ID): str}
+)
+_AMPS = vol.All(vol.Coerce(float), vol.Range(min=0))
+LEG_BALANCE_SCHEMA = ROTATE_SCHEMA.extend(
+    {
+        vol.Optional(ATTR_DAYS, default=lb.DEFAULT_DAYS): vol.All(
+            vol.Coerce(int), vol.Range(min=7, max=90)
+        ),
+        vol.Optional(ATTR_MIN_GAIN_A, default=lb.MIN_GAIN_A): _AMPS,
+        vol.Optional(ATTR_BALANCED_BELOW_A, default=lb.BALANCED_BELOW_A): _AMPS,
+    }
 )
 
 
@@ -55,9 +74,18 @@ def async_setup_services(hass: HomeAssistant) -> None:
         schema=ROTATE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ANALYZE_LEG_BALANCE,
+        partial(_async_analyze_leg_balance, hass),
+        schema=LEG_BALANCE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
 
 
-def _error(problem: rotation.Problem, retry_after: int | None = None) -> HomeAssistantError:
+def _error(
+    problem: rotation.Problem, retry_after: int | None = None, prefix: str = "rotate"
+) -> HomeAssistantError:
     """The translated error. Placeholders never carry a secret, host or serial."""
     kind = ServiceValidationError if problem.is_refusal else HomeAssistantError
     placeholders = None
@@ -65,12 +93,12 @@ def _error(problem: rotation.Problem, retry_after: int | None = None) -> HomeAss
         placeholders = {"retry_after": str(retry_after) if retry_after else "a few"}
     return kind(
         translation_domain=DOMAIN,
-        translation_key=f"rotate_{problem}",
+        translation_key=f"{prefix}_{problem}",
         translation_placeholders=placeholders,
     )
 
 
-def _pick(hass: HomeAssistant, call: ServiceCall) -> ConfigEntry:
+def _pick(hass: HomeAssistant, call: ServiceCall, prefix: str = "rotate") -> ConfigEntry:
     entries = {
         entry.entry_id: rotation.Candidate(
             local=CONF_LOCAL_SERIAL in entry.data,
@@ -86,11 +114,26 @@ def _pick(hass: HomeAssistant, call: ServiceCall) -> ConfigEntry:
         device_entry_ids = set(device.config_entries) if device is not None else set()
     target = rotation.pick_target(entries, call.data.get(ATTR_CONFIG_ENTRY_ID), device_entry_ids)
     if isinstance(target, rotation.Problem):
-        raise _error(target)
+        raise _error(target, prefix=prefix)
     entry = hass.config_entries.async_get_entry(target)
     if entry is None:
-        raise _error(rotation.Problem.NO_LOCAL_PANEL)
+        raise _error(rotation.Problem.NO_LOCAL_PANEL, prefix=prefix)
     return entry
+
+
+async def _async_analyze_leg_balance(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
+    """Read-only, so open to every user: nothing is written or sent."""
+    entry = _pick(hass, call, prefix=LEG_BALANCE)
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None or runtime.transport is None:
+        raise _error(rotation.Problem.NOT_LOADED, prefix=LEG_BALANCE)
+    return await async_analyze(
+        hass,
+        entry,
+        days=call.data[ATTR_DAYS],
+        min_gain_a=call.data[ATTR_MIN_GAIN_A],
+        balanced_below_a=call.data[ATTR_BALANCED_BELOW_A],
+    )
 
 
 async def _async_rotate_credentials(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
