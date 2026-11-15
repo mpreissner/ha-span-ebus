@@ -33,6 +33,7 @@ from homeassistant.util import dt as dt_util
 
 from . import recorder_api
 from .const import CONF_CLOUD_STEM, CONF_LOCAL_SERIAL, DOMAIN
+from .device_lookup import device_by_identifier
 from .span_client import energy_step as es
 
 if TYPE_CHECKING:
@@ -60,7 +61,7 @@ def panel_name(hass: HomeAssistant, entry: ConfigEntry) -> str:
         ident = entry.data.get(key)
         if not ident:
             continue
-        device = devices.async_get_device(identifiers={(DOMAIN, ident)})
+        device = device_by_identifier(devices, (DOMAIN, ident), entry.entry_id)
         if device is not None and (name := device.name_by_user or device.name):
             return name
     return PANEL_NAME
