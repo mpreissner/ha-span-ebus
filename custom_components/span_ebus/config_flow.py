@@ -1332,10 +1332,8 @@ class SpanEbusOptionsFlow(_FeedSteps, _LocalRegistration, OptionsFlow):
             self.hass.config_entries.async_update_entry(entry, options=options)
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
             return self.async_create_entry(data=options)
-        hidden = "".join(
-            "\n\n" + await self._note(key)
-            for key in commands.controls_hint_keys(not form.override, form.show_islanding)
-        )
+        keys = commands.controls_hint_keys(not form.override, form.show_islanding)
+        hidden = "".join(["\n\n" + await self._note(key) for key in keys])
         return self.async_show_form(
             step_id="controls",
             data_schema=_controls_schema(form),
