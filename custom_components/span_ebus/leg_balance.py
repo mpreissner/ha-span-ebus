@@ -16,9 +16,11 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
@@ -215,3 +217,47 @@ async def async_analyze(
         len(analysis.moves),
     )
     return lb.response(analysis, days, feeds_over_lugs=feeds_over_lugs)
+
+
+# --- the button ------------------------------------------------------------------------
+
+
+def notification_id(entry: ConfigEntry) -> str:
+    """One notification per entry: a new press replaces the last one."""
+    return f"{DOMAIN}_leg_balance_{entry.entry_id}"
+
+
+def _name_by_user(hass: HomeAssistant, entry: ConfigEntry) -> str | None:
+    serial = entry.data.get(CONF_LOCAL_SERIAL)
+    if not serial:
+        return None
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, serial)})
+    return device.name_by_user if device is not None else None
+
+
+async def async_notify(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Run the analysis with the defaults and post the result as a notification.
+
+    Never raises: the notification is the outcome, even of an error. A press while
+    one is running is ignored.
+    """
+    lock = entry.runtime_data.leg_balance_lock
+    if lock.locked():
+        _LOGGER.debug("Leg balance: an analysis is already running; press ignored")
+        return
+    async with lock:
+        response: dict[str, Any] | None
+        try:
+            response = await async_analyze(hass, entry)
+        except Exception as err:  # noqa: BLE001 - the notification reports it
+            _LOGGER.debug("Leg balance: the analysis failed (%s)", type(err).__name__)
+            response = None
+        try:
+            persistent_notification.async_create(
+                hass,
+                lb.notification_markdown(response),
+                title=lb.notification_title(_name_by_user(hass, entry)),
+                notification_id=notification_id(entry),
+            )
+        except Exception as err:  # noqa: BLE001 - a press never raises
+            _LOGGER.debug("Leg balance: posting the notification failed (%s)", type(err).__name__)

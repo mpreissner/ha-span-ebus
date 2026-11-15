@@ -1,0 +1,9 @@
+{
+  "entity": {
+    "button": {
+      "analyze_leg_balance": {
+        "default": "mdi:scale-balance"
+      }
+    }
+  }
+}

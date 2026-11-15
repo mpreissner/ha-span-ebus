@@ -1,16 +1,24 @@
 """Leg balance: the pure analysis in span_client.leg_balance."""
 
+import ast
+import json
 import random
 import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from span_client import leg_balance as lb
+from span_client.identity import leg_balance_uid
 from span_client.leg_balance import CircuitIn, Exclusion, Leg, LegHistory, MappingCheck, Problem
+from span_client.legacy import cloud_suffix, produced_uids
 from span_client.local import model
 
 from tests.test_local_capture import PANEL, capture_tree
+from tests.test_local_model import CLOUD_UID
+
+COMPONENT = Path(__file__).resolve().parents[1] / "custom_components" / "span_ebus"
 
 T0 = datetime(2026, 1, 5, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -786,3 +794,238 @@ def test_not_movable_without_a_reason_is_an_error():
     base = site()
     with pytest.raises(ValueError, match="needs a reason"):
         analyze([replace(base[0], movable=False), *base[1:]])
+
+
+# --- the button's notification --------------------------------------------------------------
+
+_LONG_DIGITS = re.compile(r"\d{5,}")
+_HOST = re.compile(r"\d+\.\d+\.\d+|[a-z0-9-]+\.(local|lan|home)\b", re.IGNORECASE)
+
+
+def _markdown(response) -> str:
+    text = lb.notification_markdown(response)
+    assert text.endswith(f"\n\n_{lb.NOTICE}_")
+    assert text.count(lb.NOTICE) == 1
+    assert not _LONG_DIGITS.search(text), text
+    assert not _HOST.search(text), text
+    return text
+
+
+def test_notification_with_suggestions():
+    out = lb.response(analyze(site()), 28)
+    assert out["suggestions"] and not out["balanced"]
+    text = _markdown(out)
+    assert text.startswith("**Window:** 200 hourly periods over 200.0 h (asked for 28 days).")
+    assert "**Leg mapping:** confirmed. Leg assignment matched" in text
+    imbalance = out["imbalance"]
+    assert (
+        f"**Imbalance:** typical {imbalance['typical_a']:.1f} A, "
+        f"high {imbalance['high_a']:.1f} A, {imbalance['heavier']} heavier." in text
+    )
+    first = out["suggestions"][0]
+    line = next(x for x in text.splitlines() if x.startswith("1. "))
+    assert f"**{first['circuit']}**" in line
+    assert f"space {first['from_space']} (" in line
+    assert f"→ {first['high_after_a']:.1f} A" in line
+    assert f"typical {imbalance['typical_a']:.1f} A → {first['typical_after_a']:.1f} A" in line
+    assert len([x for x in text.splitlines() if re.match(r"\d\. ", x)]) == len(out["suggestions"])
+    assert "No move clears" not in text and "balanced" not in text
+
+
+def test_notification_names_the_move_and_its_target():
+    out = lb.response(analyze(site()), 28)
+    move = {
+        "kind": "move",
+        "circuit": "Dryer",
+        "from_space": 11,
+        "to_space": 9,
+        "typical_after_a": 2.04,
+        "high_after_a": 7.56,
+    }
+    swap = {
+        "kind": "swap",
+        "circuit": "Oven",
+        "from_space": 17,
+        "to_space": 19,
+        "other": "Fridge",
+        "other_from_space": 19,
+        "typical_after_a": 3.0,
+        "high_after_a": 6.0,
+    }
+    out = {**out, "imbalance": {**out["imbalance"], "typical_a": 12.0, "high_a": 30.0}}
+    text = _markdown({**out, "suggestions": [move, swap]})
+    assert (
+        "1. Move **Dryer** from space 11 (L2) to empty space 9 (L1): "
+        "high 30.0 A → 7.6 A, typical 12.0 A → 2.0 A." in text
+    )
+    assert (
+        "2. Swap **Oven** (space 17 (L1)) with **Fridge** (space 19 (L2)): "
+        "high 30.0 A → 6.0 A, typical 12.0 A → 3.0 A." in text
+    )
+    # A flipped mapping flips the labels, and the note says so.
+    flipped = {**out, "mapping": "flipped", "mapping_note": "Every space's leg is flipped here."}
+    text = _markdown({**flipped, "suggestions": [move]})
+    assert "**Leg mapping:** flipped. Every space's leg is flipped here." in text
+    assert "from space 11 (L1) to empty space 9 (L2)" in text
+
+
+def test_notification_escapes_circuit_names():
+    out = lb.response(analyze(site()), 28)
+    item = {**out["suggestions"][0], "circuit": "Bath *fan* [up]"}
+    text = _markdown({**out, "suggestions": [item]})
+    assert r"**Bath \*fan\* \[up\]**" in text
+
+
+def test_notification_flipped_mapping():
+    circuits = site()
+    when = sorted(circuits[0].mean_w)
+    out = lb.response(analyze(circuits, legs=lugs_for(circuits, when, swap=True)), 28)
+    text = _markdown(out)
+    assert "**Leg mapping:** flipped." in text
+    assert "flipped here" in text
+
+
+def test_notification_balanced():
+    when = periods(100)
+    circuits = [
+        circuit("Circuit 1", (9,), wavy(1, 100, 500, when)),
+        circuit("Circuit 2", (11,), wavy(2, 100, 500, when)),
+    ]
+    out = lb.response(analyze(circuits), 28)
+    assert out["balanced"]
+    text = _markdown(out)
+    assert "The legs are balanced (high imbalance under 5.0 A). No moves suggested." in text
+    assert "No move clears" not in text
+    assert "**Imbalance:**" in text
+
+
+def test_notification_no_useful_move():
+    out = lb.response(analyze(site()), 28)
+    text = _markdown({**out, "suggestions": []})
+    assert "No move clears the minimum gain." in text
+    assert "balanced" not in text
+
+
+def test_notification_short_history():
+    out = lb.response(analyze(site(63 * 12, FIVE)), 28)
+    assert out["problem"] == "short_history"
+    text = _markdown(out)
+    assert text.startswith(
+        "Only 63 hours of history were usable; suggestions need 72.\n\n**Window:** "
+    )
+    assert "5-minute periods over 63.0 h" in text
+    assert "**Imbalance:**" in text
+    assert "No move clears" not in text
+
+
+@pytest.mark.parametrize(
+    ("result", "note"),
+    [
+        (lambda: analyze(site(47)), "Only 47 usable periods of history; at least 48 are needed."),
+        (lambda: analyze(site(), spaces=None), "space layout is not known"),
+    ],
+    ids=["not_enough_history", "no_layout"],
+)
+def test_notification_without_results_shows_the_problem_only(result, note):
+    text = _markdown(lb.response(result(), 28))
+    assert note in text
+    for absent in ("**Window:**", "**Imbalance:**", "**Leg mapping:**", "Ignored", "1. "):
+        assert absent not in text
+    assert len(text.split("\n\n")) == 2
+
+
+def test_notification_counts_ignored_and_not_moved_circuits():
+    out = lb.response(analyze(site()), 28)
+    ignored = [
+        {"circuit": "Range", "reason": "two_pole"},
+        {"circuit": "Dryer", "reason": "two_pole"},
+        {"circuit": "Shared", "reason": "shared_space"},
+    ]
+    held = [
+        {"circuit": "Furnace", "reason": "low_coverage"},
+        {"circuit": "Battery", "reason": "storage_or_solar"},
+        {"circuit": "Fridge", "reason": "protected"},
+        {"circuit": "Freezer", "reason": "protected"},
+    ]
+    text = _markdown({**out, "ignored": ignored, "not_moved": held})
+    assert (
+        "Ignored: 3 circuits (two-pole, shared space). "
+        "Not moved: 4 circuits (protected, battery or solar, low coverage)." in text
+    )
+    for name in ("Range", "Dryer", "Furnace", "Fridge"):
+        assert name not in text
+    one = _markdown({**out, "ignored": ignored[:1], "not_moved": []})
+    assert "Ignored: 1 circuit (two-pole)." in one
+    assert "Not moved" not in one
+    none = _markdown({**out, "ignored": [], "not_moved": []})
+    assert "Ignored" not in none and "Not moved" not in none
+
+
+def test_notification_on_error():
+    text = _markdown(None)
+    assert text == (
+        "Couldn't read or analyze this panel's recorded history. Check that the recorder is "
+        f"running, then try again.\n\n_{lb.NOTICE}_"
+    )
+
+
+def test_notification_error_matches_the_action_error():
+    strings = json.loads((COMPONENT / "strings.json").read_text())
+    assert strings["exceptions"]["leg_balance_read_failed"]["message"] == lb.READ_FAILED
+
+
+def test_notification_title_never_falls_back_to_a_host():
+    assert lb.notification_title("Garage") == "Leg balance: Garage"
+    assert lb.notification_title(None) == "Leg balance: SPAN panel"
+    assert lb.notification_title("") == "Leg balance: SPAN panel"
+
+
+# --- the button: repo checks ----------------------------------------------------------------
+
+
+def test_button_uid_is_produced_and_not_cloud_shaped():
+    snapshot = model.build_snapshot(capture_tree(), PANEL, received_at=0.0)
+    uid = leg_balance_uid(PANEL)
+    assert uid == f"{PANEL}_analyze_leg_balance"
+    assert uid in produced_uids(snapshot, PANEL)
+    assert cloud_suffix(uid) is None
+    assert not CLOUD_UID.match(uid)
+
+
+def test_button_strings_and_icon():
+    strings = (COMPONENT / "strings.json").read_text()
+    assert strings == (COMPONENT / "translations" / "en.json").read_text()
+    name = json.loads(strings)["entity"]["button"]["analyze_leg_balance"]["name"]
+    assert name == "Analyze leg balance"
+    icons = json.loads((COMPONENT / "icons.json").read_text())
+    assert icons["entity"]["button"]["analyze_leg_balance"]["default"] == "mdi:scale-balance"
+
+
+def test_button_platform_is_set_up():
+    tree = ast.parse((COMPONENT / "__init__.py").read_text())
+    platforms = next(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "PLATFORMS"
+    )
+    assert "BUTTON" in {element.attr for element in platforms.elts}
+    button = (COMPONENT / "button.py").read_text()
+    assert "if transport is None:" in button
+    assert "entity_category" not in button
+
+
+def test_notification_keeps_circuit_names_on_one_line():
+    out = lb.response(analyze(site()), 28)
+    item = {**out["suggestions"][0], "circuit": "Bath\nfan\r\nup\rstairs"}
+    text = _markdown({**out, "suggestions": [item]})
+    line = next(x for x in text.splitlines() if x.startswith("1. "))
+    assert "**Bath fan up stairs**" in line
+    assert "\r" not in text
+
+
+@pytest.mark.parametrize("problem", ["not_enough_history", "no_layout"])
+def test_notification_without_a_problem_note_falls_back(problem):
+    out = lb.response(analyze(site(47)), 28)
+    for note in (None, ""):
+        text = _markdown({**out, "problem": problem, "problem_note": note})
+        assert text == f"{lb.NO_RESULT}\n\n_{lb.NOTICE}_"

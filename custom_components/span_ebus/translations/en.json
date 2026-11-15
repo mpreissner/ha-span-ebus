@@ -440,6 +440,11 @@
         "name": "Panel link"
       }
     },
+    "button": {
+      "analyze_leg_balance": {
+        "name": "Analyze leg balance"
+      }
+    },
     "sensor": {
       "transport": {
         "name": "Transport",

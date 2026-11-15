@@ -15,6 +15,7 @@ an `Analysis`, a response or a line of text. Names and space numbers do.
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -701,6 +702,147 @@ def response(analysis: Analysis, days: int, *, feeds_over_lugs: bool = False) ->
         "problem": str(analysis.problem) if analysis.problem is not None else None,
         "problem_note": problem_note(analysis),
     }
+
+
+# --- the button's notification ---------------------------------------------------------
+
+READ_FAILED = (
+    "Couldn't read or analyze this panel's recorded history. Check that the recorder is "
+    "running, then try again."
+)
+NO_RESULT = "There's no result for this panel yet."
+_DEFAULT_PANEL_NAME = "SPAN panel"
+_PERIOD_WORDS = {"hour": "hourly", "5minute": "5-minute"}
+_IGNORED_WORDS = {
+    Exclusion.TWO_POLE: "two-pole",
+    Exclusion.SHARED_SPACE: "shared space",
+    Exclusion.NO_SPACES: "no space",
+}
+_NOT_MOVED_WORDS = {
+    Exclusion.PROTECTED: "protected",
+    Exclusion.STORAGE_OR_SOLAR: "battery or solar",
+    Exclusion.FEEDS_PANEL: "feeds another panel",
+    Exclusion.FED_BY_PANEL: "fed by another panel",
+    Exclusion.REMOTE_CT: "remote CT",
+    Exclusion.LOW_COVERAGE: "low coverage",
+}
+_MARKDOWN = re.compile(r"([\\`*_{}\[\]<>#|~])")
+
+
+def notification_title(name_by_user: str | None) -> str:
+    """The notification's title: the user's own name for the panel, else a fixed one.
+
+    Never the entry title or the device's default name: a local default names the host.
+    """
+    return f"Leg balance: {name_by_user or _DEFAULT_PANEL_NAME}"
+
+
+def _md(text: Any) -> str:
+    """A circuit name as literal text in markdown, on one line."""
+    flat = str(text).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return _MARKDOWN.sub(r"\\\1", flat)
+
+
+def _a(value: Any) -> str:
+    return f"{float(value):.1f} A"
+
+
+def _circuits(n: int) -> str:
+    return f"{n} circuit" if n == 1 else f"{n} circuits"
+
+
+def _reasons(items: Any, words: Mapping[Exclusion, str]) -> tuple[int, list[str]]:
+    """How many items, and their reasons in a fixed order, each once."""
+    present = {item.get("reason") for item in items}
+    return len(items), [word for reason, word in words.items() if str(reason) in present]
+
+
+def _suggestion_line(item: Mapping[str, Any], flipped: bool, typical: Any, high: Any) -> str:
+    def where(space: int) -> str:
+        return f"space {space} ({leg_of(space, flipped=flipped).label})"
+
+    if item.get("kind") == "swap":
+        what = (
+            f"Swap **{_md(item['circuit'])}** ({where(item['from_space'])}) with "
+            f"**{_md(item['other'])}** ({where(item['other_from_space'])})"
+        )
+    else:
+        what = (
+            f"Move **{_md(item['circuit'])}** from {where(item['from_space'])} to empty "
+            f"{where(item['to_space'])}"
+        )
+    return (
+        f"{what}: high {_a(high)} → {_a(item['high_after_a'])}, "
+        f"typical {_a(typical)} → {_a(item['typical_after_a'])}."
+    )
+
+
+def notification_markdown(response: Mapping[str, Any] | None) -> str:
+    """The button's notification, from the action's response; None means the read failed.
+
+    Circuit names and space numbers only, never ids, serials or hosts. The notice is
+    always last.
+    """
+    blocks: list[str] = []
+    if response is None:
+        blocks.append(READ_FAILED)
+    else:
+        blocks.extend(_result_blocks(response))
+    blocks.append(f"_{NOTICE}_")
+    return "\n\n".join(blocks)
+
+
+def _result_blocks(response: Mapping[str, Any]) -> list[str]:
+    problem = response.get("problem")
+    note = response.get("problem_note")
+    if problem in (Problem.NOT_ENOUGH_HISTORY, Problem.NO_LAYOUT):
+        return [note or NO_RESULT]
+    blocks: list[str] = []
+    if problem == Problem.SHORT_HISTORY and note:
+        blocks.append(note)
+
+    window = response["window"]
+    period = _PERIOD_WORDS.get(window["period"], str(window["period"]))
+    blocks.append(
+        f"**Window:** {window['periods_used']} {period} periods over "
+        f"{float(window['span_hours']):.1f} h (asked for {window['days']} days)."
+    )
+    blocks.append(f"**Leg mapping:** {response['mapping']}. {response['mapping_note']}")
+    imbalance = response["imbalance"]
+    heavier = f", {imbalance['heavier']} heavier" if imbalance.get("heavier") else ""
+    blocks.append(
+        f"**Imbalance:** typical {_a(imbalance['typical_a'])}, "
+        f"high {_a(imbalance['high_a'])}{heavier}."
+    )
+
+    suggestions = response.get("suggestions") or []
+    if response.get("balanced"):
+        blocks.append(
+            f"The legs are balanced (high imbalance under {BALANCED_BELOW_A:.1f} A). "
+            "No moves suggested."
+        )
+    elif suggestions:
+        flipped = response.get("mapping") == MappingCheck.FLIPPED
+        blocks.append(
+            "\n".join(
+                f"{n}. "
+                + _suggestion_line(item, flipped, imbalance["typical_a"], imbalance["high_a"])
+                for n, item in enumerate(suggestions, start=1)
+            )
+        )
+    elif problem != Problem.SHORT_HISTORY:
+        blocks.append("No move clears the minimum gain.")
+
+    parts = []
+    ignored, why = _reasons(response.get("ignored") or [], _IGNORED_WORDS)
+    if ignored:
+        parts.append(f"Ignored: {_circuits(ignored)} ({', '.join(why)}).")
+    held, why = _reasons(response.get("not_moved") or [], _NOT_MOVED_WORDS)
+    if held:
+        parts.append(f"Not moved: {_circuits(held)} ({', '.join(why)}).")
+    if parts:
+        blocks.append(" ".join(parts))
+    return blocks
 
 
 def use_short_term(hourly: Analysis) -> bool:
